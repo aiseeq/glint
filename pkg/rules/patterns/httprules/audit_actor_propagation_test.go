@@ -464,6 +464,56 @@ func requote(repo *Repo) {
 	assert.Equal(t, "actor_loss", violations[0].Context["pattern"])
 }
 
+func TestAuditActorPropagationRule_MethodCallFormsUseSourceCallPosition(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		line int
+	}{
+		{
+			name: "method value",
+			body: `func update(r *Repo) {
+	write := r.AppendStatusHistory
+	write("txn", "admin:update", 0)
+}`,
+			line: 3,
+		},
+		{
+			name: "method value in field",
+			body: `type svc struct { write func(txnID string, source string, actorUserID int) }
+func newSvc(r *Repo) *svc { return &svc{write: r.AppendStatusHistory} }
+func (s *svc) update() { s.write("txn", "admin:update", 0) }`,
+			line: 3,
+		},
+		{
+			name: "embedded method",
+			body: `type Wrapped struct { *Repo }
+func update(w Wrapped) {
+	w.AppendStatusHistory("txn", "admin:update", 0)
+}`,
+			line: 3,
+		},
+		{
+			name: "method expression",
+			body: `func update(r *Repo) {
+	write := (*Repo).AppendStatusHistory
+	write(r, "txn", "admin:update", 0)
+}`,
+			line: 3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			violations := analyzeAuditModule(t, map[string]string{
+				"audit.go": "package audit\n" + auditSinkDefinition + "\n" + tt.body + "\n",
+			})
+			require.Len(t, violations, 1)
+			assert.Equal(t, tt.line+6, violations[0].Line)
+			assert.Equal(t, "actor_loss", violations[0].Context["pattern"])
+		})
+	}
+}
+
 func TestAuditActorPropagationRule_APIActorZeroIsSafe(t *testing.T) {
 	violations := analyzeAuditModule(t, map[string]string{
 		"audit.go": `package audit

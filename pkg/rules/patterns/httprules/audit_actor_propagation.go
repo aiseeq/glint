@@ -155,6 +155,9 @@ func (r *AuditActorPropagationRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	if err := analyzer.run(); err != nil {
 		return nil, err
 	}
+	if err := analyzer.addIndirectAdminZeroSinkFindings(); err != nil {
+		return nil, err
+	}
 	sort.Slice(analyzer.violations, func(i, j int) bool {
 		left, right := analyzer.violations[i], analyzer.violations[j]
 		if left.File != right.File {
@@ -168,6 +171,130 @@ func (r *AuditActorPropagationRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 		return leftPattern < rightPattern
 	})
 	return analyzer.violations, nil
+}
+
+func (a *auditActorAnalyzer) addIndirectAdminZeroSinkFindings() error {
+	seen := make(map[string]bool, len(a.violations))
+	for _, violation := range a.violations {
+		seen[fmt.Sprintf("%s:%d", violation.File, violation.Line)] = true
+	}
+	for _, packageContext := range a.project.Packages {
+		if packageContext == nil || packageContext.Package == nil || packageContext.Package.TypesInfo == nil {
+			continue
+		}
+		for _, file := range packageContext.Package.Syntax {
+			var scanErr error
+			ast.Inspect(file, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sinkName, isSink := a.indirectAdminZeroSinkCall(call, packageContext.Package.TypesInfo)
+				if !isSink {
+					return true
+				}
+				position := a.project.FileSet.PositionFor(call.Pos(), false)
+				key := fmt.Sprintf("%s:%d", position.Filename, position.Line)
+				if seen[key] {
+					return true
+				}
+				fileContext, err := a.project.File(position.Filename)
+				if err != nil {
+					scanErr = fmt.Errorf("map indirect sink call position %s: %w", position, err)
+					return false
+				}
+				violation := a.rule.CreateViolation(fileContext.Path, position.Line, "human audit action reaches "+sinkName+" without its actor")
+				violation.WithColumn(position.Column)
+				violation.WithCode(fileContext.GetLine(position.Line))
+				violation.WithSuggestion("Forward the original audit actor and source through every synchronous wrapper")
+				violation.WithContext("pattern", "actor_loss")
+				violation.WithContext("sink", sinkName)
+				violation.WithContext("function", "indirect sink call")
+				violation.WithContext("human_action", true)
+				a.violations = append(a.violations, violation)
+				seen[key] = true
+				return true
+			})
+			if scanErr != nil {
+				return scanErr
+			}
+		}
+	}
+	return nil
+}
+
+func (a *auditActorAnalyzer) indirectAdminZeroSinkCall(call *ast.CallExpr, info *types.Info) (string, bool) {
+	if _, known := auditCallSyntaxName(call, info); known {
+		return "", false
+	}
+	callSignature, ok := auditCallableSignature(info.TypeOf(call.Fun))
+	if !ok {
+		return "", false
+	}
+	sinkName, actorIndex, sourceIndex, isSink := a.auditSinkRolesForSignature(callSignature)
+	if !isSink {
+		return "", false
+	}
+	if actorIndex >= len(call.Args) || sourceIndex >= len(call.Args) {
+		return "", false
+	}
+	actorValue := info.Types[call.Args[actorIndex]].Value
+	sourceValue := info.Types[call.Args[sourceIndex]].Value
+	return sinkName, auditConstantIsZeroOrNil(actorValue) && auditConstantIsAdminSource(sourceValue)
+}
+
+func (a *auditActorAnalyzer) auditSinkRolesForSignature(signature *types.Signature) (string, int, int, bool) {
+	for _, packageContext := range a.project.Packages {
+		if packageContext == nil || packageContext.Package == nil || packageContext.Package.TypesInfo == nil {
+			continue
+		}
+		for _, file := range packageContext.Package.Syntax {
+			for _, declaration := range file.Decls {
+				function, ok := declaration.(*ast.FuncDecl)
+				if !ok || !a.rule.sinks[function.Name.Name] {
+					continue
+				}
+				object, ok := packageContext.Package.TypesInfo.Defs[function.Name].(*types.Func)
+				if !ok {
+					continue
+				}
+				sinkSignature, ok := auditCallableSignature(object.Type())
+				if ok && types.Identical(signature, sinkSignature) {
+					actorIndex, sourceIndex, inScope := auditSignatureRoles(sinkSignature)
+					return function.Name.Name, actorIndex, sourceIndex, inScope
+				}
+			}
+		}
+	}
+	return "", -1, -1, false
+}
+
+func auditSignatureRoles(signature *types.Signature) (actor, source int, ok bool) {
+	actor, source = -1, -1
+	for i := 0; i < signature.Params().Len(); i++ {
+		parameter := signature.Params().At(i)
+		if auditActorParameterName(parameter.Name()) && auditActorRoleType(parameter.Type()) {
+			if actor >= 0 {
+				return -1, -1, false
+			}
+			actor = i
+		}
+		if auditSourceParameterNames[parameter.Name()] && auditSourceRoleType(parameter.Type()) {
+			if source >= 0 {
+				return -1, -1, false
+			}
+			source = i
+		}
+	}
+	return actor, source, actor >= 0 && source >= 0
+}
+
+func auditConstantIsZeroOrNil(value constant.Value) bool {
+	return value != nil && value.Kind() == constant.Int && constant.Sign(value) == 0
+}
+
+func auditConstantIsAdminSource(value constant.Value) bool {
+	return value != nil && value.Kind() == constant.String && strings.HasPrefix(constant.StringVal(value), "admin")
 }
 
 // auditProjectHasCandidateSink is a cheap syntax scan that avoids constructing
@@ -247,6 +374,13 @@ func auditPackageHasCandidateSink(packageContext *core.GoPackageContext, fileSet
 		}
 		candidate := false
 		ast.Inspect(file, func(node ast.Node) bool {
+			if selector, ok := node.(*ast.SelectorExpr); ok {
+				selection := pkg.TypesInfo.Selections[selector]
+				if selection != nil && selection.Kind() == types.MethodExpr && auditCandidateFunctionName(selection.Obj().Name(), sinks) {
+					candidate = true
+					return false
+				}
+			}
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -423,6 +557,7 @@ type auditActorAnalyzer struct {
 	rule                      *AuditActorPropagationRule
 	project                   *core.GoProjectContext
 	targets                   map[ssa.CallInstruction][]*ssa.Function
+	callSites                 map[*ssa.Function][]auditCallSite
 	sourcePackages            map[*ssa.Package]bool
 	sourceFiles               map[string]bool
 	sources                   map[*ssa.Function]bool
@@ -507,6 +642,9 @@ func buildAuditCallIndex(program *ssa.Program, fset *token.FileSet) *auditCallIn
 				if static := call.Common().StaticCallee(); static != nil {
 					index.addTarget(call, static)
 				}
+				for _, closure := range auditClosureFunctions(call.Common().Value, make(map[ssa.Value]bool)) {
+					index.addTarget(call, closure)
+				}
 			}
 		}
 	}
@@ -529,6 +667,50 @@ func buildAuditCallIndex(program *ssa.Program, fset *token.FileSet) *auditCallIn
 	return index
 }
 
+func auditClosureFunctions(value ssa.Value, visited map[ssa.Value]bool) []*ssa.Function {
+	if value == nil || visited[value] {
+		return nil
+	}
+	visited[value] = true
+	switch current := value.(type) {
+	case *ssa.MakeClosure:
+		if function, ok := current.Fn.(*ssa.Function); ok {
+			return []*ssa.Function{function}
+		}
+	case *ssa.Phi:
+		var functions []*ssa.Function
+		for _, edge := range current.Edges {
+			functions = append(functions, auditClosureFunctions(edge, visited)...)
+		}
+		return functions
+	case *ssa.ChangeType:
+		return auditClosureFunctions(current.X, visited)
+	case *ssa.ChangeInterface:
+		return auditClosureFunctions(current.X, visited)
+	case *ssa.Convert:
+		return auditClosureFunctions(current.X, visited)
+	case *ssa.MakeInterface:
+		return auditClosureFunctions(current.X, visited)
+	case *ssa.UnOp:
+		return auditStoredClosureFunctions(current.X, visited)
+	}
+	return nil
+}
+
+func auditStoredClosureFunctions(address ssa.Value, visited map[ssa.Value]bool) []*ssa.Function {
+	if address == nil || address.Referrers() == nil {
+		return nil
+	}
+	var functions []*ssa.Function
+	for _, reference := range *address.Referrers() {
+		store, ok := reference.(*ssa.Store)
+		if ok && store.Addr == address {
+			functions = append(functions, auditClosureFunctions(store.Val, visited)...)
+		}
+	}
+	return functions
+}
+
 func (index *auditCallIndex) addTarget(call ssa.CallInstruction, target *ssa.Function) {
 	if slices.Contains(index.targets[call], target) {
 		return
@@ -543,7 +725,8 @@ func (a *auditActorAnalyzer) initialize() error {
 	if err != nil {
 		return err
 	}
-	a.targets = index.targets
+	a.targets = auditTargetsWithFunctionValues(index, a.rule.sinks)
+	a.callSites = index.callSites
 	a.sources = make(map[*ssa.Function]bool)
 	for _, function := range index.functions {
 		if a.sourcePackages[function.Package()] && a.sourceFiles[index.files[function]] {
@@ -569,7 +752,96 @@ func (a *auditActorAnalyzer) initialize() error {
 			}
 		}
 	}
+	for _, function := range index.functions {
+		if a.isSourceFunction(function) || function.Syntax() != nil || len(function.Blocks) == 0 {
+			continue
+		}
+		for _, site := range index.callSites[function] {
+			if !a.isSourceFunction(site.caller) {
+				continue
+			}
+			caller := a.rootState(site.caller)
+			children, err := a.childStates(caller, a.hasHumanRoot(site.caller), site.call, function)
+			if err != nil {
+				return err
+			}
+			for _, child := range children {
+				child.human = child.human || a.auditChildHasAdminZeroActor(site.call, function)
+				a.enqueue(child)
+				if err := a.reportSyntheticActorLoss(child, site.call); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	return a.validateSourceSinkCalls(index)
+}
+
+// auditTargetsWithFunctionValues resolves indirect calls whose function value
+// has a sink signature, including values stored in struct fields. SSA's CHA
+// graph does not always connect these calls to the method value's origin.
+func auditTargetsWithFunctionValues(index *auditCallIndex, sinks map[string]bool) map[ssa.CallInstruction][]*ssa.Function {
+	targets := make(map[ssa.CallInstruction][]*ssa.Function, len(index.targets))
+	for call, callees := range index.targets {
+		targets[call] = append([]*ssa.Function(nil), callees...)
+	}
+	var sinkFunctions []*ssa.Function
+	for _, function := range index.functions {
+		if sinks[function.Name()] && function.Object() != nil {
+			if _, ok := auditRoles(function); ok {
+				sinkFunctions = append(sinkFunctions, function)
+			}
+		}
+	}
+	for _, function := range index.functions {
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common().StaticCallee() != nil {
+					continue
+				}
+				callSignature := call.Common().Signature()
+				for _, sink := range sinkFunctions {
+					sinkSignature, _ := auditCallableSignature(sink.Object().Type())
+					if types.Identical(callSignature, sinkSignature) && !slices.Contains(targets[call], sink) {
+						targets[call] = append(targets[call], sink)
+					}
+				}
+			}
+		}
+	}
+	return targets
+}
+
+func (a *auditActorAnalyzer) reportSyntheticActorLoss(state auditState, sourceCall ssa.CallInstruction) error {
+	if !state.human || state.function == nil || state.function.Syntax() != nil {
+		return nil
+	}
+	adminZeroActor := a.auditChildHasAdminZeroActor(sourceCall, state.function)
+	for _, block := range state.function.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			for _, target := range a.targets[call] {
+				if !a.rule.sinks[target.Name()] || !a.isSourceFunction(target) {
+					continue
+				}
+				roles, inScope := auditRoles(target)
+				actuals := auditCallActuals(call.Common())
+				if !inScope || roles.actor >= len(actuals) {
+					continue
+				}
+				actor := actuals[roles.actor]
+				if !adminZeroActor && auditValueDepends(actor, state.function, state.actor, auditTaintActor, make(map[ssa.Value]bool)) && !auditLiteralZeroOrNil(actor) {
+					continue
+				}
+				return a.report(state, true, sourceCall, target, "actor_loss", "human audit action reaches "+target.Name()+" without its actor")
+			}
+		}
+	}
+	return nil
 }
 
 // auditStatusCallsWithoutSiblingAudit finds status writes that share a
@@ -843,7 +1115,17 @@ func auditExportedFunction(function *ssa.Function) bool {
 // isSourceFunction reports whether the function is declared in an analyzed
 // file of a loaded package.
 func (a *auditActorAnalyzer) isSourceFunction(function *ssa.Function) bool {
-	return a.sources[function]
+	if function == nil {
+		return false
+	}
+	if a.sources[function] {
+		return true
+	}
+	if function.Syntax() == nil || a.project == nil || a.project.FileSet == nil {
+		return false
+	}
+	position := a.project.FileSet.PositionFor(function.Syntax().Pos(), false)
+	return position.IsValid() && a.sourceFiles[filepath.Clean(position.Filename)]
 }
 
 // validateSourceSinkCalls checks every call that may reach a sink declared in
@@ -862,7 +1144,7 @@ func (a *auditActorAnalyzer) validateSourceSinkCalls(index *auditCallIndex) erro
 			if len(actuals) != len(target.Params) || roles.actor >= len(actuals) || roles.source >= len(actuals) {
 				return fmt.Errorf("malformed audit sink call to %s: got %d actuals for %d formal parameters", target, len(actuals), len(target.Params))
 			}
-			if _, _, err := a.sourcePosition(site.call.Pos()); err != nil {
+			if _, _, err := a.sourcePositionForCall(site.call.Pos(), site.caller, target); err != nil {
 				return fmt.Errorf("validate source sink call to %s from %s: %w", target, site.caller, err)
 			}
 		}
@@ -938,6 +1220,9 @@ func (a *auditActorAnalyzer) analyzeFunction(state auditState) error {
 					if err := a.inspectSink(state, localHuman, call, target); err != nil {
 						return err
 					}
+					if len(auditCallActuals(call.Common())) != len(target.Params) {
+						continue
+					}
 				}
 				children, err := a.childStates(state, localHuman, call, target)
 				if err != nil {
@@ -995,11 +1280,15 @@ func (a *auditActorAnalyzer) childStates(
 		}
 	}
 	base.human = auditChildHuman(call, localHuman, base.actor, len(target.Params))
+	base.human = base.human || a.auditChildHasAdminZeroActor(call, target)
 
 	if len(target.FreeVars) == 0 {
 		return []auditState{base}, nil
 	}
 	bindings := auditClosureBindings(call.Common().Value, target, make(map[ssa.Value]bool))
+	if len(bindings) == 0 && strings.HasSuffix(target.Name(), "$bound") && len(target.FreeVars) == 1 {
+		bindings = [][]ssa.Value{{nil}}
+	}
 	if len(bindings) == 0 {
 		return []auditState{}, nil
 	}
@@ -1020,7 +1309,7 @@ func (a *auditActorAnalyzer) childStates(
 				child.source.set(bit)
 			}
 		}
-		child.human = auditChildHuman(call, localHuman, child.actor, len(target.Params))
+		child.human = base.human || auditChildHuman(call, localHuman, child.actor, len(target.Params))
 		children = append(children, child)
 	}
 	return children, nil
@@ -1033,6 +1322,65 @@ func auditChildHuman(call ssa.CallInstruction, localHuman bool, actor auditTaint
 	default:
 		return localHuman || actor.any()
 	}
+}
+
+func (a *auditActorAnalyzer) auditChildHasAdminZeroActor(call ssa.CallInstruction, target *ssa.Function) bool {
+	actuals := auditCallActuals(call.Common())
+	if strings.HasSuffix(target.Name(), "$thunk") || strings.HasSuffix(target.Name(), "$bound") {
+		hasAdminSource, hasZeroActor := false, false
+		for _, actual := range actuals {
+			hasAdminSource = hasAdminSource || auditAdminLiteral(actual)
+			if actual != nil && actual.Type() != nil && auditActorRoleType(actual.Type()) {
+				hasZeroActor = hasZeroActor || auditLiteralZeroOrNil(actual)
+			}
+		}
+		if hasAdminSource && hasZeroActor {
+			return true
+		}
+	}
+	roles, ok := auditRoles(target)
+	if ok && roles.actor < len(actuals) && roles.source < len(actuals) &&
+		auditLiteralZeroOrNil(actuals[roles.actor]) && auditAdminLiteral(actuals[roles.source]) {
+		return true
+	}
+	for _, block := range target.Blocks {
+		for _, instruction := range block.Instrs {
+			innerCall, ok := instruction.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			for _, sink := range a.targets[innerCall] {
+				sinkRoles, inScope := auditRoles(sink)
+				if !inScope {
+					continue
+				}
+				innerActuals := auditCallActuals(innerCall.Common())
+				if sinkRoles.actor >= len(innerActuals) || sinkRoles.source >= len(innerActuals) {
+					continue
+				}
+				actorIndex, actorOK := auditFunctionParameterIndex(innerActuals[sinkRoles.actor], target)
+				sourceIndex, sourceOK := auditFunctionParameterIndex(innerActuals[sinkRoles.source], target)
+				if actorOK && sourceOK && actorIndex < len(actuals) && sourceIndex < len(actuals) &&
+					auditLiteralZeroOrNil(actuals[actorIndex]) && auditAdminLiteral(actuals[sourceIndex]) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func auditFunctionParameterIndex(value ssa.Value, function *ssa.Function) (int, bool) {
+	parameter, ok := value.(*ssa.Parameter)
+	if !ok || parameter.Parent() != function {
+		return 0, false
+	}
+	for index, candidate := range function.Params {
+		if candidate == parameter {
+			return index, true
+		}
+	}
+	return 0, false
 }
 
 func auditCallActuals(common *ssa.CallCommon) []ssa.Value {
@@ -1068,8 +1416,24 @@ func auditClosureBindings(value ssa.Value, target *ssa.Function, visited map[ssa
 		return auditClosureBindings(current.X, target, visited)
 	case *ssa.MakeInterface:
 		return auditClosureBindings(current.X, target, visited)
+	case *ssa.UnOp:
+		return auditStoredClosureBindings(current.X, target, visited)
 	}
 	return nil
+}
+
+func auditStoredClosureBindings(address ssa.Value, target *ssa.Function, visited map[ssa.Value]bool) [][]ssa.Value {
+	if address == nil || address.Referrers() == nil {
+		return nil
+	}
+	var bindings [][]ssa.Value
+	for _, reference := range *address.Referrers() {
+		store, ok := reference.(*ssa.Store)
+		if ok && store.Addr == address {
+			bindings = append(bindings, auditClosureBindings(store.Val, target, visited)...)
+		}
+	}
+	return bindings
 }
 
 type auditSinkRoles struct {
@@ -1130,7 +1494,15 @@ func (a *auditActorAnalyzer) inspectSink(
 		return nil
 	}
 	actuals := auditCallActuals(call.Common())
-	if len(actuals) != len(target.Params) || roles.actor >= len(actuals) || roles.source >= len(actuals) {
+	boundMethodValue := len(actuals)+1 == len(target.Params) && target.Object() != nil && func() bool {
+		signature, ok := target.Object().Type().(*types.Signature)
+		return ok && signature.Recv() != nil
+	}()
+	if boundMethodValue {
+		roles.actor--
+		roles.source--
+	}
+	if (!boundMethodValue && len(actuals) != len(target.Params)) || roles.actor < 0 || roles.actor >= len(actuals) || roles.source < 0 || roles.source >= len(actuals) {
 		return fmt.Errorf("malformed audit sink call to %s: got %d actuals for %d formal parameters", target, len(actuals), len(target.Params))
 	}
 
@@ -1160,7 +1532,7 @@ func (a *auditActorAnalyzer) report(
 	pattern string,
 	message string,
 ) error {
-	position, file, err := a.sourcePosition(call.Pos())
+	position, file, err := a.sourcePositionForCall(call.Pos(), state.function, target)
 	if err != nil {
 		return fmt.Errorf("report %s at call to %s: %w", pattern, target, err)
 	}
@@ -1201,6 +1573,86 @@ func (a *auditActorAnalyzer) sourcePosition(pos token.Pos) (token.Position, *cor
 		return token.Position{}, nil, fmt.Errorf("map valid source sink call position %s: %w", position, err)
 	}
 	return position, file, nil
+}
+
+// sourcePositionForCall maps calls synthesized by SSA (bound methods, method
+// thunks, and promoted method wrappers) to the source call that enters the
+// synthesized function.
+func (a *auditActorAnalyzer) sourcePositionForCall(pos token.Pos, caller, sink *ssa.Function) (token.Position, *core.FileContext, error) {
+	if pos != token.NoPos {
+		return a.sourcePosition(pos)
+	}
+	position, ok := a.sourceCallPosition(caller, make(map[*ssa.Function]bool))
+	if ok {
+		return a.sourcePosition(position)
+	}
+	if position, ok = a.sourceSinkCallPosition(sink); ok {
+		return a.sourcePosition(position)
+	}
+	return a.sourcePosition(token.NoPos)
+}
+
+func (a *auditActorAnalyzer) sourceSinkCallPosition(sink *ssa.Function) (token.Pos, bool) {
+	if sink == nil || sink.Object() == nil {
+		return token.NoPos, false
+	}
+	sinkSignature, hasSinkSignature := auditCallableSignature(sink.Object().Type())
+	for _, packageContext := range a.project.Packages {
+		if packageContext == nil || packageContext.Package == nil || packageContext.Package.TypesInfo == nil {
+			continue
+		}
+		sourceFiles := auditSourceFileSet(packageContext.Files)
+		for _, file := range packageContext.Package.Syntax {
+			filePos := a.project.FileSet.PositionFor(file.Pos(), false)
+			if !filePos.IsValid() || !sourceFiles[filepath.Clean(filePos.Filename)] {
+				continue
+			}
+			var position token.Pos
+			ast.Inspect(file, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == sink.Name() {
+					selection := packageContext.Package.TypesInfo.Selections[selector]
+					if selection != nil && selection.Obj().Pos() == sink.Object().Pos() {
+						position = call.Pos()
+						return false
+					}
+				}
+				callSignature, hasCallSignature := auditCallableSignature(packageContext.Package.TypesInfo.TypeOf(call.Fun))
+				if hasSinkSignature && hasCallSignature && types.Identical(callSignature, sinkSignature) {
+					position = call.Pos()
+					return false
+				}
+				return true
+			})
+			if position != token.NoPos {
+				return position, true
+			}
+		}
+	}
+	return token.NoPos, false
+}
+
+func (a *auditActorAnalyzer) sourceCallPosition(function *ssa.Function, visited map[*ssa.Function]bool) (token.Pos, bool) {
+	if function == nil || visited[function] {
+		return token.NoPos, false
+	}
+	visited[function] = true
+	var synthesizedCaller *ssa.Function
+	for _, site := range a.callSites[function] {
+		if site.call.Pos() != token.NoPos && a.isSourceFunction(site.caller) {
+			return site.call.Pos(), true
+		}
+		if site.caller != nil && !a.isSourceFunction(site.caller) {
+			synthesizedCaller = site.caller
+		}
+	}
+	if synthesizedCaller != nil {
+		return a.sourceCallPosition(synthesizedCaller, visited)
+	}
+	return token.NoPos, false
 }
 
 type auditTaintKind uint8
