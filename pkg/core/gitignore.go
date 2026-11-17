@@ -8,10 +8,35 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
+
+// runGitLsFiles lists the files git tracks under rel; a test replaces it to
+// count the runs.
+var runGitLsFiles = func(root, rel string) ([]byte, error) {
+	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", ":(literal)"+filepath.ToSlash(rel))
+	return cmd.Output()
+}
+
+// skipDirectoryCacheKey names one answer of shouldSkipDirectory: the
+// directory and the state of the git index it was read from.
+type skipDirectoryCacheKey struct {
+	root       string
+	rel        string
+	indexSize  int64
+	indexMtime int64
+	hasIndex   bool
+}
+
+// skipDirectoryCache keeps the answers for the process: every walk of a run
+// asks about the same build directories.
+var skipDirectoryCache = struct {
+	sync.Mutex
+	answers map[skipDirectoryCacheKey]bool
+}{answers: make(map[skipDirectoryCacheKey]bool)}
 
 // gitignoreIndex накапливает паттерны .gitignore по мере обхода проекта и
 // отвечает, игнорирует ли git данный путь. Семантика паттернов (якоря,
@@ -234,8 +259,22 @@ func shouldSkipDirectory(name, path, root string, explicit []string, insideRepo 
 	if err != nil {
 		return false, fmt.Errorf("make %q relative to project root %q: %w", path, root, err)
 	}
-	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", ":(literal)"+filepath.ToSlash(rel))
-	output, err := cmd.Output()
+	key := skipDirectoryCacheKey{root: root, rel: rel}
+	// The state of the index joins the key: a file added to git between two
+	// runs in one process changes the answer.
+	if gitDir, gitDirErr := resolveGitDir(findGitRepoRoot(root)); gitDirErr == nil && gitDir != "" {
+		if info, statErr := os.Stat(filepath.Join(gitDir, "index")); statErr == nil {
+			key.hasIndex = true
+			key.indexSize = info.Size()
+			key.indexMtime = info.ModTime().UnixNano()
+		}
+	}
+	skipDirectoryCache.Lock()
+	defer skipDirectoryCache.Unlock()
+	if answer, ok := skipDirectoryCache.answers[key]; ok {
+		return answer, nil
+	}
+	output, err := runGitLsFiles(root, rel)
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return true, nil
@@ -246,7 +285,9 @@ func shouldSkipDirectory(name, path, root string, explicit []string, insideRepo 
 		}
 		return false, fmt.Errorf("list tracked files in %q: %w", path, err)
 	}
-	return len(output) == 0, nil
+	answer := len(output) == 0
+	skipDirectoryCache.answers[key] = answer
+	return answer, nil
 }
 
 // skipIgnored returns filepath.SkipDir for a directory git ignores while the
