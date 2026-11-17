@@ -226,6 +226,38 @@ export const MAX_UPLOAD_BYTES = 10485760;`
 	assert.Equal(t, []string{"src/limits.ts:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/limits.ts", ts))
 }
 
+func TestMirrorCommentCopyAdditionalSourcePhrases(t *testing.T) {
+	source := `// copied from httpx.IsAdmin
+export const isAdmin = true
+
+// Copy from backend.Limits.
+export const LIMITS = []
+
+// Mirrors the table in tables.Roles.
+export const ROLES = []
+
+// Ported from server.Validate.
+export function validate() { return true }
+
+// Duplicated from billing.Fees.
+export const FEES = []
+
+// Body copied from the request before parsing.
+export const rawBody = ''
+
+// The panel mirrors the request it shows.
+export const panel = ''
+
+// Ported from the old design of this page.
+export const layout = ''
+
+// Copied from the clipboard buffer when the user pastes.
+export const paste = ''`
+	assert.Equal(t, []string{
+		"src/copy.ts:11", "src/copy.ts:14", "src/copy.ts:2", "src/copy.ts:5", "src/copy.ts:8",
+	}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/copy.ts", source))
+}
+
 // A single call of something other than the named source is no wrapper: the
 // copied logic sits in its arguments, and no other rule sees it. A call given a
 // function literal (isAdmin) holds its logic in the literal: the body rule
