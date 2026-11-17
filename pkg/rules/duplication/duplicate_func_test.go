@@ -8,6 +8,7 @@ import (
 	"go/types"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -889,6 +890,92 @@ func Zeta(value int) int {
 		require.Len(t, violations, 1)
 		assert.Contains(t, violations[0].Message, "function Alpha")
 	}
+}
+
+func TestDuplicateFuncOfLibraryPeerRootsUseSameOwnerGitHead(t *testing.T) {
+	rulestest.IsolateUserCache(t, t.TempDir())
+	t.Setenv("GOWORK", "off")
+	root := t.TempDir()
+	peers := filepath.Join(root, "peers")
+	projectA := filepath.Join(peers, "project-a")
+	projectB := filepath.Join(peers, "project-b")
+	projectC := filepath.Join(peers, "project-c")
+	projectD := filepath.Join(peers, "project-d")
+	writePeerModule(t, projectA, "example.com/owner/a", peerAmountCopy("tidyAmount", ",", " ", "0", "0"))
+	writePeerModule(t, projectB, "example.com/owner/b", peerAmountCopy("cleanAmount", ",", " ", "0", "0"))
+	writePeerModule(t, projectC, "example.com/owner/c", peerAmountCopy("padAmount", ";", "\t", "-", "00"))
+	writePeerModule(t, projectD, "other.org/project-d", peerAmountCopy("dAmount", ",", " ", "0", "0"))
+	// A dirty working tree must not replace the committed candidate index.
+	require.NoError(t, os.WriteFile(filepath.Join(projectB, "amount.go"), []byte("package project\n"), 0o644))
+
+	check := func(dir string, wantFinding bool, wantName string) {
+		t.Helper()
+		source, err := os.ReadFile(filepath.Join(dir, "amount.go"))
+		require.NoError(t, err)
+		ctx := loadLibraryTestProject(t, dir, dir, string(source))
+		rule := NewDuplicateFuncOfLibraryRule()
+		require.NoError(t, rule.Configure(map[string]any{"peer_roots": []string{filepath.Join(peers, "*")}}))
+		violations, err := rule.AnalyzeGoProject(ctx)
+		require.NoError(t, err)
+		if !wantFinding {
+			assert.Empty(t, violations)
+			return
+		}
+		require.Len(t, violations, 1)
+		assert.Contains(t, violations[0].Message, wantName)
+		assert.Contains(t, violations[0].Message, "example.com/owner/")
+	}
+	check(projectA, true, "cleanAmount")
+	gitPeerTest(t, projectB, "checkout", "--", "amount.go")
+	check(projectB, true, "tidyAmount")
+	check(projectC, false, "")
+	check(projectD, false, "")
+
+	ctx := loadLibraryTestProject(t, projectA, projectA, peerAmountCopy("localAmount", ",", " ", "0", "0"))
+	rule := NewDuplicateFuncOfLibraryRule()
+	violations, err := rule.AnalyzeGoProject(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, violations, "without peer_roots, the rule keeps its previous behavior")
+	withPeers := NewDuplicateFuncOfLibraryRule()
+	require.NoError(t, withPeers.Configure(map[string]any{"peer_roots": []string{filepath.Join(peers, "*")}}))
+	before, err := withPeers.CacheInputs(projectA)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(projectB, "amount.go"), []byte(peerAmountCopy("changedAmount", ",", " ", "0", "0")), 0o644))
+	gitPeerTest(t, projectB, "add", "amount.go")
+	gitPeerTest(t, projectB, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "peer update")
+	after, err := withPeers.CacheInputs(projectA)
+	require.NoError(t, err)
+	assert.NotEqual(t, before, after, "a peer commit changes the project result cache inputs")
+}
+
+func peerAmountCopy(name, comma, space, empty, prefix string) string {
+	return fmt.Sprintf(`package project
+import "strings"
+func %s(raw string) string {
+	value := strings.TrimSpace(raw)
+	value = strings.ReplaceAll(value, %q, "")
+	value = strings.ReplaceAll(value, %q, "")
+	if value == "" { return %q }
+	if strings.HasPrefix(value, ".") { value = %q + value }
+	if strings.HasSuffix(value, ".") { value = value + "0" }
+	return value
+}
+`, name, comma, space, empty, prefix)
+}
+
+func gitPeerTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+}
+
+func writePeerModule(t *testing.T, dir, modulePath, source string) {
+	t.Helper()
+	writeLibraryTestModule(t, dir, modulePath, map[string]string{"amount.go": source})
+	gitPeerTest(t, dir, "init", "-q")
+	gitPeerTest(t, dir, "add", "-A")
+	gitPeerTest(t, dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
 }
 
 func TestDuplicateFuncOfLibraryIgnoresDiskCacheErrors(t *testing.T) {

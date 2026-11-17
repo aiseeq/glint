@@ -1,12 +1,15 @@
 package duplication
 
 import (
+	"archive/tar"
+	"bytes"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -59,9 +62,12 @@ func NewDuplicateFuncOfLibraryRule() *DuplicateFuncOfLibraryRule {
 		loadLibraryKeys: loadLibraryFunctionKeys,
 		BaseRule: rules.NewBaseRule(
 			"duplicate-func-of-library", "duplication",
-			"Compares function bodies with exported functions from directly required libraries of the same owner and library_modules; function names do not matter",
+			"Compares function bodies with exported functions from required libraries and git HEADs of same-owner peer modules in peer_roots; function names do not matter",
 			core.SeverityMedium,
-		).DeclareSettings(rules.NewSettingSpec("library_modules", "string list", []string{}, "Module path prefixes treated as libraries.", []string{"example.com/shared"}))}
+		).DeclareSettings(
+			rules.NewSettingSpec("library_modules", "string list", []string{}, "Module path prefixes treated as libraries.", []string{"example.com/shared"}),
+			rules.NewSettingSpec("peer_roots", "string list", []string{}, "Glob patterns for sibling module directories checked at their git HEAD.", []string{"~/work/*"}),
+		)}
 }
 
 // ReportsOn reports the files the rule names: Go and TypeScript sources.
@@ -74,6 +80,33 @@ func (r *DuplicateFuncOfLibraryRule) ReadsNonGoFiles() {}
 
 // ReadsOtherFiles reports that findings depend on the library sources.
 func (r *DuplicateFuncOfLibraryRule) ReadsOtherFiles() bool { return true }
+
+// CacheInputs adds the git HEADs of configured peer modules to project findings.
+func (r *DuplicateFuncOfLibraryRule) CacheInputs(root string) (string, error) {
+	roots, _, err := r.GetStringListSetting("peer_roots")
+	if err != nil || len(roots) == 0 {
+		return "", err
+	}
+	path, err := readProjectModule(root)
+	if err != nil {
+		return "", err
+	}
+	project := goModule{path: path, dir: root, goMod: filepath.Join(root, "go.mod")}
+	peers, err := peerModules(project, roots)
+	if err != nil {
+		return "", err
+	}
+	var inputs []string
+	for _, peer := range peers {
+		sha, err := peerHeadSHA(peer.dir)
+		if err != nil {
+			return "", fmt.Errorf("read peer module %s cache input: %w", peer.path, err)
+		}
+		inputs = append(inputs, peer.path+"="+sha)
+	}
+	slices.Sort(inputs)
+	return toolcache.Key([]byte(strings.Join(inputs, "\x00"))), nil
+}
 
 // ResetState forgets the libraries of the previous root.
 func (r *DuplicateFuncOfLibraryRule) ResetState() {
@@ -106,7 +139,10 @@ type libraryCacheEntry struct {
 	Keys map[string][]libraryFunction `json:"keys"`
 	Near []libraryNearFunction        `json:"near,omitempty"`
 }
-type libraryMatch struct{ name, module, packageName, importPath string }
+type libraryMatch struct {
+	name, module, packageName, importPath string
+	peer                                  bool
+}
 
 // moduleLibrary is what the libraries of one project module offer: the exact
 // bodies of their Go functions and the near forms of their Go and TypeScript
@@ -139,11 +175,233 @@ func (r *DuplicateFuncOfLibraryRule) AnalyzeGoProject(ctx *core.GoProjectContext
 	if len(modules) == 0 {
 		return nil, nil
 	}
+	peerRoots, _, err := r.GetStringListSetting("peer_roots")
+	if err != nil {
+		return nil, err
+	}
 	libraries := r.loadProjectLibraryKeys(modules, allowed, false)
+	if len(peerRoots) > 0 {
+		for id, project := range modules {
+			if lib := libraries[id]; lib != nil {
+				r.mergePeerModules(lib, project, peerRoots)
+			}
+		}
+	}
 	return rules.AnalyzeTypedRunFiles(ctx, r.Name(), func(file *core.FileContext, info *types.Info) []*core.Violation {
 		id := fileModules[filepath.Clean(file.Path)]
 		return r.findLibraryDuplicates(ctx, file, info, libraries[id])
 	})
+}
+
+func (r *DuplicateFuncOfLibraryRule) mergePeerModules(lib *moduleLibrary, project goModule, roots []string) {
+	modules, err := peerModules(project, roots)
+	if err != nil {
+		r.warnLibraryInput(project.path, "find peer modules", err)
+		return
+	}
+	cache := toolcache.New("duplicate-func-of-library")
+	for _, peer := range modules {
+		sha, err := peerHeadSHA(peer.dir)
+		if err != nil {
+			r.warnLibraryInput(peer.path, "read peer git HEAD", err)
+			continue
+		}
+		buildHash, err := duplicateLibraryBuildHash()
+		if err != nil {
+			r.warnLibraryInput(peer.path, "identify analyzer", err)
+			continue
+		}
+		key := toolcache.Key([]byte("peer"), []byte(peer.path), []byte(sha), []byte(buildHash))
+		entry, hit, err := r.loadCache(cache, key)
+		if err != nil {
+			r.warnLibraryInput(peer.path, "read cache", err)
+		}
+		if !hit {
+			source, tempRoot, err := peerHeadSource(peer.dir, sha)
+			if err != nil {
+				r.warnLibraryInput(peer.path, "read peer git HEAD", err)
+				continue
+			}
+			entry, err = loadPeerFunctionKeys(source)
+			if removeErr := os.RemoveAll(tempRoot); removeErr != nil {
+				r.warnLibraryInput(peer.path, "remove temporary peer source", removeErr)
+			}
+			if err != nil {
+				r.warnLibraryInput(peer.path, "load source", err)
+				continue
+			}
+			if err := r.storeCache(cache, key, entry); err != nil {
+				r.warnLibraryInput(peer.path, "write cache", err)
+			}
+		}
+		for body, functions := range entry.Keys {
+			for _, fn := range functions {
+				candidate := libraryMatch{name: fn.Name, module: peer.path, packageName: fn.Package, importPath: fn.ImportPath, peer: true}
+				if current, ok := lib.keys[body]; !ok || libraryMatchLess(candidate, current) {
+					lib.keys[body] = candidate
+				}
+			}
+		}
+		for i := range entry.Near {
+			fn := &entry.Near[i]
+			if fn.Lang == "go" {
+				candidate := libraryMatch{name: fn.Name, module: peer.path, packageName: fn.Package, importPath: fn.ImportPath, peer: true}
+				lib.goCandidates = append(lib.goCandidates, newNearCandidate(candidate, fn.Body))
+			}
+		}
+	}
+	lib.goNear = newNearIndex(lib.goCandidates, minGoNearCopyTokens)
+}
+
+func peerModules(project goModule, roots []string) ([]goModule, error) {
+	required := make(map[string]bool)
+	goModPath := filepath.Join(project.dir, "go.mod")
+	data, err := os.ReadFile(goModPath)
+	if err != nil {
+		return nil, fmt.Errorf("read project module file: %w", err)
+	}
+	mod, err := modfile.Parse(goModPath, data, nil)
+	if err != nil {
+		return nil, fmt.Errorf("parse project module file: %w", err)
+	}
+	for _, req := range mod.Require {
+		required[req.Mod.Path] = true
+	}
+	seen := make(map[string]bool)
+	var peers []goModule
+	for _, pattern := range roots {
+		pattern, err = expandPeerHome(pattern)
+		if err != nil {
+			return nil, err
+		}
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("glob %q: %w", pattern, err)
+		}
+		for _, dir := range matches {
+			info, err := os.Stat(dir)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("stat peer root %s: %w", dir, err)
+			}
+			if !info.IsDir() {
+				continue
+			}
+			path, err := readProjectModule(dir)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("read peer module in %s: %w", dir, err)
+			}
+			if path == project.path || required[path] || !sameOwner(project.path, path) {
+				continue
+			}
+			peer := goModule{path: path, dir: dir, goMod: filepath.Join(dir, "go.mod")}
+			id := moduleIdentity(peer)
+			if !seen[id] && filepath.Clean(peer.goMod) != filepath.Clean(project.goMod) {
+				seen[id] = true
+				peers = append(peers, peer)
+			}
+		}
+	}
+	slices.SortFunc(peers, func(a, b goModule) int { return strings.Compare(a.path, b.path) })
+	return peers, nil
+}
+
+func expandPeerHome(pattern string) (string, error) {
+	if pattern != "~" && !strings.HasPrefix(pattern, "~/") {
+		return pattern, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("expand home in peer root %q: %w", pattern, err)
+	}
+	return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(pattern, "~"), string(filepath.Separator))), nil
+}
+
+func peerHeadSHA(dir string) (string, error) {
+	shaCmd := exec.Command("git", "-C", dir, "rev-parse", "HEAD")
+	shaBytes, err := shaCmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("module is not available in git HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(shaBytes)), nil
+}
+
+func peerHeadSource(dir, sha string) (string, string, error) {
+	prefixCmd := exec.Command("git", "-C", dir, "rev-parse", "--show-prefix")
+	prefixBytes, err := prefixCmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("find module path inside git repository: %w", err)
+	}
+	prefix := filepath.Clean(filepath.FromSlash(strings.TrimSpace(string(prefixBytes))))
+	archiveArgs := []string{"-C", dir, "archive", "--format=tar", sha}
+	if prefix != "." {
+		archiveArgs = append(archiveArgs, "--", filepath.ToSlash(prefix))
+	}
+	archiveCmd := exec.Command("git", archiveArgs...)
+	archive, err := archiveCmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("archive HEAD %s: %w", sha, err)
+	}
+	root, err := os.MkdirTemp("", "glint-peer-head-")
+	if err != nil {
+		return "", "", fmt.Errorf("create temporary peer source: %w", err)
+	}
+	if err := extractPeerArchive(root, archive); err != nil {
+		if removeErr := os.RemoveAll(root); removeErr != nil {
+			return "", "", errors.Join(err, fmt.Errorf("remove partial peer source %s: %w", root, removeErr))
+		}
+		return "", "", err
+	}
+	tempRoot := root
+	if prefix != "." {
+		root = filepath.Join(root, prefix)
+	}
+	return root, tempRoot, nil
+}
+
+func extractPeerArchive(root string, data []byte) error {
+	reader := tar.NewReader(bytes.NewReader(data))
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read peer HEAD archive: %w", err)
+		}
+		name := filepath.Clean(filepath.FromSlash(header.Name))
+		if name == "." || filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("unsafe peer HEAD archive path %q", header.Name)
+		}
+		path := filepath.Join(root, name)
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(path, fs.FileMode(header.Mode)); err != nil {
+				return fmt.Errorf("create peer source directory %s: %w", path, err)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return fmt.Errorf("create peer source parent directory for %s: %w", path, err)
+			}
+			file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fs.FileMode(header.Mode))
+			if err != nil {
+				return fmt.Errorf("create peer source file %s: %w", path, err)
+			}
+			_, copyErr := io.Copy(file, reader)
+			closeErr := file.Close()
+			if copyErr != nil {
+				return fmt.Errorf("copy peer source file %s: %w", path, copyErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("close peer source file %s: %w", path, closeErr)
+			}
+		}
+	}
 }
 
 func projectModules(ctx *core.GoProjectContext) (map[string]goModule, map[string]string) {
@@ -345,6 +603,16 @@ func exactLibraryMatch(fd *ast.FuncDecl, info *types.Info, keys map[string]libra
 }
 
 func (r *DuplicateFuncOfLibraryRule) libraryViolation(file *core.FileContext, fd *ast.FuncDecl, line int, match libraryMatch, score float64, exact bool) *core.Violation {
+	if match.peer {
+		message := fmt.Sprintf("Function %s duplicates function %s in peer module %s", fd.Name.Name, match.name, match.module)
+		if !exact {
+			message = fmt.Sprintf("Function %s is a near copy (%d%% alike) of function %s in peer module %s", funcDisplayName(fd), int(score*100), match.name, match.module)
+		}
+		v := r.CreateViolation(file.RelPath, line, message)
+		v.WithCode(strings.TrimSpace(file.GetLine(line)))
+		v.WithSuggestion(fmt.Sprintf("Move the shared function %s into a common module", match.name))
+		return v
+	}
 	packageName := match.packageName
 	for _, spec := range file.GoAST.Imports {
 		importPath, err := strconv.Unquote(spec.Path.Value)
@@ -693,6 +961,14 @@ func libraryCacheKey(dep libraryDependency, digest, buildHash string) string {
 }
 
 func loadLibraryFunctionKeys(dir string) (libraryCacheEntry, error) {
+	return loadFunctionKeys(dir, false)
+}
+
+func loadPeerFunctionKeys(dir string) (libraryCacheEntry, error) {
+	return loadFunctionKeys(dir, true)
+}
+
+func loadFunctionKeys(dir string, includeUnexported bool) (libraryCacheEntry, error) {
 	fset := token.NewFileSet()
 	pkgs, err := packages.Load(&packages.Config{Mode: packages.LoadSyntax | packages.NeedModule, Dir: dir, Fset: fset, Tests: false}, "./...")
 	if err != nil {
@@ -710,7 +986,7 @@ func loadLibraryFunctionKeys(dir string) (libraryCacheEntry, error) {
 			}
 			for _, decl := range file.Decls {
 				fd, ok := decl.(*ast.FuncDecl)
-				if !ok || fd.Name == nil || !fd.Name.IsExported() || !IsDuplicateFuncBodyCandidate(fd, pkg.TypesInfo) {
+				if !ok || fd.Name == nil || !includeUnexported && !fd.Name.IsExported() || !IsDuplicateFuncBodyCandidate(fd, pkg.TypesInfo) {
 					continue
 				}
 				fn, ok := pkg.TypesInfo.Defs[fd.Name].(*types.Func)
