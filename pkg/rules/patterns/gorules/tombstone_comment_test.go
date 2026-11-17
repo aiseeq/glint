@@ -423,6 +423,55 @@ func g() {}
 	}
 }
 
+// A with/without phrase can describe the state in which an operation happens:
+// "with quotes removed" describes the value, not code that was deleted.
+func TestTombstoneComment_WithRemovedDescribesProcessing(t *testing.T) {
+	code := `package word
+
+// Value is the literal value with quotes removed; a value with an expansion keeps its
+// quotes.
+type Assign struct{ Value string }
+
+// Clean returns the word with the quotes and escapes
+// removed; an empty word stays empty.
+func Clean() {}
+
+// Raw keeps the text as written: the source with nothing removed, so a printer
+// can show it back.
+func Raw() {}
+
+// Trim returns s without the leading tabs and the trailing
+// spaces removed.
+func Trim() {}
+
+// Keep the word with its quotes removed; an empty word stays empty.
+func keep() {}
+
+// The text, with trailing spaces removed, goes to the caller.
+func trim() {}
+
+// removed: the old parser
+func old() {}
+
+// Removed the legacy fallback in favour of Clean.
+func fallback() {}
+
+// SplitFields removed — use strings.Fields.
+func split() {}
+
+// It used the old tokenizer, which is now
+// removed.
+func tokenizer() {}
+`
+	var lines []int
+	for _, v := range NewTombstoneCommentRule().AnalyzeFile(core.NewFileContext("word.go", ".", []byte(code), nil)) {
+		lines = append(lines, v.Line)
+	}
+	if !slices.Equal(lines, []int{25, 28, 31, 35}) {
+		t.Fatalf("want only the four tombstones on lines 25, 28, 31, 35, got %v", lines)
+	}
+}
+
 func TestTombstoneComment_RuntimeRemovalConditionsAreBehavior(t *testing.T) {
 	code := `package runtime
 

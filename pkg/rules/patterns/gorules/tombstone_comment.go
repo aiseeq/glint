@@ -61,6 +61,8 @@ type TombstoneCommentRule struct {
 	noteStart    *regexp.Regexp
 	noteEnd      *regexp.Regexp
 	remover      *regexp.Regexp
+	withPhrase   *regexp.Regexp
+	withVerb     *regexp.Regexp
 }
 
 // NewTombstoneCommentRule creates the rule
@@ -102,6 +104,11 @@ func NewTombstoneCommentRule() *TombstoneCommentRule {
 		// removes ("one it removed", "the rows they deleted"): the word is a
 		// verb of the program, not a note on code.
 		remover: regexp.MustCompile(`(?i)\b(?:i|it|they|we|you|he|she)\s+(?:(?:has|have|had|\w+ly)\s+)?$`),
+		// "with quotes removed" and "without the trailing spaces removed"
+		// describe the state produced by processing, not deleted code. Keep
+		// this to a short noun phrase; clause markers and auxiliaries end it.
+		withPhrase: regexp.MustCompile(`(?i)\b(?:with|without)\b[^.!?;:—–]*$`),
+		withVerb:   regexp.MustCompile(`(?i)\b(?:is|are|was|were|be|being|been|has|have|had|does|do|did|can|could|will|would|should|may|might|must|that|which|who|where|when)\b`),
 	}
 }
 
@@ -141,7 +148,7 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 			loc[1] -= size
 		}
 		before := sentenceBefore(comment[:loc[0]], ctx.Lines, i)
-		if r.behaviorAux.MatchString(before) || r.remover.MatchString(before) || r.runtimeState.MatchString(before) {
+		if r.behaviorAux.MatchString(before) || r.remover.MatchString(before) || r.runtimeState.MatchString(before) || r.isWithProcessingPhrase(before, ctx.Lines, i) {
 			continue // "are removed", "будут удалены" — behavior, not a tombstone
 		}
 		if loc[0] > 0 && strings.IndexByte("='\"`.>/-_", comment[loc[0]-1]) >= 0 {
@@ -181,18 +188,45 @@ func (r *TombstoneCommentRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	return violations
 }
 
+// isWithProcessingPhrase reports whether the removal word follows a short
+// with/without phrase without a verb or clause marker inside it.
+func (r *TombstoneCommentRule) isWithProcessingPhrase(before string, lines []string, i int) bool {
+	if r.matchesWithProcessingPhrase(before) {
+		return true
+	}
+	above, ok := sentenceAbove(lines, i)
+	return ok && r.matchesWithProcessingPhrase(above+" "+strings.TrimLeft(before, " \t"))
+}
+
+func (r *TombstoneCommentRule) matchesWithProcessingPhrase(before string) bool {
+	loc := r.withPhrase.FindStringIndex(before)
+	return loc != nil && !r.withVerb.MatchString(before[loc[0]:])
+}
+
 // sentenceBefore returns the text of a comment line before a word: when the
 // word opens the line and the comment line above ends mid-sentence, the
 // sentence started there ("the entry it described was / deleted, or ...").
 func sentenceBefore(before string, lines []string, i int) string {
-	if strings.TrimSpace(before) != "" || i == 0 {
+	if strings.TrimSpace(before) != "" {
 		return before
+	}
+	if above, ok := sentenceAbove(lines, i); ok {
+		return above + " " + strings.TrimLeft(before, " \t")
+	}
+	return before
+}
+
+// sentenceAbove returns the comment line above line i when it ends
+// mid-sentence, so the sentence goes on at line i.
+func sentenceAbove(lines []string, i int) (string, bool) {
+	if i == 0 {
+		return "", false
 	}
 	above := strings.TrimRight(commentTextOfLine(lines[i-1]), " \t")
 	if above == "" || strings.HasPrefix(above, "\t") || strings.ContainsRune(sentenceMarks, lastRune(above)) {
-		return before
+		return "", false
 	}
-	return above + " " + strings.TrimLeft(before, " \t")
+	return above, true
 }
 
 // lastRune returns the last character of a non-empty string.
