@@ -27,6 +27,7 @@ import (
 	"github.com/aiseeq/glint/pkg/fix"
 	"github.com/aiseeq/glint/pkg/output"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/doccheck"
 	"github.com/aiseeq/glint/pkg/toolcache"
 
 	// Rule packages - imported for init() registration
@@ -164,6 +165,12 @@ var checkCmd = &cobra.Command{
 	RunE:  runCheck,
 }
 
+var instructionSizeCmd = &cobra.Command{
+	Use:   "instruction-size [paths...]",
+	Short: "Show the size and limit share of instruction files",
+	RunE:  runInstructionSize,
+}
+
 var rulesCmd = &cobra.Command{
 	Use:   "rules [name]",
 	Short: "List available rules",
@@ -281,6 +288,7 @@ func init() {
 		},
 	})
 	rootCmd.AddCommand(checkCmd)
+	rootCmd.AddCommand(instructionSizeCmd)
 	rootCmd.AddCommand(guideCmd)
 	rootCmd.AddCommand(rulesCmd)
 	rootCmd.AddCommand(explainCmd)
@@ -403,6 +411,56 @@ func analyzeConfigurationRules(enabledRules []rules.Rule, cfg *core.Config, cont
 		}
 	}
 	return findings, nil
+}
+
+func runInstructionSize(cmd *cobra.Command, args []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("find project directory: %w", err)
+	}
+	cfg, enabledRules, err := loadConfig(cwd)
+	if err != nil {
+		return err
+	}
+	var rule *doccheck.InstructionSizeRule
+	for _, candidate := range enabledRules {
+		if sized, ok := candidate.(*doccheck.InstructionSizeRule); ok {
+			rule = sized
+			break
+		}
+	}
+	if rule == nil {
+		return errors.New("instruction-size rule is disabled")
+	}
+	walker := core.NewWalker(cwd, cfg).WithGoParsing(false).
+		WithRequiredFilePredicate(func(path string) bool { return core.InstructionKindOf(path) != core.NotInstruction }).
+		WithExcludedInstructions(true)
+	if len(args) > 0 {
+		scopes := make([]string, 0, len(args))
+		for _, arg := range args {
+			path, err := filepath.Abs(arg)
+			if err != nil {
+				return fmt.Errorf("resolve path %q: %w", arg, err)
+			}
+			scopes = append(scopes, path)
+		}
+		walker.WithScopes(scopes)
+	}
+	contexts, walkErrors := walker.WalkSync()
+	if len(walkErrors) > 0 {
+		return fmt.Errorf("walk instruction files: %w", errors.Join(walkErrors...))
+	}
+	sort.Slice(contexts, func(i, j int) bool { return contexts[i].RelPath < contexts[j].RelPath })
+	for _, ctx := range contexts {
+		size, limit, unit, ok := rule.MeasureInstructionSize(ctx.Path, ctx.Lines)
+		if !ok {
+			continue
+		}
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s  %d %s  %d%% of %d\n", ctx.RelPath, size, unit, size*100/limit, limit); err != nil {
+			return fmt.Errorf("write instruction size: %w", err)
+		}
+	}
+	return nil
 }
 
 func runCheck(_ *cobra.Command, args []string) (runErr error) {

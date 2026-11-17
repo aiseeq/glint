@@ -50,6 +50,21 @@ func TestInstructionSize(t *testing.T) {
 	}
 }
 
+func TestMeasureInstructionSize(t *testing.T) {
+	rule := NewInstructionSizeRule()
+	if err := rule.Configure(map[string]any{"max_bytes": 100, "max_chars": 80}); err != nil {
+		t.Fatal(err)
+	}
+	size, limit, unit, ok := rule.MeasureInstructionSize("CLAUDE.md", []string{"abc", "<!-- hidden -->", "я"})
+	if !ok || size != 6 || limit != 100 || unit != "bytes" {
+		t.Fatalf("got %d %d %q %v", size, limit, unit, ok)
+	}
+	size, limit, unit, ok = rule.MeasureInstructionSize("skills/demo/SKILL.md", []string{"яx"})
+	if !ok || size != 2 || limit != 80 || unit != "characters" {
+		t.Fatalf("got %d %d %q %v", size, limit, unit, ok)
+	}
+}
+
 func TestInstructionSizeDefaults(t *testing.T) {
 	require.Len(t, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 24575)), 1)
 	require.Equal(t, core.SeverityLow, instructionSizeFindings(t, nil, "CLAUDE.md", strings.Repeat("a", 24575))[0].Severity)

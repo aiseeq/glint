@@ -94,13 +94,8 @@ func (r *InstructionSizeRule) Configure(settings map[string]any) error {
 // of the limit, so it is shrunk before it gets there; the finding names the
 // reference share it is shrunk to.
 func (r *InstructionSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	var m sizeMeasure
-	switch core.InstructionKindOf(ctx.Path) {
-	case core.AlwaysLoaded:
-		m = sizeMeasure{filepath.Base(ctx.Path), len(withoutBlockComments(ctx.Lines)), r.maxBytes, "bytes", "it is loaded into every session"}
-	case core.Skill:
-		m = sizeMeasure{"SKILL.md", utf8.RuneCountInString(withoutBlockComments(ctx.Lines)), r.maxChars, "characters", "after compacting the context Claude Code keeps only the first 5000 tokens of a skill"}
-	default:
+	m, ok := r.measure(ctx.Path, ctx.Lines)
+	if !ok {
 		return nil
 	}
 	message, near := m.message(r.nearPercent)
@@ -113,6 +108,24 @@ func (r *InstructionSizeRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 	}
 	v.WithSuggestion(fmt.Sprintf("Do not stop at just under the limit, shrink it to the reference of %d%%: move a rule into a mechanism (a check, a hook), a file read on demand (.claude/rules with paths, a reference file of the skill), or drop it", referenceShare))
 	return []*core.Violation{v}
+}
+
+// MeasureInstructionSize reports the comment-free size and configured limit
+// for a path this rule measures.
+func (r *InstructionSizeRule) MeasureInstructionSize(path string, lines []string) (size, limit int, unit string, ok bool) {
+	m, ok := r.measure(path, lines)
+	return m.size, m.limit, m.unit, ok
+}
+
+func (r *InstructionSizeRule) measure(path string, lines []string) (sizeMeasure, bool) {
+	switch core.InstructionKindOf(path) {
+	case core.AlwaysLoaded:
+		return sizeMeasure{filepath.Base(path), len(withoutBlockComments(lines)), r.maxBytes, "bytes", "it is loaded into every session"}, true
+	case core.Skill:
+		return sizeMeasure{"SKILL.md", utf8.RuneCountInString(withoutBlockComments(lines)), r.maxChars, "characters", "after compacting the context Claude Code keeps only the first 5000 tokens of a skill"}, true
+	default:
+		return sizeMeasure{}, false
+	}
 }
 
 // referenceShare is the share of the limit, in percent, a file at the limit
