@@ -36,6 +36,14 @@ func TestFrontendMoneyArithmeticModifierCallsGrowLinearly(t *testing.T) {
 	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 1000, scale), scale, limit)
 }
 
+func TestFrontendMoneyArithmeticNestedParameterListsGrowLinearly(t *testing.T) {
+	source := func(n int) string {
+		return strings.Repeat("(", n) + strings.Repeat("static ", n) + "a+b()" + strings.Repeat(") {}", 2*n)
+	}
+	const scale, limit = 8, 24
+	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 1000, scale), scale, limit)
+}
+
 func TestFrontendMoneyArithmeticModifierCallFailGrowsLinearly(t *testing.T) {
 	source := func(n int) string {
 		return strings.Repeat("static ", n) + "a+b()" + strings.Repeat(") {}", n)

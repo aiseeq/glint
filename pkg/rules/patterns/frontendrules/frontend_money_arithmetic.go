@@ -529,6 +529,7 @@ type arrowBodyRange struct{ start, end int }
 func functionParameterNames(code string, functions *patternkit.JsFunctions, brackets *patternkit.JsBrackets) map[string]bool {
 	names := make(map[string]bool)
 	processed := make(map[int]bool)
+	var ranges [][2]int
 	for _, brace := range brackets.Braces() {
 		fn, ok := functions.ScopeAtBrace(brace.Open)
 		if !ok {
@@ -541,8 +542,16 @@ func functionParameterNames(code string, functions *patternkit.JsFunctions, brac
 		processed[open] = true
 		close, ok := brackets.Closing(open)
 		if ok && close < fn.Brace {
-			addParameterIdentifiers(code, open+1, close, names)
+			ranges = append(ranges, [2]int{open + 1, close})
 		}
+	}
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i][0] < ranges[j][0] })
+	for i := 0; i < len(ranges); {
+		start, end := ranges[i][0], ranges[i][1]
+		for i++; i < len(ranges) && ranges[i][0] <= end; i++ {
+			end = max(end, ranges[i][1])
+		}
+		addParameterIdentifiers(code, start, end, names)
 	}
 	return names
 }
