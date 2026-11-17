@@ -15,6 +15,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/output"
 )
@@ -43,8 +44,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	rules := fs.String("r", "", "comma-separated rules")
 	jobs := fs.String("j", "", "glint parallelism")
 	only := fs.String("only", "", "comma-separated project names")
+	remindOnly := fs.Bool("remind", false, "remind whether consumers were compared for this commit")
 	fs.Usage = func() {
-		_, _ = fmt.Fprintln(stderr, "usage: consumers [-config PATH] [-old PATH] [-new PATH] [-r rules] [-j N] [-only a,b]")
+		_, _ = fmt.Fprintln(stderr, "usage: consumers [-config PATH] [-old PATH] [-new PATH] [-r rules] [-j N] [-only a,b] [-remind]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -54,6 +56,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if fs.NArg() != 0 {
 		_, _ = fmt.Fprintln(stderr, "consumers: unexpected arguments")
 		return 2
+	}
+	if *remindOnly {
+		cwd, err := os.Getwd()
+		if err != nil {
+			_, _ = fmt.Fprintf(stdout, "no consumers comparison for this commit (current directory unknown: %v); run graft consumers before the install\n", err)
+		} else {
+			remind(cwd, stdout)
+		}
+		return 0
 	}
 	oldAbs, err := filepath.Abs(*oldPath)
 	if err != nil {
@@ -107,10 +118,31 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// runs in a directory of its own and leaves the installed glint's caches.
 	newCache := filepath.Join(userCache, "glint", "consumers-new")
 
+	diffs, errs, slowerByProject, newestRule := compareTargets(targets, oldAbs, newAbs, *rules, *jobs, newCache, stdout, stderr)
+	printTimingComparison(stdout, slowerByProject, newestRule)
+	skipped := slices.Sorted(maps.Keys(cfg.skips))
+	_, _ = fmt.Fprintf(stdout, "%d projects, %d with differences, %d errors, skipped: %s\n", len(targets), diffs, errs, strings.Join(skipped, ", "))
+	if errs > 0 {
+		return 2
+	}
+	markerState := "full"
+	if *rules != "" || *only != "" {
+		markerState = "partial"
+	}
+	markCurrentRun(markerState, stderr)
+	if diffs > 0 {
+		return 1
+	}
+	return 0
+}
+
+func compareTargets(targets []string, oldAbs, newAbs, rules, jobs, newCache string, stdout, stderr io.Writer) (int, int, []projectTimings, slowRule) {
 	diffs, errs := 0, 0
+	var slowerByProject []projectTimings
+	var newestRule slowRule
 	for _, p := range targets {
 		name := filepath.Base(p)
-		oldIssues, oldErr := check(oldAbs, p, *rules, *jobs, "")
+		oldIssues, oldTimes, oldErr := check(oldAbs, p, rules, jobs, "")
 		if errors.Is(oldErr, errUnknownRule) {
 			// A rule the new build adds: the installed glint has no findings of it.
 			oldIssues, oldErr = nil, nil
@@ -120,11 +152,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 			errs++
 			continue
 		}
-		newIssues, newErr := check(newAbs, p, *rules, *jobs, newCache)
+		newIssues, newTimes, newErr := check(newAbs, p, rules, jobs, newCache)
 		if newErr != nil {
 			_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, newErr)
 			errs++
 			continue
+		}
+		slower, slowestNew := compareRuleTimings(oldTimes, newTimes)
+		if len(slower) > 0 {
+			slowerByProject = append(slowerByProject, projectTimings{project: name, rules: slower})
+		}
+		if slowestNew.duration > newestRule.duration || slowestNew.duration == newestRule.duration && slowestNew.name < newestRule.name {
+			slowestNew.project = name
+			newestRule = slowestNew
 		}
 		added, removed := difference(oldIssues, newIssues)
 		if len(added)+len(removed) == 0 {
@@ -139,15 +179,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 			printIssue(stdout, "-", removed[i])
 		}
 	}
-	skipped := slices.Sorted(maps.Keys(cfg.skips))
-	_, _ = fmt.Fprintf(stdout, "%d projects, %d with differences, %d errors, skipped: %s\n", len(targets), diffs, errs, strings.Join(skipped, ", "))
-	if errs > 0 {
-		return 2
+	return diffs, errs, slowerByProject, newestRule
+}
+
+func markCurrentRun(state string, stderr io.Writer) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "consumers: find current directory for run marker: %v\n", err)
+		return
 	}
-	if diffs > 0 {
-		return 1
+	if err := writeConsumerMarker(cwd, state); err != nil {
+		_, _ = fmt.Fprintf(stderr, "consumers: write run marker: %v\n", err)
 	}
-	return 0
 }
 
 func readConfig(path string) (config, error) {
@@ -166,11 +209,13 @@ func readConfig(path string) (config, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		kind, value, ok := strings.Cut(line, " ")
-		if !ok || strings.TrimSpace(value) == "" {
-			return config{}, fmt.Errorf("%s:%d: expected 'root <dir>' or 'skip <name>'", path, n+1)
+		kind, value := "root", line
+		if directive, argument, ok := strings.Cut(line, " "); directive == "root" || directive == "skip" {
+			if !ok || strings.TrimSpace(argument) == "" {
+				return config{}, fmt.Errorf("%s:%d: expected 'root <dir>' or 'skip <name>'", path, n+1)
+			}
+			kind, value = directive, strings.TrimSpace(argument)
 		}
-		value = strings.TrimSpace(value)
 		switch kind {
 		case "root":
 			if strings.HasPrefix(value, "~/") {
@@ -261,8 +306,8 @@ func skipUnreadable(path, root string, err error) error {
 var errUnknownRule = errors.New("unknown rule")
 
 // check runs glint over dir; a non-empty cacheDir becomes its GLINT_CACHE_DIR.
-func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, error) {
-	args := []string{"check", "-o", "json", "--no-color"}
+func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, map[string]time.Duration, error) {
+	args := []string{"check", "-o", "json", "--no-color", "--timing", "--no-cache"}
 	if rules != "" {
 		args = append(args, "-r", rules)
 	}
@@ -282,26 +327,195 @@ func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, error) {
 	var report output.JSONReport
 	if e := json.Unmarshal(out.Bytes(), &report); e != nil {
 		if strings.Contains(stderr.String(), `unknown rule "`) {
-			return nil, fmt.Errorf("%w: %s", errUnknownRule, strings.TrimSpace(stderr.String()))
+			return nil, nil, fmt.Errorf("%w: %s", errUnknownRule, strings.TrimSpace(stderr.String()))
 		}
 		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
 		if len(lines) > 3 {
 			lines = lines[:3]
 		}
-		return nil, fmt.Errorf("no valid JSON: %w; stderr: %s", e, strings.Join(lines, " | "))
+		return nil, nil, fmt.Errorf("no valid JSON: %w; stderr: %s", e, strings.Join(lines, " | "))
 	}
 	if err != nil {
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) {
-			return nil, fmt.Errorf("run glint: %w", err)
+			return nil, nil, fmt.Errorf("run glint: %w", err)
 		}
 		// A rule panic still prints the findings of the other rules: the
 		// report lacks that rule's findings, so the run is an error.
 		if panics := panicLines(stderr.String()); panics != "" {
-			return nil, fmt.Errorf("rule panic: %s", panics)
+			return nil, nil, fmt.Errorf("rule panic: %s", panics)
 		}
 	}
-	return report.Issues, nil
+	return report.Issues, parseRuleTimings(stderr.String()), nil
+}
+
+type slowRule struct {
+	name     string
+	project  string
+	duration time.Duration
+	previous time.Duration
+	delta    time.Duration
+}
+
+type projectTimings struct {
+	project string
+	rules   []slowRule
+}
+
+func parseRuleTimings(report string) map[string]time.Duration {
+	got := make(map[string]time.Duration)
+	inRules := false
+	for line := range strings.SplitSeq(report, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "RULE" && fields[1] == "TOTAL" {
+			inRules = true
+			continue
+		}
+		if !inRules {
+			continue
+		}
+		if len(fields) < 2 || strings.HasPrefix(line, "  (") || strings.HasPrefix(line, "  IN FLIGHT") {
+			if strings.HasPrefix(line, "  IN FLIGHT") {
+				inRules = false
+			}
+			continue
+		}
+		duration, err := time.ParseDuration(fields[1])
+		if err == nil {
+			got[fields[0]] = duration
+		}
+	}
+	return got
+}
+
+func compareRuleTimings(old, current map[string]time.Duration) ([]slowRule, slowRule) {
+	var slower []slowRule
+	var slowestNew slowRule
+	for name, duration := range current {
+		if duration < time.Millisecond {
+			continue
+		}
+		previous, exists := old[name]
+		if !exists {
+			if duration > slowestNew.duration || duration == slowestNew.duration && name < slowestNew.name {
+				slowestNew = slowRule{name: name, duration: duration}
+			}
+			continue
+		}
+		if previous < time.Millisecond {
+			continue
+		}
+		delta := duration - previous
+		if delta >= 300*time.Millisecond && delta*2 >= previous {
+			slower = append(slower, slowRule{name: name, duration: duration, previous: previous, delta: delta})
+		}
+	}
+	sort.Slice(slower, func(i, j int) bool {
+		if slower[i].duration != slower[j].duration {
+			return slower[i].duration > slower[j].duration
+		}
+		return slower[i].name < slower[j].name
+	})
+	return slower, slowestNew
+}
+
+func printTimingComparison(w io.Writer, projects []projectTimings, slowestNew slowRule) {
+	_, _ = fmt.Fprintln(w, "slower rules (≥50% and ≥300 ms)")
+	for _, project := range projects {
+		for _, rule := range project.rules {
+			percent := rule.delta * 100 / rule.previous
+			_, _ = fmt.Fprintf(w, "  %s: %s — %s -> %s (+%s, +%d%%)\n", project.project, rule.name,
+				rule.previous.Round(time.Millisecond), rule.duration.Round(time.Millisecond), rule.delta.Round(time.Millisecond), percent)
+		}
+	}
+	if slowestNew.name == "" {
+		_, _ = fmt.Fprintln(w, "slowest new rule: none")
+		return
+	}
+	_, _ = fmt.Fprintf(w, "slowest new rule: %s: %s — %s\n", slowestNew.project, slowestNew.name, slowestNew.duration.Round(time.Millisecond))
+}
+
+func consumerGitValue(dir, arg string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", arg)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse %s: %w", arg, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func consumerMarkerPath(dir string) (string, error) {
+	tree, err := consumerGitValue(dir, "HEAD^{tree}")
+	if err != nil {
+		return "", fmt.Errorf("resolve HEAD tree: %w", err)
+	}
+	commonDir, err := consumerGitValue(dir, "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("resolve common git directory: %w", err)
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(dir, commonDir)
+	}
+	return filepath.Join(commonDir, "glint-consumers", tree), nil
+}
+
+func writeConsumerMarker(dir, state string) error {
+	status := exec.Command("git", "status", "--porcelain")
+	status.Dir = dir
+	if out, err := status.Output(); err != nil {
+		return fmt.Errorf("check worktree: %w", err)
+	} else if len(out) != 0 {
+		return nil
+	}
+	path, err := consumerMarkerPath(dir)
+	if err != nil {
+		return err
+	}
+	if state == "partial" {
+		current, err := os.ReadFile(path)
+		if err == nil && strings.TrimSpace(string(current)) == "full" {
+			return nil
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read existing run marker: %w", err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create marker directory: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(state+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write marker: %w", err)
+	}
+	return nil
+}
+
+func remind(dir string, w io.Writer) {
+	path, err := consumerMarkerPath(dir)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "no consumers comparison for this commit (cannot check the mark: %v); run graft consumers before the install\n", err)
+		return
+	}
+	state, err := os.ReadFile(path)
+	if err != nil { //nolint:silent-error-handling // A missing marker is the normal state before a run; the reminder reports it.
+		if errors.Is(err, os.ErrNotExist) {
+			printNoComparison(w)
+		} else {
+			_, _ = fmt.Fprintf(w, "no consumers comparison for this commit (cannot read the mark: %v); run graft consumers before the install\n", err)
+		}
+		return
+	}
+	switch strings.TrimSpace(string(state)) {
+	case "full":
+	case "partial":
+		_, _ = fmt.Fprintln(w, "the consumers comparison for this commit was partial (-r or -only); run graft consumers without them before the install")
+	default:
+		printNoComparison(w)
+	}
+}
+
+func printNoComparison(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "no consumers comparison for this commit; run graft consumers before the install")
 }
 
 // panicLines returns the stderr lines of glint that name a rule panic, without

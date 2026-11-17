@@ -74,6 +74,9 @@ tasks:
     # glint on itself); a check the tree already passed is skipped (cache).
     deps: [all]
     run:
+      # A reminder, not a check: it never stops the install, and it is one
+      # line of text, so it does not wait for a heavy slot.
+      - [go, run, ./tools/consumers, -remind]
       # An install ships glint to every consumer, so it is the release: tag
       # HEAD on main before the build. The build runs as its own graft so it
       # stamps the new tag: GRAFT_VERSION of this task predates it. A tree

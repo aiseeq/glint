@@ -1,11 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/output"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
@@ -30,6 +33,21 @@ func TestReadConfigExpandsHomeAndRequiresRoot(t *testing.T) {
 	}
 	if _, err := readConfig(path); err == nil {
 		t.Fatal("expected missing root error")
+	}
+}
+
+func TestReadConfigAcceptsBareRootPath(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(t.TempDir(), "consumers.txt")
+	if err := os.WriteFile(path, []byte(root+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := readConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(c.roots, []string{root}) {
+		t.Fatalf("roots = %v, want [%s]", c.roots, root)
 	}
 }
 
@@ -196,5 +214,141 @@ func TestRulePanicCountsAsError(t *testing.T) {
 	code := run([]string{"-config", cfg, "-old", old, "-new", newer}, &stdout, &stderr)
 	if code != 2 || !strings.Contains(stdout.String(), "1 errors") || !strings.Contains(stderr.String(), "alpha: ") || strings.Count(stderr.String(), `"broken-rule" panicked`) != 1 {
 		t.Fatalf("code %d, stdout %q, stderr %q: want the panic counted as an error of alpha", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestConsumerMarkersFullAndPartial(t *testing.T) {
+	repo := initConsumerRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "uncommitted.txt"), []byte("dirty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConsumerMarker(repo, "full"); err != nil {
+		t.Fatal(err)
+	}
+	path, err := consumerMarkerPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("dirty tree got marker: stat err %v", err)
+	}
+	if err := os.Remove(filepath.Join(repo, "uncommitted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConsumerMarker(repo, "full"); err != nil {
+		t.Fatal(err)
+	}
+	path, err = consumerMarkerPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "full\n" {
+		t.Fatalf("full marker = %q, err %v", got, err)
+	}
+	if err := writeConsumerMarker(repo, "partial"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil || string(got) != "full\n" {
+		t.Fatalf("partial replaced full marker: %q, err %v", got, err)
+	}
+	if err := commitConsumerTreeChange(repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConsumerMarker(repo, "partial"); err != nil {
+		t.Fatal(err)
+	}
+	path, err = consumerMarkerPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(path)
+	if err != nil || string(got) != "partial\n" {
+		t.Fatalf("partial marker = %q, err %v", got, err)
+	}
+}
+
+func TestRemindMarkerStates(t *testing.T) {
+	repo := initConsumerRepo(t)
+	var out strings.Builder
+	remind(repo, &out)
+	if !strings.Contains(out.String(), "graft consumers") {
+		t.Fatalf("missing-marker reminder = %q", out.String())
+	}
+	if err := writeConsumerMarker(repo, "partial"); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	remind(repo, &out)
+	if !strings.Contains(out.String(), "partial") || strings.Count(out.String(), "\n") != 1 {
+		t.Fatalf("partial reminder = %q", out.String())
+	}
+	if err := writeConsumerMarker(repo, "full"); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	remind(repo, &out)
+	if out.Len() != 0 {
+		t.Fatalf("full marker reminder = %q, want silence", out.String())
+	}
+}
+
+func TestRuleTimingParseAndThreshold(t *testing.T) {
+	got := parseRuleTimings("TIMING\n  RULE                                  TOTAL\n  faster-rule                            2ms\n  growing-rule                           1.2s\n  new-rule                               400ms\n  cached-rule                            <1ms\n")
+	if got["growing-rule"] != 1200*time.Millisecond || got["cached-rule"] != 0 {
+		t.Fatalf("parsed timings = %#v", got)
+	}
+	old := map[string]time.Duration{
+		"growing-rule":  800 * time.Millisecond,
+		"below-percent": 500 * time.Millisecond,
+		"below-delta":   3 * time.Second,
+		"cached-rule":   0,
+	}
+	newTimes := map[string]time.Duration{
+		"growing-rule":  1200 * time.Millisecond, // exactly +50%, +400ms
+		"below-percent": 700 * time.Millisecond,
+		"below-delta":   3200 * time.Millisecond,
+		"cached-rule":   2 * time.Second,
+		"new-rule":      400 * time.Millisecond,
+	}
+	slower, fastestNew := compareRuleTimings(old, newTimes)
+	if len(slower) != 1 || slower[0].name != "growing-rule" || fastestNew.name != "new-rule" {
+		t.Fatalf("comparison = slower %#v, new %#v", slower, fastestNew)
+	}
+}
+
+func initConsumerRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	gitTest(t, repo, "init", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "add", "tracked.txt")
+	gitTest(t, repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "init")
+	return repo
+}
+
+func commitConsumerTreeChange(repo string) error {
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("two\n"), 0o600); err != nil {
+		return fmt.Errorf("write changed tree file: %w", err)
+	}
+	cmd := exec.Command("git", "-C", repo, "add", "tracked.txt")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add: %s: %w", out, err)
+	}
+	cmd = exec.Command("git", "-C", repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "next")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit: %s: %w", out, err)
+	}
+	return nil
+}
+
+func gitTest(t *testing.T, repo string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %s: %v", args, out, err)
 	}
 }
