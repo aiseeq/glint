@@ -22,6 +22,48 @@ func nearDuplicateFuncFindings(t *testing.T, files map[string]string) []string {
 }
 
 func TestNearDuplicateFunc(t *testing.T) {
+	t.Run("negated condition is one difference", func(t *testing.T) {
+		files := map[string]string{
+			"sample/sample.go": `package sample
+func allLinesCRLFData(data []byte) bool {
+	for i, c := range data {
+		if c != '\n' { continue }
+		if i == 0 || data[i-1] != '\r' { return false }
+	}
+	return true
+}
+func allLinesLFData(data []byte) bool {
+	for i, c := range data {
+		if c != '\n' { continue }
+		if i > 0 && data[i-1] == '\r' { return false }
+	}
+	return true
+}
+`,
+			"negative/negative.go": `package negative
+func differentLogicA(data []byte) bool {
+	if len(data) == 0 { return false }
+	for i, c := range data {
+		if c != '\n' { continue }
+		if i == 0 || data[i-1] != '\r' { return false }
+	}
+	return true
+}
+func differentLogicB(data []byte) bool {
+	if len(data) == 1 { return false }
+	for i, c := range data {
+		if c == '\n' { continue }
+		if i > 0 && data[i-1] != '\r' { return false }
+	}
+	return true
+}
+`,
+		}
+		found := nearDuplicateFuncFindings(t, files)
+		require.Len(t, found, 1)
+		require.Contains(t, found[0], "allLinesLFData is a near-duplicate of sample/sample.go:2")
+	})
+
 	t.Run("one call argument", func(t *testing.T) {
 		files := map[string]string{"sample/sample.go": `package sample
 func first(x int) int {

@@ -251,7 +251,8 @@ func nearFuncReceiversCompatible(a, b *nearFunc) bool {
 
 func nearDifferencesCompatible(a, b *nearFunc, differences []nearExprDifference) bool {
 	for _, difference := range differences {
-		if !nearDifferenceAllowed(difference.parent, difference.childIndex, difference.left, difference.right) ||
+		if !nearDifferenceAllowed(difference.parent, difference.childIndex, difference.left, difference.right) &&
+			!nearConditionDifferenceAllowed(difference.parent, difference.left) ||
 			!nearExpressionCompatible(difference.left, difference.right, a, b) {
 			return false
 		}
@@ -344,8 +345,11 @@ func nearFuncDifferences(a, b *nearFunc, limit int) ([]nearExprDifference, bool)
 		if normalizedNode(left, a) == normalizedNode(right, b) {
 			return true
 		}
-		_, leftExpr := left.(ast.Expr)
-		_, rightExpr := right.(ast.Expr)
+		leftExpression, leftExpr := left.(ast.Expr)
+		rightExpression, rightExpr := right.(ast.Expr)
+		if leftExpr && rightExpr && nearExpressionsNegated(leftExpression, rightExpression, a, b) {
+			return appendNearNegatedDifference(&differences, left, right, parent, childIndex, limit)
+		}
 		if leftExpr && rightExpr && nodeKind(left) != nodeKind(right) {
 			return appendNearDifference(&differences, left, right, parent, childIndex, limit)
 		}
@@ -401,6 +405,93 @@ func nearDifferenceAllowed(parent ast.Node, childIndex int, left, right ast.Node
 		return true
 	default:
 		return false
+	}
+}
+
+func appendNearNegatedDifference(differences *[]nearExprDifference, left, right, parent ast.Node, childIndex, limit int) bool {
+	if !nearConditionDifferenceAllowed(parent, left) && !nearDifferenceAllowed(parent, childIndex, left, right) {
+		return false
+	}
+	*differences = append(*differences, nearExprDifference{left: left, right: right, parent: parent, childIndex: childIndex})
+	return len(*differences) <= limit
+}
+
+func nearConditionDifferenceAllowed(parent, left ast.Node) bool {
+	switch stmt := parent.(type) {
+	case *ast.IfStmt:
+		return left == stmt.Cond
+	case *ast.ForStmt:
+		return left == stmt.Cond
+	}
+	return false
+}
+
+// nearExpressionsNegated recognizes a condition and its structural negation.
+// It keeps operands fixed, so only boolean operators and comparisons can vary.
+func nearExpressionsNegated(left, right ast.Expr, a, b *nearFunc) bool {
+	leftType, rightType := a.info.TypeOf(left), b.info.TypeOf(right)
+	if leftType == nil || rightType == nil || !types.Identical(leftType, rightType) {
+		return false
+	}
+	return nearNegatedExprPair(left, right, a, b)
+}
+
+func nearNegatedExprPair(left, right ast.Expr, a, b *nearFunc) bool {
+	left = ast.Unparen(left)
+	right = ast.Unparen(right)
+	if unary, ok := left.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
+		return normalizedNode(unary.X, a) == normalizedNode(right, b)
+	}
+	if unary, ok := right.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
+		return normalizedNode(left, a) == normalizedNode(unary.X, b)
+	}
+	leftBinary, leftOK := left.(*ast.BinaryExpr)
+	rightBinary, rightOK := right.(*ast.BinaryExpr)
+	if !leftOK || !rightOK {
+		return false
+	}
+	if nearNegatedComparison(leftBinary, rightBinary) &&
+		normalizedNode(leftBinary.X, a) == normalizedNode(rightBinary.X, b) &&
+		normalizedNode(leftBinary.Y, a) == normalizedNode(rightBinary.Y, b) {
+		return true
+	}
+	if leftBinary.Op == token.LAND && rightBinary.Op == token.LOR || leftBinary.Op == token.LOR && rightBinary.Op == token.LAND {
+		return nearNegatedExprPair(leftBinary.X, rightBinary.X, a, b) && nearNegatedExprPair(leftBinary.Y, rightBinary.Y, a, b)
+	}
+	return false
+}
+
+func nearNegatedComparison(left, right *ast.BinaryExpr) bool {
+	if inverseComparison(left.Op) == right.Op {
+		return true
+	}
+	// Range indexes are non-negative, so i == 0 and i > 0 are the two sides
+	// of the boundary check used in mirrored byte and slice loops.
+	return (left.Op == token.EQL && right.Op == token.GTR || left.Op == token.GTR && right.Op == token.EQL) &&
+		nearZeroIntLiteral(left.Y) && nearZeroIntLiteral(right.Y)
+}
+
+func nearZeroIntLiteral(expr ast.Expr) bool {
+	literal, ok := ast.Unparen(expr).(*ast.BasicLit)
+	return ok && literal.Kind == token.INT && literal.Value == "0"
+}
+
+func inverseComparison(op token.Token) token.Token {
+	switch op {
+	case token.EQL:
+		return token.NEQ
+	case token.NEQ:
+		return token.EQL
+	case token.LSS:
+		return token.GEQ
+	case token.LEQ:
+		return token.GTR
+	case token.GTR:
+		return token.LEQ
+	case token.GEQ:
+		return token.LSS
+	default:
+		return token.ILLEGAL
 	}
 }
 
