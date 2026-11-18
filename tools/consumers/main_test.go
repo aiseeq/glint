@@ -319,6 +319,64 @@ func TestRuleTimingParseAndThreshold(t *testing.T) {
 	}
 }
 
+func TestCompareTargetsReportsOnlyConfirmedSlowerRules(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "proj")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(root, "calls.log")
+	old := filepath.Join(root, "old")
+	newer := filepath.Join(root, "new")
+	oldScript := timingFakeScript("old", log, "alpha 1s\ndelta 1s\neps 2s", "alpha 1s\ndelta 1s\neps 2s")
+	newScript := timingFakeScript("new", log, "alpha 1600ms\ndelta 2s\neps 2s", "alpha 1s\ndelta 2100ms\neps 2s")
+	for path, script := range map[string]string{old: oldScript, newer: newScript} {
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // an executable test double
+			t.Fatal(err)
+		}
+	}
+	var stdout, stderr strings.Builder
+	_, errs, projects, _ := compareTargets([]string{project}, old, newer, "", "", "", nil, &stdout, &stderr)
+	if errs != 0 {
+		t.Fatalf("errors = %d, stderr %q", errs, stderr.String())
+	}
+	printTimingComparison(&stdout, projects, slowRule{}, nil)
+	got := stdout.String()
+	if strings.Contains(got, "proj: alpha —") || !strings.Contains(got, "proj: delta —") {
+		t.Fatalf("timing report = %q; want delta confirmed and alpha noise omitted", got)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(calls)), "\n"); len(lines) != 4 {
+		t.Fatalf("calls = %q, want full old/new then confirmation new/old", calls)
+	}
+}
+
+func timingFakeScript(name, log, first, second string) string {
+	firstArgs := "'" + strings.ReplaceAll(first, "\n", "' '") + "'"
+	secondArgs := "'" + strings.ReplaceAll(second, "\n", "' '") + "'"
+	return fmt.Sprintf(`#!/bin/sh
+counter=%q
+call=1
+if [ -f "$counter" ]; then call=2; fi
+touch "$counter"
+printf '%%s %%s\n' %q "$*" >> %q
+echo '{"issues":[]}'
+echo 'RULE TOTAL' >&2
+if [ "$call" = 1 ]; then
+  printf '  %%s\n' %s >&2
+else
+  printf '  %%s\n' %s >&2
+fi
+echo '  IN FLIGHT' >&2
+`, log+"."+name+".count", name, log, firstArgs, secondArgs)
+}
+
 func TestParseOldRuleNames(t *testing.T) {
 	got, err := parseRuleNames("glint rules\n  alpha  Detects alpha [HIGH]\n  beta  Detects beta [LOW]\n")
 	if err != nil || !got["alpha"] || !got["beta"] || got["glint"] {

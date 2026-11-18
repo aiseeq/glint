@@ -161,7 +161,38 @@ func compareTargets(targets []string, oldAbs, newAbs, rules, jobs, newCache stri
 		}
 		slower, slowestNew := compareRuleTimings(oldTimes, oldRuleNames, newTimes)
 		if len(slower) > 0 {
-			slowerByProject = append(slowerByProject, projectTimings{project: name, rules: slower})
+			ruleNames := make([]string, 0, len(slower))
+			for _, rule := range slower {
+				ruleNames = append(ruleNames, rule.name)
+			}
+			sort.Strings(ruleNames)
+			confirmationRules := strings.Join(ruleNames, ",")
+			_, confirmationNewTimes, confirmationNewErr := check(newAbs, p, confirmationRules, jobs, newCache)
+			_, confirmationOldTimes, confirmationOldErr := check(oldAbs, p, confirmationRules, jobs, "")
+			if confirmationNewErr != nil {
+				_, _ = fmt.Fprintf(stderr, "%s (confirmation new): %s\n", name, confirmationNewErr)
+				errs++
+			} else if confirmationOldErr != nil {
+				_, _ = fmt.Fprintf(stderr, "%s (confirmation old): %s\n", name, confirmationOldErr)
+				errs++
+			} else {
+				confirmed, _ := compareRuleTimings(confirmationOldTimes, oldRuleNames, confirmationNewTimes)
+				confirmedByName := make(map[string]slowRule, len(confirmed))
+				for _, rule := range confirmed {
+					confirmedByName[rule.name] = rule
+				}
+				var reported []slowRule
+				for _, rule := range slower {
+					if confirmation, ok := confirmedByName[rule.name]; ok {
+						rule.confirmationPrevious = confirmation.previous
+						rule.confirmationDuration = confirmation.duration
+						reported = append(reported, rule)
+					}
+				}
+				if len(reported) > 0 {
+					slowerByProject = append(slowerByProject, projectTimings{project: name, rules: reported})
+				}
+			}
 		}
 		if slowestNew.duration > newestRule.duration || slowestNew.duration == newestRule.duration && slowestNew.name < newestRule.name {
 			slowestNew.project = name
@@ -351,11 +382,13 @@ func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, map[stri
 }
 
 type slowRule struct {
-	name     string
-	project  string
-	duration time.Duration
-	previous time.Duration
-	delta    time.Duration
+	name                 string
+	project              string
+	duration             time.Duration
+	previous             time.Duration
+	delta                time.Duration
+	confirmationDuration time.Duration
+	confirmationPrevious time.Duration
 }
 
 type projectTimings struct {
@@ -455,8 +488,11 @@ func printTimingComparison(w io.Writer, projects []projectTimings, slowestNew sl
 	for _, project := range projects {
 		for _, rule := range project.rules {
 			percent := rule.delta * 100 / rule.previous
-			_, _ = fmt.Fprintf(w, "  %s: %s — %s -> %s (+%s, +%d%%)\n", project.project, rule.name,
-				rule.previous.Round(time.Millisecond), rule.duration.Round(time.Millisecond), rule.delta.Round(time.Millisecond), percent)
+			confirmationDelta := rule.confirmationDuration - rule.confirmationPrevious
+			confirmationPercent := confirmationDelta * 100 / rule.confirmationPrevious
+			_, _ = fmt.Fprintf(w, "  %s: %s — %s -> %s (+%s, +%d%%); confirm %s -> %s (+%s, +%d%%)\n", project.project, rule.name,
+				rule.previous.Round(time.Millisecond), rule.duration.Round(time.Millisecond), rule.delta.Round(time.Millisecond), percent,
+				rule.confirmationPrevious.Round(time.Millisecond), rule.confirmationDuration.Round(time.Millisecond), confirmationDelta.Round(time.Millisecond), confirmationPercent)
 		}
 	}
 	if oldRulesErr != nil {
