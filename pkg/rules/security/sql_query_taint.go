@@ -1165,10 +1165,29 @@ func (c *sqlTaintCheck) validationChanged(v *types.Var, validation sqlValidation
 		if write.callable != declaration && declaration.Pos() <= write.at && write.at < declaration.End() {
 			return true
 		}
+		if c.deferredLoopWrite(v, validation, write.at) {
+			return true
+		}
 		if write.deferred && !deferred {
 			continue
 		}
 		if validation.at < write.at && (write.at < until || c.writeRepeats(validation, write.at)) || local && write.at > validation.scope.End() {
+			return true
+		}
+	}
+	return false
+}
+
+// deferredLoopWrite reports a write that can run on a later turn before a
+// deferred query reads v. Values declared outside the loop are shared across
+// turns; declarations inside it belong to the current turn.
+func (c *sqlTaintCheck) deferredLoopWrite(v *types.Var, validation sqlValidation, write token.Pos) bool {
+	if len(c.queryContext.deferredScopes) == 0 {
+		return false
+	}
+	for _, loop := range c.loops {
+		if v.Pos() < loop.Pos() && loop.Pos() <= validation.at && validation.at < loop.End() &&
+			loop.Pos() <= write && write < loop.End() && loop.Pos() <= c.at && c.at < loop.End() {
 			return true
 		}
 	}
