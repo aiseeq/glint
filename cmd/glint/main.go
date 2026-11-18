@@ -418,34 +418,82 @@ func runInstructionSize(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("find project directory: %w", err)
 	}
+	if len(args) > 0 {
+		var fileErrors []error
+		for _, arg := range args {
+			path, err := filepath.Abs(arg)
+			if err != nil {
+				fileErrors = append(fileErrors, fmt.Errorf("resolve path %q: %w", arg, err))
+				continue
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				fileErrors = append(fileErrors, fmt.Errorf("%s: %w", arg, err))
+				continue
+			}
+			root := filepath.Dir(path)
+			if info.IsDir() {
+				root = path
+			}
+			configRoot, found, err := nearestConfigRoot(root)
+			if err != nil {
+				fileErrors = append(fileErrors, fmt.Errorf("%s: find config: %w", arg, err))
+				continue
+			}
+			if found {
+				root = configRoot
+			}
+			cfg, enabledRules, err := loadConfig(root)
+			if err != nil {
+				fileErrors = append(fileErrors, fmt.Errorf("%s: %w", arg, err))
+				continue
+			}
+			rule, err := instructionSizeRule(enabledRules, cfg)
+			if err != nil {
+				fileErrors = append(fileErrors, fmt.Errorf("%s: configure instruction-size: %w", arg, err))
+				continue
+			}
+			if rule == nil {
+				fileErrors = append(fileErrors, fmt.Errorf("%s: instruction-size rule is disabled", arg))
+				continue
+			}
+			walker := instructionSizeWalker(root, cfg).WithScopes([]string{path})
+			contexts, walkErrors := walker.WalkSync()
+			if len(walkErrors) > 0 {
+				fileErrors = append(fileErrors, fmt.Errorf("%s: walk instruction files: %w", arg, errors.Join(walkErrors...)))
+				continue
+			}
+			sort.Slice(contexts, func(i, j int) bool { return contexts[i].RelPath < contexts[j].RelPath })
+			for _, ctx := range contexts {
+				size, limit, unit, ok := rule.MeasureInstructionSize(ctx.Path, ctx.Lines)
+				if !ok {
+					continue
+				}
+				label := ctx.RelPath
+				if !info.IsDir() {
+					label = arg
+				} else if rel, err := filepath.Rel(cwd, ctx.Path); err == nil {
+					label = rel
+				}
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s  %d %s  %d%% of %d\n", label, size, unit, size*100/limit, limit); err != nil {
+					return fmt.Errorf("write instruction size: %w", err)
+				}
+			}
+		}
+		return errors.Join(fileErrors...)
+	}
 	cfg, enabledRules, err := loadConfig(cwd)
 	if err != nil {
 		return err
 	}
-	var rule *doccheck.InstructionSizeRule
-	for _, candidate := range enabledRules {
-		if sized, ok := candidate.(*doccheck.InstructionSizeRule); ok {
-			rule = sized
-			break
-		}
+	rule, err := instructionSizeRule(enabledRules, cfg)
+	if err != nil {
+		return fmt.Errorf("configure instruction-size: %w", err)
 	}
 	if rule == nil {
 		return errors.New("instruction-size rule is disabled")
 	}
-	walker := core.NewWalker(cwd, cfg).WithGoParsing(false).
-		WithRequiredFilePredicate(func(path string) bool { return core.InstructionKindOf(path) != core.NotInstruction }).
-		WithExcludedInstructions(true)
-	if len(args) > 0 {
-		scopes := make([]string, 0, len(args))
-		for _, arg := range args {
-			path, err := filepath.Abs(arg)
-			if err != nil {
-				return fmt.Errorf("resolve path %q: %w", arg, err)
-			}
-			scopes = append(scopes, path)
-		}
-		walker.WithScopes(scopes)
-	}
+	walker := instructionSizeWalker(cwd, cfg)
 	contexts, walkErrors := walker.WalkSync()
 	if len(walkErrors) > 0 {
 		return fmt.Errorf("walk instruction files: %w", errors.Join(walkErrors...))
@@ -461,6 +509,45 @@ func runInstructionSize(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return nil
+}
+
+func instructionSizeRule(enabledRules []rules.Rule, cfg *core.Config) (*doccheck.InstructionSizeRule, error) {
+	for _, candidate := range enabledRules {
+		if _, ok := candidate.(*doccheck.InstructionSizeRule); ok {
+			sized := doccheck.NewInstructionSizeRule()
+			settings := make(map[string]any)
+			if category, ok := cfg.Categories[sized.Category()]; ok {
+				maps.Copy(settings, category.Settings)
+				if rule, ok := category.Rules[sized.Name()]; ok {
+					maps.Copy(settings, rule.Settings)
+				}
+			}
+			return sized, sized.Configure(settings)
+		}
+	}
+	return nil, nil
+}
+
+func instructionSizeWalker(root string, cfg *core.Config) *core.Walker {
+	return core.NewWalker(root, cfg).WithGoParsing(false).
+		WithRequiredFilePredicate(func(path string) bool { return core.InstructionKindOf(path) != core.NotInstruction }).
+		WithExcludedInstructions(true)
+}
+
+func nearestConfigRoot(dir string) (string, bool, error) {
+	for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+		info, err := os.Stat(filepath.Join(current, ".glint.yaml"))
+		if err == nil && !info.IsDir() {
+			return current, true, nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return "", false, err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false, nil
+		}
+	}
 }
 
 func runCheck(_ *cobra.Command, args []string) (runErr error) {
