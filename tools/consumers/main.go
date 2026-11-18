@@ -108,6 +108,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "consumers: new binary %s: %v\n", newAbs, err)
 		return 2
 	}
+	oldRuleNames, oldRulesErr := listRuleNames(oldAbs)
 
 	userCache, err := os.UserCacheDir()
 	if err != nil {
@@ -118,8 +119,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// runs in a directory of its own and leaves the installed glint's caches.
 	newCache := filepath.Join(userCache, "glint", "consumers-new")
 
-	diffs, errs, slowerByProject, newestRule := compareTargets(targets, oldAbs, newAbs, *rules, *jobs, newCache, stdout, stderr)
-	printTimingComparison(stdout, slowerByProject, newestRule)
+	diffs, errs, slowerByProject, newestRule := compareTargets(targets, oldAbs, newAbs, *rules, *jobs, newCache, oldRuleNames, stdout, stderr)
+	printTimingComparison(stdout, slowerByProject, newestRule, oldRulesErr)
 	skipped := slices.Sorted(maps.Keys(cfg.skips))
 	_, _ = fmt.Fprintf(stdout, "%d projects, %d with differences, %d errors, skipped: %s\n", len(targets), diffs, errs, strings.Join(skipped, ", "))
 	if errs > 0 {
@@ -136,7 +137,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func compareTargets(targets []string, oldAbs, newAbs, rules, jobs, newCache string, stdout, stderr io.Writer) (int, int, []projectTimings, slowRule) {
+func compareTargets(targets []string, oldAbs, newAbs, rules, jobs, newCache string, oldRuleNames map[string]bool, stdout, stderr io.Writer) (int, int, []projectTimings, slowRule) {
 	diffs, errs := 0, 0
 	var slowerByProject []projectTimings
 	var newestRule slowRule
@@ -158,7 +159,7 @@ func compareTargets(targets []string, oldAbs, newAbs, rules, jobs, newCache stri
 			errs++
 			continue
 		}
-		slower, slowestNew := compareRuleTimings(oldTimes, newTimes)
+		slower, slowestNew := compareRuleTimings(oldTimes, oldRuleNames, newTimes)
 		if len(slower) > 0 {
 			slowerByProject = append(slowerByProject, projectTimings{project: name, rules: slower})
 		}
@@ -388,7 +389,37 @@ func parseRuleTimings(report string) map[string]time.Duration {
 	return got
 }
 
-func compareRuleTimings(old, current map[string]time.Duration) ([]slowRule, slowRule) {
+func listRuleNames(bin string) (map[string]bool, error) {
+	cmd := exec.Command(bin, "rules")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("run %s rules: %w", bin, err)
+	}
+	got, err := parseRuleNames(string(out))
+	if err != nil {
+		return nil, fmt.Errorf("%s rules: %w", bin, err)
+	}
+	return got, nil
+}
+
+func parseRuleNames(report string) (map[string]bool, error) {
+	got := make(map[string]bool)
+	for line := range strings.SplitSeq(report, "\n") {
+		if len(line) == 0 || line[0] != ' ' && line[0] != '\t' {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			got[fields[0]] = true
+		}
+	}
+	if len(got) == 0 {
+		return nil, errors.New("returned no rule names")
+	}
+	return got, nil
+}
+
+func compareRuleTimings(old map[string]time.Duration, oldRuleNames map[string]bool, current map[string]time.Duration) ([]slowRule, slowRule) {
 	var slower []slowRule
 	var slowestNew slowRule
 	for name, duration := range current {
@@ -397,7 +428,7 @@ func compareRuleTimings(old, current map[string]time.Duration) ([]slowRule, slow
 		}
 		previous, exists := old[name]
 		if !exists {
-			if duration > slowestNew.duration || duration == slowestNew.duration && name < slowestNew.name {
+			if oldRuleNames != nil && !oldRuleNames[name] && (duration > slowestNew.duration || duration == slowestNew.duration && name < slowestNew.name) {
 				slowestNew = slowRule{name: name, duration: duration}
 			}
 			continue
@@ -419,7 +450,7 @@ func compareRuleTimings(old, current map[string]time.Duration) ([]slowRule, slow
 	return slower, slowestNew
 }
 
-func printTimingComparison(w io.Writer, projects []projectTimings, slowestNew slowRule) {
+func printTimingComparison(w io.Writer, projects []projectTimings, slowestNew slowRule, oldRulesErr error) {
 	_, _ = fmt.Fprintln(w, "slower rules (≥50% and ≥300 ms)")
 	for _, project := range projects {
 		for _, rule := range project.rules {
@@ -427,6 +458,10 @@ func printTimingComparison(w io.Writer, projects []projectTimings, slowestNew sl
 			_, _ = fmt.Fprintf(w, "  %s: %s — %s -> %s (+%s, +%d%%)\n", project.project, rule.name,
 				rule.previous.Round(time.Millisecond), rule.duration.Round(time.Millisecond), rule.delta.Round(time.Millisecond), percent)
 		}
+	}
+	if oldRulesErr != nil {
+		_, _ = fmt.Fprintf(w, "slowest new rule: unavailable (could not get old rules: %v)\n", oldRulesErr)
+		return
 	}
 	if slowestNew.name == "" {
 		_, _ = fmt.Fprintln(w, "slowest new rule: none")

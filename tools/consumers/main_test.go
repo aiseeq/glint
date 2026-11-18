@@ -312,9 +312,30 @@ func TestRuleTimingParseAndThreshold(t *testing.T) {
 		"cached-rule":   2 * time.Second,
 		"new-rule":      400 * time.Millisecond,
 	}
-	slower, fastestNew := compareRuleTimings(old, newTimes)
+	oldRules := map[string]bool{"growing-rule": true, "below-percent": true, "below-delta": true, "cached-rule": true}
+	slower, fastestNew := compareRuleTimings(old, oldRules, newTimes)
 	if len(slower) != 1 || slower[0].name != "growing-rule" || fastestNew.name != "new-rule" {
 		t.Fatalf("comparison = slower %#v, new %#v", slower, fastestNew)
+	}
+}
+
+func TestParseOldRuleNames(t *testing.T) {
+	got, err := parseRuleNames("glint rules\n  alpha  Detects alpha [HIGH]\n  beta  Detects beta [LOW]\n")
+	if err != nil || !got["alpha"] || !got["beta"] || got["glint"] {
+		t.Fatalf("rule names = %#v, err %v", got, err)
+	}
+}
+
+func TestRuleTimingComparisonUsesOldRuleList(t *testing.T) {
+	old := parseRuleTimings("TIMING\n  RULE TOTAL\n  alpha 5ms\n  (1 rules under 1ms)\n")
+	oldRules := map[string]bool{"alpha": true, "beta": true}
+	current := map[string]time.Duration{
+		"beta":  40 * time.Millisecond, // Present in old rules, folded out of old timings.
+		"gamma": 30 * time.Millisecond, // Absent from the old build.
+	}
+	slower, fastestNew := compareRuleTimings(old, oldRules, current)
+	if len(slower) != 0 || fastestNew.name != "gamma" {
+		t.Fatalf("comparison = slower %#v, new %#v; want no slower rules and gamma as new", slower, fastestNew)
 	}
 }
 
