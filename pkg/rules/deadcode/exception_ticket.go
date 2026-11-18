@@ -147,7 +147,7 @@ func ticketExceptionInScope(exc core.Exception, run StaleSuppressionRun) bool {
 		return true
 	}
 	for _, ctx := range run.Contexts {
-		if exc.NamesFile(filepath.ToSlash(ctx.RelPath)) {
+		if exc.CoversFile(filepath.ToSlash(ctx.RelPath)) {
 			return true
 		}
 	}
@@ -158,7 +158,7 @@ func ticketExceptionInScope(exc core.Exception, run StaleSuppressionRun) bool {
 			continue
 		}
 		rel, err := filepath.Rel(root, scope)
-		if err == nil && exc.NamesFile(filepath.ToSlash(rel)) {
+		if err == nil && exc.CoversFile(filepath.ToSlash(rel)) {
 			return true
 		}
 	}

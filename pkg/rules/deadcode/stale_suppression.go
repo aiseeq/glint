@@ -341,7 +341,7 @@ func judgedExceptions(cfg *core.Config, wanted func(*core.RuleException) bool) (
 // analyzes: one that exists outside the nested repositories.
 func reachedFile(files []string, exc core.Exception, nested func(string) (bool, error)) (bool, error) {
 	for _, file := range files {
-		if !exc.NamesFile(file) {
+		if !exc.CoversFile(file) {
 			continue
 		}
 		inNested, err := nested(file)

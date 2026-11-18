@@ -94,6 +94,34 @@ categories:
 	assert.True(t, dead[1].NoFunction)
 }
 
+func TestDeadExceptionsMatchFileAndFilesLikeTheRun(t *testing.T) {
+	root := t.TempDir()
+	config := `version: 1
+categories:
+  patterns:
+    rules:
+      raw-process-kill:
+        exceptions:
+          - {file: "svc/stop.go", files: "other/*.go", reason: applies to either name}
+          - {file: "svc/missing.go", files: "other/missing/*.go", reason: names no file}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".glint.yaml"), []byte(config), 0o644))
+	for _, dir := range []string{"svc", "other/missing"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
+	}
+	for _, file := range []string{"svc/stop.go", "other/stop.go"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, file), nil, 0o644))
+	}
+	cfg, err := LoadConfigWithDefaults(root)
+	require.NoError(t, err)
+	files, err := cfg.ConfigFiles()
+	require.NoError(t, err)
+	dead, err := cfg.DeadExceptions(files, func(string) ([]string, bool, error) { return nil, false, nil })
+	require.NoError(t, err)
+	require.Len(t, dead, 1)
+	assert.Equal(t, "svc/missing.go", dead[0].Exception.File)
+}
+
 // A file git ignores is not analyzed, so an exception naming it suppresses
 // nothing in any checkout: the files of the configuration leave it out.
 func TestConfigFilesLeaveOutGitignoredFiles(t *testing.T) {

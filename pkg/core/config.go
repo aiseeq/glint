@@ -171,7 +171,7 @@ func (c *Config) DeadExceptions(files []string, functions func(path string) ([]s
 				if exc.File == "" && exc.Files == "" {
 					continue
 				}
-				matched := slices.DeleteFunc(slices.Clone(files), func(path string) bool { return !exc.NamesFile(path) })
+				matched := slices.DeleteFunc(slices.Clone(files), func(path string) bool { return !exc.CoversFile(path) })
 				noFunction := false
 				if len(matched) > 0 && exc.Function != "" {
 					declared, err := declaresFunction(matched, exc.Function, functions)
