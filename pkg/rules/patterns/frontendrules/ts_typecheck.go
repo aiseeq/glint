@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -23,6 +24,8 @@ type tsconfigScope struct {
 	path             string
 	include, exclude []tsGlob // patterns relative to base; include nil means everything
 	base             string   // the directory the patterns are relative to
+	defaultExcludes  bool
+	defaultOutDir    string // absolute path, used by fingerprint traversal when exclude is omitted
 }
 
 // covers reports a file the tsconfig compiles.
@@ -59,6 +62,7 @@ type tsGlob struct {
 	dir     string         // set for a directory pattern
 	re      *regexp.Regexp // set for a wildcard or file pattern
 	outside bool           // the pattern starts above the tsconfig's directory (../shared/**)
+	pattern string         // normalized pattern, retained to identify literal hidden components
 }
 
 func (g tsGlob) match(rel string) bool {
@@ -73,12 +77,117 @@ func (g tsGlob) match(rel string) bool {
 	return g.re.MatchString(rel)
 }
 
+// canReachDirectory reports whether this include can match inside dir, while
+// requiring literal pattern components for every hidden path component.
+func (g tsGlob) canReachDirectory(dir string) bool {
+	dirParts := pathComponents(filepath.ToSlash(dir))
+	patternParts := strings.Split(filepath.ToSlash(g.pattern), "/")
+	if g.re != nil {
+		return globPatternCanReachDirectory(patternParts, dirParts, 0, 0)
+	}
+	includeParts := pathComponents(g.dir)
+	shared := min(len(includeParts), len(dirParts))
+	for i := range shared {
+		if includeParts[i] != dirParts[i] {
+			return false
+		}
+	}
+	for i, part := range dirParts {
+		if isHiddenPathComponent(part) && (i >= len(includeParts) || includeParts[i] != part) {
+			return false
+		}
+	}
+	return true
+}
+
+func globPatternCanReachDirectory(pattern, dir []string, patternIndex, dirIndex int) bool {
+	if dirIndex == len(dir) {
+		return true
+	}
+	if patternIndex == len(pattern) {
+		return false
+	}
+	if pattern[patternIndex] == "**" {
+		if globPatternCanReachDirectory(pattern, dir, patternIndex+1, dirIndex) {
+			return true
+		}
+		return !isHiddenPathComponent(dir[dirIndex]) && globPatternCanReachDirectory(pattern, dir, patternIndex, dirIndex+1)
+	}
+	component := dir[dirIndex]
+	if isHiddenPathComponent(component) {
+		if pattern[patternIndex] != component {
+			return false
+		}
+	} else if !globPatternComponentMatches(pattern[patternIndex], component) {
+		return false
+	}
+	return globPatternCanReachDirectory(pattern, dir, patternIndex+1, dirIndex+1)
+}
+
+// globPatternComponentMatches matches one path component against one
+// component of a tsconfig pattern: * and ? stay within the component.
+func globPatternComponentMatches(pattern, value string) bool {
+	matched, err := path.Match(pattern, value)
+	return err == nil && matched
+}
+
+func pathComponents(path string) []string {
+	if path == "" || path == "." {
+		return nil
+	}
+	return strings.Split(path, "/")
+}
+
+func isHiddenPathComponent(component string) bool {
+	return strings.HasPrefix(component, ".") && component != "." && component != ".."
+}
+
+func (s tsconfigScope) includeCanReachDirectory(dir string) bool {
+	parts := pathComponents(filepath.ToSlash(dir))
+	if s.include == nil {
+		return !containsHiddenPathComponent(parts)
+	}
+	for _, include := range s.include {
+		if include.canReachDirectory(dir) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s tsconfigScope) includesFingerprintDirectory(dir string) bool {
+	if s.include == nil {
+		return true
+	}
+	for _, include := range s.include {
+		if !include.canReachDirectory(dir) {
+			continue
+		}
+		rel := filepath.ToSlash(dir)
+		if rel == "." {
+			rel = ""
+		}
+		if include.dir != "" && (rel == include.dir || strings.HasPrefix(rel, include.dir+"/")) {
+			return true
+		}
+		probe := filepath.ToSlash(filepath.Join(rel, "__glint_fingerprint_probe__.d.ts"))
+		if include.match(probe) || include.match(rel) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsHiddenPathComponent(parts []string) bool {
+	return slices.ContainsFunc(parts, isHiddenPathComponent)
+}
+
 // compileTSGlob builds the matcher of one pattern.
 func compileTSGlob(pattern string) (tsGlob, error) {
 	pattern = strings.TrimPrefix(filepath.ToSlash(pattern), "./")
 	outside := strings.HasPrefix(pattern, "../")
 	if !strings.ContainsAny(pattern, "*?") && filepath.Ext(pattern) == "" {
-		return tsGlob{dir: strings.TrimSuffix(pattern, "/"), outside: outside}, nil
+		return tsGlob{dir: strings.TrimSuffix(pattern, "/"), outside: outside, pattern: pattern}, nil
 	}
 	var re strings.Builder
 	re.WriteString("^")
@@ -103,14 +212,17 @@ func compileTSGlob(pattern string) (tsGlob, error) {
 	if err != nil {
 		return tsGlob{}, fmt.Errorf("tsconfig pattern %q: %w", pattern, err)
 	}
-	return tsGlob{re: compiled, outside: outside}, nil
+	return tsGlob{re: compiled, outside: outside, pattern: pattern}, nil
 }
 
 // tsconfigFile is the part of a tsconfig the scope needs.
 type tsconfigFile struct {
-	Extends json.RawMessage `json:"extends"`
-	Include []string        `json:"include"`
-	Exclude []string        `json:"exclude"`
+	Extends         json.RawMessage `json:"extends"`
+	Include         []string        `json:"include"`
+	Exclude         []string        `json:"exclude"`
+	CompilerOptions struct {
+		OutDir string `json:"outDir"`
+	} `json:"compilerOptions"`
 }
 
 var (
@@ -174,6 +286,29 @@ func loadTSConfigScope(path string) (tsconfigScope, error) {
 				return tsconfigScope{}, fmt.Errorf("%s exclude: %w", current, err)
 			}
 			scope.exclude, excludeSet = globs, true
+		}
+	}
+	if !excludeSet {
+		scope.defaultExcludes = true
+		// TypeScript's implicit exclude list is replaced by any explicit
+		// "exclude" in the extends chain. Resolve outDir where it was set,
+		// since inherited relative options stay relative to that config.
+		for i := len(chain) - 1; i >= 0; i-- {
+			var file tsconfigFile
+			if err := readJSONC(chain[i], &file); err != nil {
+				return tsconfigScope{}, fmt.Errorf("read tsconfig: %w", err)
+			}
+			if file.CompilerOptions.OutDir != "" {
+				outDir := file.CompilerOptions.OutDir
+				if !filepath.IsAbs(outDir) {
+					outDir = filepath.Join(filepath.Dir(chain[i]), outDir)
+				}
+				absolute, err := filepath.Abs(outDir)
+				if err != nil {
+					return tsconfigScope{}, fmt.Errorf("resolve outDir %s: %w", outDir, err)
+				}
+				scope.defaultOutDir = filepath.Clean(absolute)
+			}
 		}
 	}
 	return scope, nil
