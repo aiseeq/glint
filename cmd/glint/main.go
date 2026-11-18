@@ -1259,6 +1259,26 @@ func requiredFilePredicate(enabledRules []rules.Rule) (func(string) bool, bool) 
 	}, true
 }
 
+func additionalFilePredicate(enabledRules []rules.Rule) (func(string) bool, bool) {
+	predicates := make([]rules.AdditionalFileRule, 0, len(enabledRules))
+	for _, rule := range enabledRules {
+		if predicate, ok := rule.(rules.AdditionalFileRule); ok {
+			predicates = append(predicates, predicate)
+		}
+	}
+	if len(predicates) == 0 {
+		return nil, false
+	}
+	return func(path string) bool {
+		for _, predicate := range predicates {
+			if predicate.RequiresAdditionalFile(path) {
+				return true
+			}
+		}
+		return false
+	}, true
+}
+
 // prepareScopedAnalysis walks the scopes of a root and loads what its rules
 // need.
 func prepareScopedAnalysis(loader goProjectLoader, root analysisRoot, cfg *core.Config, enabledRules []rules.Rule, useCache bool) (*preparedRoot, error) {
@@ -1284,7 +1304,7 @@ func prepareScopedAnalysis(loader goProjectLoader, root analysisRoot, cfg *core.
 	for _, ctx := range walked {
 		if walker.ExcludedInstruction(ctx.Path) {
 			prepared.excludedInstructions = append(prepared.excludedInstructions, ctx)
-		} else if walker.AdditionalFile(ctx.Path) {
+		} else if walker.TicketFile(ctx.Path) {
 			prepared.ticketFiles = append(prepared.ticketFiles, ctx)
 		} else {
 			prepared.contexts = append(prepared.contexts, ctx)
@@ -1380,15 +1400,29 @@ func scopedAnalysisWalker(projectRoot string, root analysisRoot, cfg *core.Confi
 	walker := core.NewWalker(projectRoot, cfg).WithGoParsing(projectRuleCount == 0).
 		WithGoImportPaths(typedImports).WithScopes(root.walkScopes()).
 		WithExcludedInstructions(slices.ContainsFunc(enabledRules, rules.ReadsExcludedInstructions))
-	if predicate, ok := requiredFilePredicate(enabledRules); ok {
-		walker.WithRequiredFilePredicate(predicate)
+	required, hasRequired := requiredFilePredicate(enabledRules)
+	if hasRequired {
+		walker.WithRequiredFilePredicate(required)
 	}
 	ticketsConfigured, err := ticketFilesWanted(enabledRules)
 	if err != nil {
 		return nil, err
 	}
+	extraFiles, hasAdditional := additionalFilePredicate(enabledRules)
 	if ticketsConfigured {
+		walker.WithTicketFilePredicate(func(path string) bool {
+			ext := strings.ToLower(filepath.Ext(path))
+			return ext == ".yaml" || ext == ".yml"
+		})
+	}
+	if ticketsConfigured || hasAdditional {
 		walker.WithAdditionalFilePredicate(func(path string) bool {
+			if hasAdditional && extraFiles(path) {
+				return true
+			}
+			if !ticketsConfigured {
+				return false
+			}
 			ext := strings.ToLower(filepath.Ext(path))
 			return ext == ".yaml" || ext == ".yml"
 		})

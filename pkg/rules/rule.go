@@ -72,6 +72,13 @@ type RequiredFileRule interface {
 	RequiresFile(path string) bool
 }
 
+// AdditionalFileRule selects required paths whose extensions the general
+// walker would otherwise skip.
+type AdditionalFileRule interface {
+	Rule
+	RequiresAdditionalFile(path string) bool
+}
+
 // BaseRule provides common functionality for rules
 type BaseRule struct {
 	name            string

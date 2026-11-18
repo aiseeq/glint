@@ -54,6 +54,60 @@ type gitignoreIndex struct {
 	patterns map[string][]gitignore.Pattern
 }
 
+// GitIgnoreChecker checks paths against the repository's .gitignore files.
+// It loads each directory's rules once as paths are checked.
+type GitIgnoreChecker struct {
+	mu     sync.Mutex
+	index  *gitignoreIndex
+	loaded map[string]bool
+}
+
+// NewGitIgnoreChecker creates a checker rooted at projectRoot. A directory
+// without a repository has no Git ignore rules and is checked without error.
+func NewGitIgnoreChecker(projectRoot string) (*GitIgnoreChecker, error) {
+	absProject, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve project root %q: %w", projectRoot, err)
+	}
+	index, err := newGitignoreIndex(absProject)
+	if err != nil {
+		return nil, err
+	}
+	checker := &GitIgnoreChecker{index: index, loaded: make(map[string]bool)}
+	chain, err := ancestorChain(index.root, filepath.Dir(absProject))
+	if err != nil {
+		return nil, err
+	}
+	for _, dir := range chain {
+		checker.loaded[dir] = true
+	}
+	return checker, nil
+}
+
+// Ignored reports whether path is ignored by the rules applicable to it.
+func (c *GitIgnoreChecker) Ignored(path string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false, fmt.Errorf("resolve %q: %w", path, err)
+	}
+	chain, err := ancestorChain(c.index.root, filepath.Dir(abs))
+	if err != nil {
+		return false, err
+	}
+	for _, dir := range chain {
+		if c.loaded[dir] {
+			continue
+		}
+		if err := c.index.addDir(dir); err != nil {
+			return false, err
+		}
+		c.loaded[dir] = true
+	}
+	return c.index.ignored(abs, false)
+}
+
 // newGitignoreIndex строит индекс для projectRoot: находит корень репозитория
 // и загружает .gitignore каждого предка projectRoot (сам projectRoot загрузит
 // walker при входе в каталог).

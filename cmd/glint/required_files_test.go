@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/doccheck"
+	"github.com/aiseeq/glint/pkg/rules/patterns/qarules"
 )
 
 func requiredFilesFixture(t *testing.T) string {
@@ -25,6 +28,31 @@ func requiredFilesFixture(t *testing.T) string {
 		writeModuleFile(t, root, fmt.Sprintf("docs/file-%02d.md", i), "documentation\n")
 	}
 	return root
+}
+
+func TestAdditionalFileRuleFindsBackupWithUnknownExtension(t *testing.T) {
+	root := t.TempDir()
+	writeModuleFile(t, root, ".gitignore", "x.json\n")
+	writeModuleFile(t, root, "x.json", "secret")
+	writeModuleFile(t, root, "x.json.bak-1118", "secret copy")
+	cmd := exec.Command("git", "-C", root, "init", "-q")
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", output)
+
+	rule := qarules.NewBackupCopyOfIgnoredFileRule()
+	configured := core.DefaultConfig()
+	prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, configured, []rules.Rule{rule}, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, prepared.walker.Stats().TotalFiles)
+	require.Len(t, prepared.contexts, 1)
+	require.Len(t, rule.AnalyzeFile(prepared.contexts[0]), 1)
+	violations, panics, err := analyzePrepared(prepared, []rules.Rule{rule}, configured)
+	require.NoError(t, err)
+	require.Empty(t, panics)
+	require.Len(t, violations, 1)
+	require.Contains(t, violations[0].Message, "x.json")
+	require.Contains(t, violations[0].Suggestion, "scratchpad")
+	require.Equal(t, filepath.Join(root, "x.json.bak-1118"), prepared.contexts[0].Path)
 }
 
 func TestRequiredFileRulesLimitWalkToNeededPaths(t *testing.T) {

@@ -26,6 +26,7 @@ type Walker struct {
 	goImportPaths  []string
 	requiredFile   func(string) bool
 	additionalFile func(string) bool
+	ticketFile     func(string) bool
 	// gitignore строится в начале каждого обхода (settings.respect_gitignore);
 	// nil — учёт .gitignore выключен. Заполняется и читается только в
 	// goroutine обнаружения файлов, лока не требует.
@@ -138,9 +139,20 @@ func (w *Walker) WithAdditionalFilePredicate(predicate func(string) bool) *Walke
 	return w
 }
 
+// WithTicketFilePredicate marks files held only for ticket suppression data.
+func (w *Walker) WithTicketFilePredicate(predicate func(string) bool) *Walker {
+	w.ticketFile = predicate
+	return w
+}
+
 // AdditionalFile reports a file included only by the additional predicate.
 func (w *Walker) AdditionalFile(path string) bool {
 	return w.additionalFile != nil && w.additionalFile(path) && !w.isAnalyzableFile(path)
+}
+
+// TicketFile reports a YAML file held only for ticket suppression data.
+func (w *Walker) TicketFile(path string) bool {
+	return w.ticketFile != nil && w.ticketFile(path)
 }
 
 // WithWorkers sets the number of worker goroutines
