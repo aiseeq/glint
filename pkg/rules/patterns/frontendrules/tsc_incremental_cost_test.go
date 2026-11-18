@@ -401,6 +401,118 @@ func TestTscNewPackageMetadataInvalidatesFingerprint(t *testing.T) {
 	assert.False(t, lookup.reuseBuildInfo)
 }
 
+func TestTscFingerprintWatchesIncludedDirectoriesWithoutListedFiles(t *testing.T) {
+	root := tscProject(t, "", map[string]string{
+		"tsconfig.json":       strictTSConfig,
+		"src/main.ts":         "export const n = 1\n",
+		"src/types/README.md": "types go here\n",
+	})
+	config := filepath.Join(root, "tsconfig.json")
+	listed := []byte(filepath.Join(root, "src", "main.ts") + "\n")
+	before, err := makeStatFingerprint(nil, config, listed, "")
+	require.NoError(t, err)
+	patterntest.WriteProjectFile(t, root, "src/types/globals.d.ts", "declare const probeGlobal: number;\n")
+	after, err := makeStatFingerprint(nil, config, listed, "")
+	require.NoError(t, err)
+	assert.NotEqual(t, before.Dirs, after.Dirs, "a new declaration in an included directory must invalidate the fingerprint")
+}
+
+func TestTscFingerprintSkipsHiddenDirectoriesUnlessIncludedLiterally(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		include string
+		wantNew bool
+	}{
+		{name: "wildcard", include: `"include":["**/*.ts"]`},
+		{name: "literal include", include: `"include":["**/*.ts",".next/types/**/*.ts"]`, wantNew: true},
+		{name: "star does not match a hidden component", include: `"include":["*/types/**/*.ts"]`},
+		{name: "no include takes no hidden directory", include: `"exclude":["dist"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configText := `{"compilerOptions":{"strict":true,"noEmit":true},` + tc.include + `}`
+			root := tscProject(t, "", map[string]string{
+				"tsconfig.json":             configText,
+				"src/main.ts":               "export const n = 1\n",
+				".next/cache/x/README.md":   "generated cache\n",
+				".next/types/sub/README.md": "generated types\n",
+			})
+			config := filepath.Join(root, "tsconfig.json")
+			listed := []byte(filepath.Join(root, "src", "main.ts") + "\n")
+			before, err := makeStatFingerprint(nil, config, listed, "")
+			require.NoError(t, err)
+			patterntest.WriteProjectFile(t, root, ".next/cache/x/globals.d.ts", "declare const probeCache: number;\n")
+			patterntest.WriteProjectFile(t, root, ".next/types/sub/globals.d.ts", "declare const probeTypes: number;\n")
+			after, err := makeStatFingerprint(nil, config, listed, "")
+			require.NoError(t, err)
+			for _, dir := range after.Dirs {
+				assert.NotContains(t, dir.Path, filepath.Join(".next", "cache"), "a hidden directory the include does not name is not watched")
+			}
+			if tc.wantNew {
+				assert.NotEqual(t, before.Dirs, after.Dirs)
+			} else {
+				assert.Equal(t, before.Dirs, after.Dirs)
+			}
+		})
+	}
+}
+
+func TestTscFingerprintDoesNotExtendLiteralHiddenIncludeToPrefixSibling(t *testing.T) {
+	root := tscProject(t, "", map[string]string{
+		"tsconfig.json":          `{"compilerOptions":{"strict":true,"noEmit":true},"include":[".next/types/**/*.ts"]}`,
+		".next/typesX/README.md": "not included\n",
+		"src/main.ts":            "export const n = 1\n",
+	})
+	config := filepath.Join(root, "tsconfig.json")
+	listed := []byte(filepath.Join(root, "src", "main.ts") + "\n")
+	before, err := makeStatFingerprint(nil, config, listed, "")
+	require.NoError(t, err)
+	patterntest.WriteProjectFile(t, root, ".next/typesX/globals.d.ts", "declare const ignored: number;\n")
+	after, err := makeStatFingerprint(nil, config, listed, "")
+	require.NoError(t, err)
+	for _, dir := range after.Dirs {
+		assert.NotContains(t, dir.Path, filepath.Join(".next", "typesX"))
+	}
+	assert.Equal(t, before.Dirs, after.Dirs)
+}
+
+func TestTscFingerprintSkipsDefaultOutDir(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+	}{
+		{
+			name: "direct",
+			files: map[string]string{
+				"tsconfig.json": `{"compilerOptions":{"strict":true,"noEmit":true,"outDir":"dist"},"include":["**/*.ts"]}`,
+			},
+		},
+		{
+			name: "inherited relative to base config",
+			files: map[string]string{
+				"tsconfig.json":     `{"extends":"./configs/base.json","include":["**/*.ts"]}`,
+				"configs/base.json": `{"compilerOptions":{"strict":true,"noEmit":true,"outDir":"../dist"}}`,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := map[string]string{
+				"src/main.ts":        "export const n = 1\n",
+				"dist/sub/README.md": "generated output\n",
+			}
+			maps.Copy(files, tc.files)
+			root := tscProject(t, "", files)
+			config := filepath.Join(root, "tsconfig.json")
+			listed := []byte(filepath.Join(root, "src", "main.ts") + "\n")
+			before, err := makeStatFingerprint(nil, config, listed, "")
+			require.NoError(t, err)
+			patterntest.WriteProjectFile(t, root, "dist/sub/globals.d.ts", "declare const generated: number;\n")
+			after, err := makeStatFingerprint(nil, config, listed, "")
+			require.NoError(t, err)
+			assert.Equal(t, before.Dirs, after.Dirs, "outDir is excluded by tsc unless the config explicitly overrides exclude")
+		})
+	}
+}
+
 func TestTscConfigResolutionChangesMatchFull(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

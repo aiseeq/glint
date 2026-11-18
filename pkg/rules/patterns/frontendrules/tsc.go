@@ -796,6 +796,7 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 		return tscStatFingerprint{}, fmt.Errorf("read the file list of tsc: %w", err)
 	}
 	root := ""
+	var scope *tsconfigScope
 	if config != "" {
 		configs, err := tsconfigChain(config)
 		if err != nil {
@@ -806,6 +807,11 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 		}
 		fingerprint.ConfigFiles = configs
 		root = filepath.Dir(config)
+		loadedScope, err := loadTSConfigScope(config)
+		if err != nil {
+			return tscStatFingerprint{}, err
+		}
+		scope = &loadedScope
 		// Type roots can affect resolution even when no file in them was listed.
 		for dir := root; ; dir = filepath.Dir(dir) {
 			for _, path := range []string{filepath.Join(dir, "node_modules"), filepath.Join(dir, "node_modules", "@types")} {
@@ -815,6 +821,11 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 			if filepath.Dir(dir) == dir {
 				break
 			}
+		}
+	}
+	if scope != nil {
+		if err := addIncludedFingerprintDirs(*scope, directories); err != nil {
+			return tscStatFingerprint{}, err
 		}
 	}
 	// Package metadata controls module resolution, but --listFiles omits it.
@@ -864,6 +875,46 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 		fingerprint.Dirs = append(fingerprint.Dirs, stamp)
 	}
 	return fingerprint, nil
+}
+
+// addIncludedFingerprintDirs records directories that can contribute files
+// through tsconfig include patterns. It runs while building a fingerprint;
+// cache hits only stat the recorded directory entries.
+func addIncludedFingerprintDirs(scope tsconfigScope, directories map[string]bool) error {
+	return filepath.WalkDir(scope.base, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if path != scope.base && entry.Name() == "node_modules" {
+			return filepath.SkipDir
+		}
+		if scope.defaultExcludes && path != scope.base && (entry.Name() == "bower_components" || entry.Name() == "jspm_packages") {
+			return filepath.SkipDir
+		}
+		if scope.defaultOutDir != "" && core.WithinPath(path, scope.defaultOutDir) {
+			return filepath.SkipDir
+		}
+		rel, err := filepath.Rel(scope.base, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		for _, excluded := range scope.exclude {
+			if excluded.match(rel) {
+				return filepath.SkipDir
+			}
+		}
+		if !scope.includeCanReachDirectory(rel) {
+			return filepath.SkipDir
+		}
+		if scope.includesFingerprintDirectory(rel) {
+			directories[path] = true
+		}
+		return nil
+	})
 }
 
 // addModuleScopeDirs watches each existing node_modules among the optional
