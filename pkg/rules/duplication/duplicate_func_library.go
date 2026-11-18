@@ -137,8 +137,9 @@ type libraryNearFunction struct {
 	Body nearBody `json:"body"`
 }
 type libraryCacheEntry struct {
-	Keys map[string][]libraryFunction `json:"keys"`
-	Near []libraryNearFunction        `json:"near,omitempty"`
+	Keys   map[string][]libraryFunction `json:"keys"`
+	Near   []libraryNearFunction        `json:"near,omitempty"`
+	Inline []inlineFunction             `json:"inline,omitempty"`
 }
 type libraryMatch struct {
 	name, module, packageName, importPath string
@@ -154,6 +155,7 @@ type moduleLibrary struct {
 	goCandidates []*nearCandidate
 	goNear       *nearIndex
 	tsNear       []*nearCandidate
+	inline       []inlineCandidate
 }
 type goModule struct{ path, dir, goMod string }
 
@@ -514,6 +516,11 @@ func (r *DuplicateFuncOfLibraryRule) mergeDependencyKeys(lib *moduleLibrary, pro
 	}
 	mergeImportableFunctions(lib.keys, project, dep, entry)
 	mergeNearFunctions(lib, project, dep, entry)
+	for _, fn := range entry.Inline {
+		if packageImportableFrom(project.path, fn.ImportPath) {
+			lib.inline = append(lib.inline, inlineCandidate{inlineFunction: fn, module: dep.path})
+		}
+	}
 }
 
 // mergeNearFunctions adds the near forms of the entry: the Go functions the
@@ -557,13 +564,17 @@ func mergeImportableFunctions(keys map[string]libraryMatch, project goModule, de
 }
 
 func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectContext, file *core.FileContext, info *types.Info, lib *moduleLibrary, projectPath string) []*core.Violation {
-	if lib == nil || len(lib.keys) == 0 && lib.goNear.empty() {
+	if lib == nil || len(lib.keys) == 0 && lib.goNear.empty() && len(lib.inline) == 0 {
 		return nil
 	}
 	var out []*core.Violation
 	for _, decl := range file.GoAST.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
-		if !ok || !nearCopyCandidate(fd, info) {
+		if !ok || fd.Body == nil {
+			continue
+		}
+		if !nearCopyCandidate(fd, info) {
+			out = append(out, r.inlineDuplicates(ctx, file, info, fd, lib)...)
 			continue
 		}
 		line := ctx.FileSet.Position(fd.Pos()).Line
@@ -580,7 +591,11 @@ func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectCo
 		candidate, score, _ := lib.goNear.bestFiltered(goNearBody(info, fd, false), func() nearBody { return goNearBody(info, fd, true) }, func(candidate *nearCandidate) bool {
 			return !candidate.fn.peer || sameStrings(functionTypeSet, stringSet(candidate.fn.types))
 		})
-		if candidate == nil || file.IsSuppressed(line, r.Name()) {
+		if candidate == nil {
+			out = append(out, r.inlineDuplicates(ctx, file, info, fd, lib)...)
+			continue
+		}
+		if file.IsSuppressed(line, r.Name()) {
 			continue
 		}
 		out = append(out, r.libraryViolation(file, fd, line, candidate.fn, score, false))
@@ -1131,6 +1146,15 @@ func loadFunctionKeys(dir string, includeUnexported bool) (libraryCacheEntry, er
 			}
 			for _, decl := range file.Decls {
 				fd, ok := decl.(*ast.FuncDecl)
+				if ok && !includeUnexported {
+					modulePath := pkg.PkgPath
+					if pkg.Module != nil {
+						modulePath = pkg.Module.Path
+					}
+					if fn, found := inlineLibraryFunction(fd, pkg.TypesInfo, pkg.PkgPath, pkg.Name, modulePath); found {
+						entry.Inline = append(entry.Inline, fn)
+					}
+				}
 				if !ok || fd.Name == nil || !includeUnexported && !fd.Name.IsExported() || !IsDuplicateFuncBodyCandidate(fd, pkg.TypesInfo) {
 					continue
 				}
