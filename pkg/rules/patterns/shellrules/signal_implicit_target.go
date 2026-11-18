@@ -13,6 +13,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
 )
 
@@ -408,6 +409,27 @@ func goStringFindings(r *signalImplicitTargetRule, f *core.FileContext, info *ty
 	var out []*core.Violation
 	executed := shellExecutedLiterals(f.GoAST, info)
 	data := dataLiterals(f.GoAST, info)
+	ast.Inspect(f.GoAST, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if script, ok := sshExecutionScript(call, info); ok {
+			calls, err := shellcmd.Calls(script)
+			if err == nil {
+				for _, remote := range calls {
+					if remote.Name != "kill" {
+						continue
+					}
+					if len(scanSignalLines([]signalInput{{text: remote.Raw}}, false)) > 0 {
+						out = append(out, signalViolation(r, f, call))
+						break
+					}
+				}
+			}
+		}
+		return true
+	})
 	if info != nil {
 		rangeData, rangeExecuted := rangeStringLiterals(f.GoAST, info, pkg)
 		for literal := range rangeData {
@@ -444,6 +466,40 @@ func goStringFindings(r *signalImplicitTargetRule, f *core.FileContext, info *ty
 		return true
 	})
 	return out
+}
+
+// sshExecutionScript models exec.Command's argv as the shell text ssh sends to
+// the remote shell. shellcmd parses ssh options and finds the remote command.
+func sshExecutionScript(call *ast.CallExpr, info *types.Info) (string, bool) {
+	name, ok := shellCommandName(call, info)
+	if !ok {
+		return "", false
+	}
+	start := 0
+	if name == "CommandContext" {
+		start = 1
+	}
+	if len(call.Args) <= start {
+		return "", false
+	}
+	command, ok := helpers.StringLiteral(call.Args[start])
+	if !ok || filepath.Base(command) != "ssh" {
+		return "", false
+	}
+	words := []string{"ssh"}
+	for _, arg := range call.Args[start+1:] {
+		word, literal := helpers.StringLiteral(arg)
+		if !literal {
+			words = append(words, `"$ARG"`)
+			continue
+		}
+		words = append(words, shellQuote(word))
+	}
+	return strings.Join(words, " "), true
+}
+
+func shellQuote(word string) string {
+	return "'" + strings.ReplaceAll(word, "'", "'\\''") + "'"
 }
 
 func singleKillFixture(value string) bool {

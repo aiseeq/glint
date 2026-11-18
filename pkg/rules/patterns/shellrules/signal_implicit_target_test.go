@@ -30,6 +30,37 @@ func (r *signalImplicitTargetRule) goFile(f *core.FileContext, info *types.Info)
 	return r.goTypedFile(f, pkg)
 }
 
+func TestSignalImplicitTargetGoSSHArgv(t *testing.T) {
+	source := `package main
+
+import (
+	"context"
+	"os/exec"
+)
+
+func remote(ctx context.Context, host, pid string) []*exec.Cmd {
+	return []*exec.Cmd{
+		exec.Command("ssh", "host", "kill -TERM -1"),                            // P1
+		exec.Command("ssh", "-T", "-o", "BatchMode=yes", "host", "kill", "0"),   // P2
+		exec.CommandContext(ctx, "ssh", host, "kill -9 -1"),                     // P3
+		exec.Command("/usr/bin/ssh", "-p", "2222", host, "kill", "-TERM", "-1"), // P4
+		exec.Command("ssh", "host", "kill", pid),                                // N1
+		exec.Command("ssh", "host", "kill -TERM 1234"),                          // N2
+		exec.Command("ssh", "-p", "22", "host", "uptime"),                       // N3
+		exec.Command("ssh", "host"),                                             // N4
+		exec.Command("sh", "-c", "kill -TERM -1"),                               // C1
+		exec.Command("ssh", "-l", "kill", "host", "uptime"),                     // N5
+		exec.Command("ssh", "host", "echo", "kill -TERM -1"),                    // N6
+	}
+}
+func main() {}
+`
+	file := core.NewFileContext("main.go", ".", []byte(source), nil)
+	file.GoFileSet = token.NewFileSet()
+	file.GoAST, _ = parser.ParseFile(file.GoFileSet, file.Path, source, parser.AllErrors)
+	assert.Equal(t, []int{10, 11, 12, 13, 18}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, nil)))
+}
+
 func TestSignalImplicitTargetShell(t *testing.T) {
 	shellWanted(t, "signal-implicit-target", "signal.sh", `#!/bin/sh
 kill "$PPID" # want
