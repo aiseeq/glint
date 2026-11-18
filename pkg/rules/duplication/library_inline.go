@@ -136,25 +136,31 @@ func inlineSources(info *types.Info, e ast.Expr, flow inlineFlow) map[string]boo
 }
 
 func inlineAssign(info *types.Info, a *ast.AssignStmt, flow inlineFlow, cond bool) {
-	if len(a.Lhs) != len(a.Rhs) {
+	inlineAssignment(info, a.Lhs, a.Tok, a.Rhs, flow, cond)
+}
+
+// inlineAssignment moves the sources of each right side into its place; a
+// compound assignment keeps what the place already held.
+func inlineAssignment(info *types.Info, lhsList []ast.Expr, tok token.Token, rhsList []ast.Expr, flow inlineFlow, cond bool) {
+	if len(lhsList) != len(rhsList) {
 		return
 	}
-	values := make([]map[string]bool, len(a.Rhs))
-	for i, rhs := range a.Rhs {
+	values := make([]map[string]bool, len(rhsList))
+	for i, rhs := range rhsList {
 		values[i] = inlineSources(info, rhs, flow)
 		if cond {
 			values[i][shapeCond] = true
 		}
-		if a.Tok >= token.ADD_ASSIGN && a.Tok <= token.AND_NOT_ASSIGN {
-			values[i][shapeOp+(token.ADD+a.Tok-token.ADD_ASSIGN).String()] = true
+		if tok >= token.ADD_ASSIGN && tok <= token.AND_NOT_ASSIGN {
+			values[i][shapeOp+(token.ADD+tok-token.ADD_ASSIGN).String()] = true
 		}
 	}
-	for i, lhs := range a.Lhs {
+	for i, lhs := range lhsList {
 		p, ok := inlineLocation(info, lhs)
 		if !ok {
 			continue
 		}
-		if a.Tok != token.ASSIGN && a.Tok != token.DEFINE {
+		if tok != token.ASSIGN && tok != token.DEFINE {
 			for k := range flow[p] {
 				values[i][k] = true
 			}
@@ -209,7 +215,7 @@ func inlineDecl(info *types.Info, d *ast.DeclStmt, flow inlineFlow, cond bool) {
 		for i, name := range vs.Names {
 			lhs[i] = name
 		}
-		inlineAssign(info, &ast.AssignStmt{Lhs: lhs, Tok: token.DEFINE, Rhs: vs.Values}, flow, cond)
+		inlineAssignment(info, lhs, token.DEFINE, vs.Values, flow, cond)
 	}
 }
 
@@ -365,7 +371,8 @@ func (r *DuplicateFuncOfLibraryRule) inlineBlockMatches(ctx *core.GoProjectConte
 	})
 	for _, p := range places {
 		fields := flow[p]
-		for _, fn := range lib.inline {
+		for i := range lib.inline {
+			fn := &lib.inline[i]
 			keys := make([]string, 0, len(fields))
 			for k := range fields {
 				if strings.HasPrefix(k, fn.module+"/") || strings.HasPrefix(k, fn.module+".") {
