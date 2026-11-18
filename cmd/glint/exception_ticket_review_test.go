@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/deadcode"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -123,8 +124,52 @@ func TestTicketYAMLMarkerWithoutReasonIsReported(t *testing.T) {
 	prepared, err := prepareScopedAnalysis(core.NewGoProjectLoader(), scope, cfg, enabled, false)
 	require.NoError(t, err)
 	var found []string
-	for _, v := range ticketFileSuppressionsWithoutReason(enabled, cfg, prepared.ticketFiles) {
+	readOnlyFindings, _ := readOnlySuppressionsWithoutReason(enabled, cfg, prepared.ticketFiles, ticketFileSuppressionNames(enabled))
+	for _, v := range readOnlyFindings {
 		found = append(found, v.File+":"+strconv.Itoa(v.Line)+":"+v.Rule)
 	}
 	assert.Equal(t, []string{"settings.yaml:1:suppression-without-reason"}, found)
+}
+
+func TestStaleSuppressionCountsTicketYAMLMarkerFindings(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		line      int
+		wantStale bool
+	}{
+		{name: "exception silences YAML finding", line: 2},
+		{name: "exception misses YAML finding", line: 3, wantStale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeModuleFile(t, root, "go.mod", "module example.org/test\n\ngo 1.24\n")
+			writeModuleFile(t, root, ".glint.yaml", "version: 1\ncategories:\n  deadcode:\n    rules:\n      suppression-without-reason:\n        exceptions:\n          - files: \"deploy/*.yml\"\n            line: "+strconv.Itoa(tc.line)+"\n            reason: one legacy marker\n")
+			writeModuleFile(t, root, "main.go", "package main\nfunc main() {}\n")
+			yamlPath := filepath.Join(root, "deploy", "a.yml")
+			writeModuleFile(t, root, "deploy/a.yml", "name: a\n# nolint:exception-ticket-closed\nimage: a:1\n")
+			cfg, err := core.LoadConfigWithDefaults(root)
+			require.NoError(t, err)
+			enabled := []rules.Rule{deadcode.NewSuppressionWithoutReasonRule(), deadcode.NewStaleSuppressionRule(), deadcode.NewExceptionTicketClosedRule()}
+			prepared := &preparedRoot{
+				contexts:    []*core.FileContext{core.NewFileContext(filepath.Join(root, "main.go"), root, []byte("package main\nfunc main() {}\n"), cfg)},
+				ticketFiles: []*core.FileContext{core.NewFileContext(yamlPath, root, []byte("name: a\n# nolint:exception-ticket-closed\nimage: a:1\n"), cfg)},
+			}
+			found, err := checkSuppressions(analysisRoot{dir: root, scopes: []string{root}}, prepared, enabled, cfg, nil)
+			require.NoError(t, err)
+			var stale core.ViolationList
+			for _, v := range found {
+				if v.Rule == "stale-suppression" && v.File == ".glint.yaml" {
+					stale = append(stale, v)
+				}
+			}
+			if tc.wantStale {
+				require.Len(t, stale, 1)
+				require.Equal(t, 7, stale[0].Line)
+				require.Contains(t, foundAt(found), "deploy/a.yml:2")
+			} else {
+				assert.Empty(t, stale)
+				assert.NotContains(t, foundAt(found), "deploy/a.yml:2")
+			}
+		})
+	}
 }

@@ -732,23 +732,22 @@ func closedTicketSuppressions(enabled []rules.Rule, run deadcode.StaleSuppressio
 	return silenceLateFindings(check, run, found), nil
 }
 
-// ticketFileSuppressionsWithoutReason runs suppression-without-reason over the
-// YAML files read only for exception-ticket-closed: a bare marker of that rule
-// there hides its finding, so it needs a reason like a marker in analyzed code.
-func ticketFileSuppressionsWithoutReason(enabled []rules.Rule, cfg *core.Config, files []*core.FileContext) core.ViolationList {
+// ticketFileSuppressionNames returns the rules whose markers are judged in
+// YAML files read only for exception-ticket-closed.
+func ticketFileSuppressionNames(enabled []rules.Rule) []string {
 	var names []string
 	for _, rule := range enabled {
 		if _, ok := rule.(*deadcode.ExceptionTicketClosedRule); ok {
 			names = append(names, rule.Name())
 		}
 	}
-	return readOnlySuppressionsWithoutReason(enabled, cfg, files, names)
+	return names
 }
 
-// readOnlySuppressionsWithoutReason runs suppression-without-reason over
-// files read only for the named rules, judging only their markers: those are
-// all a marker there can hide.
-func readOnlySuppressionsWithoutReason(enabled []rules.Rule, cfg *core.Config, files []*core.FileContext, names []string) core.ViolationList {
+// readOnlySuppressionsWithoutReason judges markers in files read only for
+// named rules, returning both findings left visible and exception entries for
+// findings the regular file-rule path would silence.
+func readOnlySuppressionsWithoutReason(enabled []rules.Rule, cfg *core.Config, files []*core.FileContext, names []string) (core.ViolationList, core.ViolationList) {
 	var check *deadcode.SuppressionWithoutReasonRule
 	for _, rule := range enabled {
 		if candidate, ok := rule.(*deadcode.SuppressionWithoutReasonRule); ok {
@@ -756,18 +755,26 @@ func readOnlySuppressionsWithoutReason(enabled []rules.Rule, cfg *core.Config, f
 		}
 	}
 	if check == nil || len(names) == 0 {
-		return nil
+		return nil, nil
 	}
-	var kept core.ViolationList
+	var kept, suppressions core.ViolationList
 	for _, ctx := range files {
 		for _, v := range check.MarkersWithoutReasonFor(ctx, names...) {
-			if cfg.IsFileExcepted(check.Category(), check.Name(), v.File) || cfg.IsViolationExcepted(check.Category(), check.Name(), v.File, v) || ctx.IsSuppressed(v.Line, check.Name()) {
+			if exc, ok := cfg.FileException(check.Category(), check.Name(), v.File); ok {
+				suppressions = append(suppressions, fileExceptionSuppression(cfg, v.File, check, exc, []*core.Violation{v}, nil)...)
+				continue
+			}
+			if entry := exceptionSuppression(cfg, check, v.File, v); entry != nil {
+				suppressions = append(suppressions, entry)
+				continue
+			}
+			if ctx.IsSuppressed(v.Line, check.Name()) {
 				continue
 			}
 			kept = append(kept, v)
 		}
 	}
-	return kept
+	return kept, suppressions
 }
 
 // staleSuppressions runs the stale-suppression check over one analyzed root
@@ -2021,7 +2028,9 @@ func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *cor
 			honoring = append(honoring, rule.Name())
 		}
 	}
-	violations = append(violations, readOnlySuppressionsWithoutReason(enabledRules, cfg, prepared.excludedInstructions, honoring)...)
+	readOnlyFindings, readOnlySuppressions := readOnlySuppressionsWithoutReason(enabledRules, cfg, prepared.excludedInstructions, honoring)
+	violations = append(violations, readOnlyFindings...)
+	violations = append(violations, readOnlySuppressions...)
 	return violations, append(panics, keptPanics...), validateFindingFiles(kept, readers, prepared.excludedInstructions)
 }
 

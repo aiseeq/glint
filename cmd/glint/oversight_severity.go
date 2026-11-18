@@ -115,6 +115,8 @@ func (s silencedSeverities) raiseMarkerFindings(list core.ViolationList) core.Vi
 func checkSuppressions(root analysisRoot, prepared *preparedRoot, enabledRules []rules.Rule, cfg *core.Config, violations core.ViolationList) (core.ViolationList, error) {
 	contexts := prepared.contexts
 	violations, suppressions := core.SplitSuppressions(violations)
+	ticketFindings, ticketSuppressions := readOnlySuppressionsWithoutReason(enabledRules, cfg, prepared.ticketFiles, ticketFileSuppressionNames(enabledRules))
+	suppressions = slices.Concat(suppressions, ticketSuppressions)
 	stale, err := staleSuppressions(enabledRules, deadcode.StaleSuppressionRun{
 		Contexts: contexts, Suppressions: suppressions, Config: cfg, WholeRoot: root.wholeRoot(),
 	})
@@ -126,7 +128,7 @@ func checkSuppressions(root analysisRoot, prepared *preparedRoot, enabledRules [
 		return nil, err
 	}
 	late, lateSuppressions := core.SplitSuppressions(slices.Concat(stale, closed))
-	violations = slices.Concat(violations, late, ticketFileSuppressionsWithoutReason(enabledRules, cfg, prepared.ticketFiles))
+	violations = slices.Concat(violations, late, ticketFindings)
 	silenced := newSilencedSeverities(cfg, slices.Concat(suppressions, lateSuppressions))
 	configFindings, err := analyzeConfigurationRules(enabledRules, cfg, contexts, root, silenced)
 	if err != nil {

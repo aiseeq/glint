@@ -102,6 +102,54 @@ func TestExcludedInstructionMarkerWithoutReasonIsReported(t *testing.T) {
 	assert.ElementsMatch(t, []string{"big/CLAUDE.md:1:instruction-size", "big/CLAUDE.md:1:md-broken-link", "CLAUDE.md:1:suppression-without-reason"}, found)
 }
 
+func TestExcludedInstructionExceptionIsCountedByStaleSuppression(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		line      int
+		wantStale bool
+	}{
+		{name: "matching exception", line: 1},
+		{name: "exception misses finding", line: 2, wantStale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := t.TempDir()
+			writeModuleFile(t, module, "go.mod", "module example.com/check\n\ngo 1.24\n")
+			writeModuleFile(t, module, "main.go", "package main\n\nfunc main() {}\n")
+			writeModuleFile(t, module, "CLAUDE.md", "<!-- nolint:md-broken-link -->\n")
+			writeModuleFile(t, module, ".glint.yaml", "version: 1\nsettings:\n  exclude: [\"*.md\"]\ncategories:\n  deadcode:\n    rules:\n      suppression-without-reason:\n        exceptions:\n          - file: CLAUDE.md\n            line: "+strconv.Itoa(tc.line)+"\n            reason: legacy instruction marker\n")
+			cfg, err := core.LoadConfigWithDefaults(module)
+			require.NoError(t, err)
+			reader := &excludedReader{&everyFileRule{rules.NewBaseRule("md-broken-link", "docs", "sees every file", core.SeverityLow)}}
+			enabled := []rules.Rule{doccheck.NewInstructionSizeRule(), reader, deadcode.NewSuppressionWithoutReasonRule(), deadcode.NewStaleSuppressionRule()}
+			prepared, err := prepareAnalysis(core.NewGoProjectLoader(), module, cfg, enabled, false)
+			require.NoError(t, err)
+			require.NotEmpty(t, prepared.excludedInstructions)
+			rules.ResetState(enabled)
+			violations, panics, err := analyzePrepared(prepared, enabled, cfg)
+			require.NoError(t, err)
+			require.Empty(t, panics)
+			found, err := checkSuppressions(analysisRoot{dir: module, scopes: []string{module}}, prepared, enabled, cfg, violations)
+			require.NoError(t, err)
+			var stale, markerFindings []string
+			for _, v := range found {
+				if v.Rule == "stale-suppression" && v.File == ".glint.yaml" {
+					stale = append(stale, v.Location())
+				}
+				if v.Rule == "suppression-without-reason" && v.File == "CLAUDE.md" {
+					markerFindings = append(markerFindings, v.Location())
+				}
+			}
+			if tc.wantStale {
+				assert.Equal(t, []string{".glint.yaml:9"}, stale)
+				assert.Equal(t, []string{"CLAUDE.md:1"}, markerFindings)
+			} else {
+				assert.Empty(t, stale)
+				assert.Empty(t, markerFindings)
+			}
+		})
+	}
+}
+
 // settings.exclude with a pattern over every file of a language of the
 // project ("*.go", "**/*.ts") takes that language out of the analysis.
 func TestBroadExclusionReportsAWholeLanguage(t *testing.T) {
