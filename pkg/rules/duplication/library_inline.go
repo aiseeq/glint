@@ -15,6 +15,10 @@ import (
 type inlineFunction struct {
 	libraryFunction
 	Fields []string `json:"fields"`
+	// Shape is the method's form: shapeCond when the result is chosen under a
+	// condition, shapeOp plus an operator for arithmetic on the way to it.
+	// Comparisons are left out: a copy may turn the condition around.
+	Shape  []string `json:"shape,omitempty"`
 	Method bool     `json:"method,omitempty"`
 }
 
@@ -23,6 +27,30 @@ type inlinePlace struct {
 	path string
 }
 type inlineFlow map[inlinePlace]map[string]bool
+
+const (
+	shapeCond = "#cond"
+	shapeOp   = "#op:"
+)
+
+func inlineArithmetic(op token.Token) bool {
+	switch op {
+	case token.ADD, token.SUB, token.MUL, token.QUO, token.REM, token.AND, token.OR, token.XOR, token.SHL, token.SHR, token.AND_NOT:
+		return true
+	}
+	return false
+}
+
+func inlineShape(keys map[string]bool) []string {
+	var out []string
+	for k := range keys {
+		if strings.HasPrefix(k, "#") {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
 
 // inlineField identifies the declared field through its named receiver type.
 // Package loads have distinct types.Objects, so the serialized key is resolved
@@ -82,6 +110,10 @@ func inlineSources(info *types.Info, e ast.Expr, flow inlineFlow) map[string]boo
 	out := map[string]bool{}
 	ast.Inspect(e, func(n ast.Node) bool {
 		switch x := n.(type) {
+		case *ast.BinaryExpr:
+			if inlineArithmetic(x.Op) {
+				out[shapeOp+x.Op.String()] = true
+			}
 		case *ast.SelectorExpr:
 			if key := inlineField(info, x); key != "" {
 				out[key] = true
@@ -103,13 +135,19 @@ func inlineSources(info *types.Info, e ast.Expr, flow inlineFlow) map[string]boo
 	return out
 }
 
-func inlineAssign(info *types.Info, a *ast.AssignStmt, flow inlineFlow) {
+func inlineAssign(info *types.Info, a *ast.AssignStmt, flow inlineFlow, cond bool) {
 	if len(a.Lhs) != len(a.Rhs) {
 		return
 	}
 	values := make([]map[string]bool, len(a.Rhs))
 	for i, rhs := range a.Rhs {
 		values[i] = inlineSources(info, rhs, flow)
+		if cond {
+			values[i][shapeCond] = true
+		}
+		if a.Tok >= token.ADD_ASSIGN && a.Tok <= token.AND_NOT_ASSIGN {
+			values[i][shapeOp+(token.ADD+a.Tok-token.ADD_ASSIGN).String()] = true
+		}
 	}
 	for i, lhs := range a.Lhs {
 		p, ok := inlineLocation(info, lhs)
@@ -147,19 +185,49 @@ func inlineMergeFlow(dst, src inlineFlow) {
 	}
 }
 
-func inlineWalk(info *types.Info, list []ast.Stmt, flow inlineFlow) {
+// inlineDecl records var x T as a place with nothing in it yet and var x = v
+// as an assignment, so a fragment may start at its declaration.
+func inlineDecl(info *types.Info, d *ast.DeclStmt, flow inlineFlow, cond bool) {
+	g, ok := d.Decl.(*ast.GenDecl)
+	if !ok || g.Tok != token.VAR {
+		return
+	}
+	for _, spec := range g.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		if len(vs.Values) == 0 {
+			for _, name := range vs.Names {
+				if p, ok := inlineLocation(info, name); ok {
+					flow[p] = map[string]bool{}
+				}
+			}
+			continue
+		}
+		lhs := make([]ast.Expr, len(vs.Names))
+		for i, name := range vs.Names {
+			lhs[i] = name
+		}
+		inlineAssign(info, &ast.AssignStmt{Lhs: lhs, Tok: token.DEFINE, Rhs: vs.Values}, flow, cond)
+	}
+}
+
+func inlineWalk(info *types.Info, list []ast.Stmt, flow inlineFlow, cond bool) {
 	for _, st := range list {
 		switch x := st.(type) {
 		case *ast.AssignStmt:
-			inlineAssign(info, x, flow)
+			inlineAssign(info, x, flow, cond)
+		case *ast.DeclStmt:
+			inlineDecl(info, x, flow, cond)
 		case *ast.IfStmt:
 			if a, ok := x.Init.(*ast.AssignStmt); ok {
-				inlineAssign(info, a, flow)
+				inlineAssign(info, a, flow, cond)
 			}
 			branch := inlineCopyFlow(flow)
-			inlineWalk(info, x.Body.List, branch)
+			inlineWalk(info, x.Body.List, branch, true)
 			if b, ok := x.Else.(*ast.BlockStmt); ok {
-				inlineWalk(info, b.List, flow)
+				inlineWalk(info, b.List, flow, true)
 			}
 			inlineMergeFlow(flow, branch)
 		}
@@ -203,11 +271,15 @@ func inlineLibraryFunction(fd *ast.FuncDecl, info *types.Info, pkgPath, pkgName,
 		return inlineFunction{}, false
 	}
 	flow := inlineFlow{}
-	inlineWalk(info, fd.Body.List, flow)
+	inlineWalk(info, fd.Body.List, flow, false)
 	fields := map[string]bool{}
+	shape := map[string]bool{}
 	ast.Inspect(fd.Body, func(n ast.Node) bool {
 		if ret, ok := n.(*ast.ReturnStmt); ok && len(ret.Results) == 1 {
 			for k := range inlineSources(info, ret.Results[0], flow) {
+				if strings.HasPrefix(k, "#") {
+					shape[k] = true
+				}
 				if strings.HasPrefix(k, modulePath+"/") || strings.HasPrefix(k, modulePath+".") {
 					fields[k] = true
 				}
@@ -219,7 +291,7 @@ func inlineLibraryFunction(fd *ast.FuncDecl, info *types.Info, pkgPath, pkgName,
 		return inlineFunction{}, false
 	}
 	keys := slices.Sorted(maps.Keys(fields))
-	return inlineFunction{libraryFunction: libraryFunction{Name: fd.Name.Name, Package: pkgName, ImportPath: pkgPath}, Fields: keys, Method: fn.Signature().Recv() != nil}, true
+	return inlineFunction{libraryFunction: libraryFunction{Name: fd.Name.Name, Package: pkgName, ImportPath: pkgPath}, Fields: keys, Shape: inlineShape(shape), Method: fn.Signature().Recv() != nil}, true
 }
 
 func inlineCalls(info *types.Info, block *ast.BlockStmt, fn inlineFunction) bool {
@@ -264,7 +336,7 @@ func (r *DuplicateFuncOfLibraryRule) inlineDuplicates(ctx *core.GoProjectContext
 				continue
 			}
 			flow := inlineFlow{}
-			inlineWalk(info, block.List[start:end], flow)
+			inlineWalk(info, block.List[start:end], flow, false)
 			out = append(out, r.inlineBlockMatches(ctx, file, info, fd, lib, block, block.List[start:end], flow)...)
 			start = end
 		}
@@ -275,7 +347,7 @@ func (r *DuplicateFuncOfLibraryRule) inlineDuplicates(ctx *core.GoProjectContext
 
 func inlineStatement(stmt ast.Stmt) bool {
 	switch stmt.(type) {
-	case *ast.AssignStmt, *ast.IfStmt:
+	case *ast.AssignStmt, *ast.IfStmt, *ast.DeclStmt:
 		return true
 	default:
 		return false
@@ -301,7 +373,7 @@ func (r *DuplicateFuncOfLibraryRule) inlineBlockMatches(ctx *core.GoProjectConte
 				}
 			}
 			slices.Sort(keys)
-			if !slices.Equal(keys, fn.Fields) || inlineCalls(info, block, fn.inlineFunction) {
+			if !slices.Equal(keys, fn.Fields) || !slices.Equal(inlineShape(fields), fn.Shape) || inlineCalls(info, block, fn.inlineFunction) {
 				continue
 			}
 			line := inlineFirstLine(ctx, info, block, statements, p)
@@ -321,14 +393,8 @@ func (r *DuplicateFuncOfLibraryRule) inlineBlockMatches(ctx *core.GoProjectConte
 
 func inlineFirstLine(ctx *core.GoProjectContext, info *types.Info, block *ast.BlockStmt, statements []ast.Stmt, target inlinePlace) int {
 	for _, stmt := range statements {
-		assign, ok := stmt.(*ast.AssignStmt)
-		if !ok {
-			continue
-		}
-		for _, lhs := range assign.Lhs {
-			if place, ok := inlineLocation(info, lhs); ok && place == target {
-				return ctx.FileSet.Position(stmt.Pos()).Line
-			}
+		if inlineWrites(info, stmt, target) {
+			return ctx.FileSet.Position(stmt.Pos()).Line
 		}
 	}
 	return ctx.FileSet.Position(block.Lbrace).Line
@@ -337,4 +403,30 @@ func inlineFirstLine(ctx *core.GoProjectContext, info *types.Info, block *ast.Bl
 type inlineCandidate struct {
 	inlineFunction
 	module string
+}
+
+// inlineWrites reports whether stmt, its branches included, declares or
+// assigns the place.
+func inlineWrites(info *types.Info, stmt ast.Stmt, target inlinePlace) bool {
+	found := false
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		var lhs []ast.Expr
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			lhs = x.Lhs
+		case *ast.ValueSpec:
+			for _, name := range x.Names {
+				lhs = append(lhs, name)
+			}
+		case *ast.FuncLit:
+			return false
+		}
+		for _, e := range lhs {
+			if place, ok := inlineLocation(info, e); ok && place == target {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
