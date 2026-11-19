@@ -783,6 +783,39 @@ func statPath(path string) (tscFileStat, error) {
 	return stamp, nil
 }
 
+// addListedModuleDirs adds to optional every existing node_modules directory
+// at an ancestor of a listed file outside node_modules. A listed file may be
+// imported from outside the config root or from an excluded directory, and
+// module resolution for that file can still consult node_modules at every
+// ancestor, including a node_modules symlink that a directory walk would not
+// enter.
+func addListedModuleDirs(files, optional map[string]bool) error {
+	moduleCandidates := map[string]bool{}
+	for path := range files {
+		if !isWithinNodeModules(path) {
+			for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+				moduleCandidates[filepath.Join(dir, "node_modules")] = true
+				if filepath.Dir(dir) == dir {
+					break
+				}
+			}
+		}
+	}
+	for path := range moduleCandidates {
+		info, err := os.Stat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("stat a tsc module directory %s: %w", path, err)
+		}
+		if info.IsDir() {
+			optional[path] = true
+		}
+	}
+	return nil
+}
+
 func makeStatFingerprint(tscPaths []string, config string, listed []byte, answerKey string, watchedDirs ...string) (tscStatFingerprint, error) {
 	fingerprint := tscStatFingerprint{AnswerKey: answerKey}
 	files := map[string]bool{}
@@ -801,32 +834,8 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 	if err := scanner.Err(); err != nil {
 		return tscStatFingerprint{}, fmt.Errorf("read the file list of tsc: %w", err)
 	}
-	// A listed file may be imported from outside the config root or from an
-	// excluded directory. Module resolution for that file can still consult
-	// node_modules at every ancestor, including a node_modules symlink that a
-	// directory walk would not enter.
-	moduleCandidates := map[string]bool{}
-	for path := range files {
-		if !isWithinNodeModules(path) {
-			for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
-				moduleCandidates[filepath.Join(dir, "node_modules")] = true
-				if filepath.Dir(dir) == dir {
-					break
-				}
-			}
-		}
-	}
-	for path := range moduleCandidates {
-		info, err := os.Stat(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return tscStatFingerprint{}, fmt.Errorf("stat a tsc module directory %s: %w", path, err)
-		}
-		if info.IsDir() {
-			optional[path] = true
-		}
+	if err := addListedModuleDirs(files, optional); err != nil {
+		return tscStatFingerprint{}, err
 	}
 	root := ""
 	var scope *tsconfigScope
