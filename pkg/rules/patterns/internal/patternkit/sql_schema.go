@@ -112,41 +112,7 @@ func SqlLiterals(root ast.Node) []SqlLiteral {
 	return SqlTexts(root, sqlStart.MatchString)
 }
 
-func sqlStringConsts(root ast.Node) map[string]ast.Expr {
-	consts := make(map[string]ast.Expr)
-	addDecl := func(decl *ast.GenDecl) {
-		if decl.Tok != token.CONST {
-			return
-		}
-		for _, spec := range decl.Specs {
-			values, ok := spec.(*ast.ValueSpec)
-			if !ok || len(values.Values) != len(values.Names) {
-				continue
-			}
-			for i, name := range values.Names {
-				consts[name.Name] = values.Values[i]
-			}
-		}
-	}
-	if file, ok := root.(*ast.File); ok {
-		for _, decl := range file.Decls {
-			if gen, ok := decl.(*ast.GenDecl); ok {
-				addDecl(gen)
-			}
-		}
-		return consts
-	}
-	ast.Inspect(root, func(n ast.Node) bool {
-		if decl, ok := n.(*ast.GenDecl); ok {
-			addDecl(decl)
-			return false
-		}
-		return true
-	})
-	return consts
-}
-
-func constSQLStringPieces(expr ast.Expr, consts map[string]ast.Expr, depth int) ([]sqlStringPiece, bool) {
+func constSQLStringPieces(expr ast.Expr, fold *sqlFolder, depth int) ([]sqlStringPiece, bool) {
 	if depth > 20 {
 		return nil, false
 	}
@@ -161,19 +127,28 @@ func constSQLStringPieces(expr ast.Expr, consts map[string]ast.Expr, depth int) 
 		if value.Op != token.ADD {
 			return nil, false
 		}
-		left, ok := constSQLStringPieces(value.X, consts, depth+1)
+		left, ok := constSQLStringPieces(value.X, fold, depth+1)
 		if !ok {
 			return nil, false
 		}
-		right, ok := constSQLStringPieces(value.Y, consts, depth+1)
+		right, ok := constSQLStringPieces(value.Y, fold, depth+1)
 		if !ok {
 			return nil, false
 		}
 		return append(left, right...), true
 	case *ast.Ident:
-		if value, ok := consts[value.Name]; ok {
-			return constSQLStringPieces(value, consts, depth+1)
+		if init := fold.value(value); init != nil {
+			pieces, ok := constSQLStringPieces(init, fold, depth+1)
+			if ok && value.Obj.Kind == ast.Var {
+				for i := range pieces {
+					pieces[i].pos = value.Pos()
+					pieces[i].raw = false
+				}
+			}
+			return pieces, ok
 		}
+	case *ast.CallExpr:
+		return fold.call(value, depth+1)
 	}
 	return nil, false
 }
@@ -181,14 +156,22 @@ func constSQLStringPieces(expr ast.Expr, consts map[string]ast.Expr, depth int) 
 // SqlTexts returns the string literals and concatenations of literals under
 // a node whose text accept takes.
 func SqlTexts(root ast.Node, accept func(string) bool) []SqlLiteral {
+	if body, ok := root.(*ast.BlockStmt); ok && body == nil {
+		return nil
+	}
 	var literals []SqlLiteral
-	consts := sqlStringConsts(root)
+	fold := newSQLFolder(root)
 	ast.Inspect(root, func(n ast.Node) bool {
 		expr, ok := n.(ast.Expr)
 		if !ok {
 			return true
 		}
-		if !IsStringOrConcat(expr) {
+		isCall := false
+		switch expr.(type) {
+		case *ast.CallExpr, *ast.ParenExpr:
+			isCall = fold.isCall(expr)
+		}
+		if !IsStringOrConcat(expr) && !isCall {
 			return true
 		}
 		literal := SqlLiteral{Expr: expr}
@@ -196,7 +179,7 @@ func SqlTexts(root ast.Node, accept func(string) bool) []SqlLiteral {
 		var gaps []int
 		hasLiteral := false
 		for _, operand := range helpers.ConcatOperands(expr) {
-			pieces, isConst := constSQLStringPieces(operand, consts, 0)
+			pieces, isConst := constSQLStringPieces(operand, fold, 0)
 			if !isConst {
 				gaps = append(gaps, builder.Len())
 				builder.WriteString(" $9 ")
@@ -220,7 +203,7 @@ func SqlTexts(root ast.Node, accept func(string) bool) []SqlLiteral {
 		if hasLiteral && accept(literal.Text) {
 			literals = append(literals, literal)
 		}
-		return false
+		return !hasLiteral && isCall
 	})
 	return literals
 }
