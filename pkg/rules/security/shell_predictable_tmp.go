@@ -2,8 +2,10 @@ package security
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 
+	"github.com/aiseeq/akit/shellcmd"
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 )
@@ -59,6 +61,52 @@ func (r *ShellPredictableTmpRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 			tmpVars[m[1]] = true
 		}
 	}
+	calls, parsed := parseShellCalls(string(ctx.Content))
+	if !parsed {
+		return r.analyzeFileFallback(ctx, lines, tmpVars)
+	}
+	return r.analyzeCalls(ctx, lines, tmpVars, calls)
+}
+
+func parseShellCalls(text string) ([]shellcmd.Call, bool) {
+	calls, err := shellcmd.Calls(text)
+	return calls, err == nil
+}
+
+func (r *ShellPredictableTmpRule) analyzeCalls(
+	ctx *core.FileContext,
+	lines []string,
+	tmpVars map[string]bool,
+	calls []shellcmd.Call,
+) []*core.Violation {
+	var violations []*core.Violation
+	reported := make(map[int]bool)
+	for i := range calls {
+		call := &calls[i]
+		if call.Line < 1 || call.Line > len(lines) || reported[call.Line] || !runsAsRoot(call, calls) {
+			continue
+		}
+		args := strings.Join(call.Args, " ")
+		if !usesPredictableTmp(args, tmpVars) {
+			continue
+		}
+		if ctx.IsSuppressed(call.Line, r.Name()) {
+			continue
+		}
+		code := strings.TrimSpace(lines[call.Line-1])
+		if strings.HasPrefix(code, "#") {
+			continue
+		}
+		v := r.CreateViolation(ctx.RelPath, call.Line, "sudo uses a file at a predictable /tmp path — another user of the host creates it, or a symlink, first and root runs their content")
+		v.WithCode(code)
+		v.WithSuggestion("Create the file with mktemp (remote: tmp=$(ssh host mktemp)) and pass that name")
+		violations = append(violations, v)
+		reported[call.Line] = true
+	}
+	return violations
+}
+
+func (r *ShellPredictableTmpRule) analyzeFileFallback(ctx *core.FileContext, lines []string, tmpVars map[string]bool) []*core.Violation {
 	var violations []*core.Violation
 	for i, line := range lines {
 		code := strings.TrimSpace(line)
@@ -66,10 +114,7 @@ func (r *ShellPredictableTmpRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 			continue
 		}
 		command, ok := rootCommand(code)
-		if !ok || !usesPredictableTmp(command, tmpVars) {
-			continue
-		}
-		if ctx.IsSuppressed(i+1, r.Name()) {
+		if !ok || !usesPredictableTmp(command, tmpVars) || ctx.IsSuppressed(i+1, r.Name()) {
 			continue
 		}
 		v := r.CreateViolation(ctx.RelPath, i+1, "sudo uses a file at a predictable /tmp path — another user of the host creates it, or a symlink, first and root runs their content")
@@ -78,6 +123,69 @@ func (r *ShellPredictableTmpRule) AnalyzeFile(ctx *core.FileContext) []*core.Vio
 		violations = append(violations, v)
 	}
 	return violations
+}
+
+// runsAsRoot reports whether the call passed through sudo without selecting a
+// non-root user. shellcmd also returns a wrapper call for direct sudo commands;
+// their Args retain sudo's options while the wrapped call's Via contains only
+// the wrapper names.
+func runsAsRoot(call *shellcmd.Call, calls []shellcmd.Call) bool {
+	if call.Name == "sudo" {
+		return sudoRunsAsRoot(call.Args)
+	}
+	for i, wrapper := range call.Via {
+		if wrapper != "sudo" {
+			continue
+		}
+		for j := range calls {
+			candidate := &calls[j]
+			if candidate.Name == "sudo" && candidate.Line == call.Line && slices.Equal(candidate.Via, call.Via[:i]) {
+				return sudoRunsAsRoot(candidate.Args)
+			}
+		}
+		// env and nohup can hide sudo's option-bearing call while retaining
+		// its command line in their own Args.
+		if i > 0 {
+			wrapper := call.Via[i-1]
+			for j := range calls {
+				candidate := &calls[j]
+				if candidate.Name == wrapper && candidate.Line == call.Line && slices.Equal(candidate.Via, call.Via[:i-1]) {
+					if root, found := wrappedSudoRunsAsRoot(candidate.Args); found {
+						return root
+					}
+				}
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func wrappedSudoRunsAsRoot(args []string) (bool, bool) {
+	for i, arg := range args {
+		if arg == "sudo" {
+			return sudoRunsAsRoot(args[i+1:]), true
+		}
+	}
+	return false, false
+}
+
+func sudoRunsAsRoot(args []string) bool {
+	for i := range args {
+		arg := args[i]
+		if arg == "-u" || arg == "--user" {
+			return i+1 >= len(args) || strings.Trim(args[i+1], `"'`) == "root"
+		}
+		if strings.HasPrefix(arg, "-u") && len(arg) > 2 {
+			user := strings.TrimPrefix(arg, "-u")
+			user = strings.TrimPrefix(user, "=")
+			return strings.Trim(user, `"'`) == "root"
+		}
+		if arg == "--" || !strings.HasPrefix(arg, "-") {
+			break
+		}
+	}
+	return true
 }
 
 // rootCommand returns what a line runs as root: the text after sudo, without
