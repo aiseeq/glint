@@ -125,40 +125,155 @@ func (r *ShellPredictableTmpRule) analyzeFileFallback(ctx *core.FileContext, lin
 	return violations
 }
 
-// runsAsRoot reports whether the call passed through sudo without selecting a
-// non-root user. shellcmd also returns a wrapper call for direct sudo commands;
-// their Args retain sudo's options while the wrapped call's Via contains only
-// the wrapper names.
+// runsAsRoot reports whether a target call executes as root on the host that
+// ran sudo. Calls that only launch sudo or hand a script to a context-changing
+// wrapper are not target calls themselves.
 func runsAsRoot(call *shellcmd.Call, calls []shellcmd.Call) bool {
-	if call.Name == "sudo" {
-		return sudoRunsAsRoot(call.Args)
+	if call.Name == "sudo" || call.Name == "su" || call.Name == "runuser" || call.Name == "ssh" {
+		return false
 	}
-	for i, wrapper := range call.Via {
-		if wrapper != "sudo" {
-			continue
-		}
-		for j := range calls {
-			candidate := &calls[j]
-			if candidate.Name == "sudo" && candidate.Line == call.Line && slices.Equal(candidate.Via, call.Via[:i]) {
-				return sudoRunsAsRoot(candidate.Args)
+	if (call.Name == "docker" || call.Name == "podman") && firstSubcommand(call.Args) == "exec" {
+		return false
+	}
+	if call.Name == "kubectl" && hasSubcommand(call.Args, "exec") {
+		return false
+	}
+	sudoIndex := lastVia(call.Via, "sudo")
+	if sudoIndex < 0 || !sudoRunsAsRootForCall(call, calls, sudoIndex) {
+		return false
+	}
+	return !leavesHostRoot(call, calls, sudoIndex)
+}
+
+func sudoRunsAsRootForCall(call *shellcmd.Call, calls []shellcmd.Call, viaIndex int) bool {
+	if candidate := findWrappedCall(call, calls, "sudo", call.Via[:viaIndex]); candidate != nil {
+		return sudoRunsAsRoot(candidate.Args)
+	}
+	// env and nohup can hide sudo's option-bearing call while retaining its
+	// command line in their Args.
+	if viaIndex > 0 {
+		wrapper := call.Via[viaIndex-1]
+		if candidate := findWrappedCall(call, calls, wrapper, call.Via[:viaIndex-1]); candidate != nil {
+			if root, found := wrappedSudoRunsAsRoot(candidate.Args); found {
+				return root
 			}
 		}
-		// env and nohup can hide sudo's option-bearing call while retaining
-		// its command line in their own Args.
-		if i > 0 {
-			wrapper := call.Via[i-1]
-			for j := range calls {
-				candidate := &calls[j]
-				if candidate.Name == wrapper && candidate.Line == call.Line && slices.Equal(candidate.Via, call.Via[:i-1]) {
-					if root, found := wrappedSudoRunsAsRoot(candidate.Args); found {
-						return root
-					}
-				}
+	}
+	return true
+}
+
+func leavesHostRoot(call *shellcmd.Call, calls []shellcmd.Call, sudoIndex int) bool {
+	for i := sudoIndex + 1; i < len(call.Via); i++ {
+		wrapper := call.Via[i]
+		switch wrapper {
+		case "ssh":
+			return true
+		case "su", "runuser":
+			candidate := findWrappedCall(call, calls, wrapper, call.Via[:i])
+			if candidate == nil || switchesToNonRoot(wrapper, candidate.Args) {
+				return true
+			}
+		case "docker", "podman":
+			// shellcmd records docker/podman in Via only after peeling an exec
+			// invocation; its target runs in the container's /tmp namespace.
+			return true
+		case "kubectl":
+			if candidate := findWrappedCall(call, calls, wrapper, call.Via[:i]); candidate != nil && hasSubcommand(candidate.Args, "exec") {
+				return true
+			}
+		case "exec":
+			// shellcmd may expose kubectl's exec wrapper with or without its
+			// kubectl name in Via. A plain shell exec remains host-root.
+			if candidate := findWrappedCall(call, calls, "kubectl", call.Via[:i]); candidate != nil && hasSubcommand(candidate.Args, "exec") {
+				return true
 			}
 		}
-		return true
 	}
 	return false
+}
+
+func findWrappedCall(call *shellcmd.Call, calls []shellcmd.Call, name string, prefix []string) *shellcmd.Call {
+	var best *shellcmd.Call
+	bestOffset := -1
+	bestLine := -1
+	for i := range calls {
+		candidate := &calls[i]
+		if candidate.Name != name || !slices.Equal(candidate.Via, prefix) {
+			continue
+		}
+		if call.Offset >= 0 && candidate.Offset >= 0 && candidate.Offset <= call.Offset {
+			if candidate.Offset >= bestOffset {
+				best = candidate
+				bestOffset = candidate.Offset
+			}
+			continue
+		}
+		if bestOffset < 0 && candidate.Line <= call.Line && candidate.Line >= bestLine {
+			best = candidate
+			bestLine = candidate.Line
+		}
+	}
+	return best
+}
+
+func lastVia(via []string, name string) int {
+	for i := len(via) - 1; i >= 0; i-- {
+		if via[i] == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func firstSubcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return ""
+		}
+		if strings.HasPrefix(arg, "-") {
+			if !strings.Contains(arg, "=") && commandOptionsWithValue[arg] && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		return arg
+	}
+	return ""
+}
+
+var commandOptionsWithValue = map[string]bool{
+	"--as": true, "--as-group": true, "--certificate-authority": true,
+	"--cluster": true, "--context": true, "--namespace": true,
+	"--request-timeout": true, "--server": true, "--token": true,
+	"--user": true, "-n": true,
+}
+
+func hasSubcommand(args []string, name string) bool {
+	return firstSubcommand(args) == name
+}
+
+func switchesToNonRoot(wrapper string, args []string) bool {
+	for i := range args {
+		arg := args[i]
+		if wrapper == "runuser" && (arg == "-u" || arg == "--user") {
+			return i+1 < len(args) && strings.Trim(args[i+1], `"'`) != "root"
+		}
+		if wrapper == "runuser" && strings.HasPrefix(arg, "--user=") {
+			return strings.Trim(strings.TrimPrefix(arg, "--user="), `"'`) != "root"
+		}
+		if wrapper == "su" && (arg == "-c" || arg == "--command") {
+			return false
+		}
+		if arg == "--" {
+			return false
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return strings.Trim(arg, `"'`) != "root"
+	}
+	return wrapper == "runuser"
 }
 
 func wrappedSudoRunsAsRoot(args []string) (bool, bool) {
