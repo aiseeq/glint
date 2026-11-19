@@ -1174,6 +1174,10 @@ func TestSignalImplicitTargetWrappedKillIsFixture(t *testing.T) {
 		"	for _, command := range []string{`sudo -- X=1 k\\ill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
 		"	for _, command := range []string{`sudo -- A=$a B=1 /bin/kill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
 		"	for _, command := range []string{`timeout 5 nice kill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
+		"	for _, command := range []string{`pkexec kill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
+		"	for _, command := range []string{`run0 kill 1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
+		"	for _, command := range []string{`pkexec --user root kill -9 -1`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT-NONE\n" +
+		"	for _, command := range []string{`run0 bash -c 'kill -9 -1'`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT\n" +
 		"	for _, command := range []string{`sudo -- X=1 bash <<< 'kill -9 -1'`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT\n" +
 		"	for _, command := range []string{`sudo bash -c 'kill -9 $PPID'`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT\n" +
 		"	for _, command := range []string{`sudo kill -9 -1 $(sh -c 'kill -9 -1')`} { (guard{}).Validate(&toolInput{Command: command}) } // WANT\n" +

@@ -519,6 +519,7 @@ func singleKillFixture(value string) bool {
 var directKillWrappers = map[string]bool{
 	"sudo": true, "doas": true, "timeout": true, "nice": true, "ionice": true, "env": true,
 	"nohup": true, "setsid": true, "stdbuf": true, "taskset": true, "chrt": true,
+	"pkexec": true, "run0": true,
 }
 
 // isWrappedKillFixture reports a lone kill behind wrappers that run it directly,
