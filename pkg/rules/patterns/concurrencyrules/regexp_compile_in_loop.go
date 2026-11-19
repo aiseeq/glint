@@ -89,21 +89,22 @@ func regexpCompileFindings(rule *RegexpCompileInLoopRule, file *core.FileContext
 					v.WithSuggestion("Move the pattern to a package variable, for example var xRe = regexp.MustCompile(\"...\")")
 					findings = append(findings, v)
 				}
-				// Walk call children explicitly so a callback literal inherits
-				// the surrounding loop. Once.Do is the exception: its callback
-				// is invoked at most once by an Once that may outlive the loop.
+				// Walk call children explicitly: arguments are evaluated where the
+				// call is, and a callback literal inherits the loop only when the
+				// callee runs it during the call.
 				if _, ok := ast.Unparen(x.Fun).(*ast.FuncLit); !ok {
 					walk(x.Fun, loopDepth, hot)
 				}
-				argDepth, argHot := loopDepth, hot
-				if syncOnceDo(info, x) {
-					argDepth, argHot = 0, false
-				}
+				runsCallback := callbackRunsInCall(info, x)
 				for _, arg := range x.Args {
-					if lit, ok := ast.Unparen(arg).(*ast.FuncLit); ok {
-						walk(lit.Body, argDepth, argHot)
-					} else {
-						walk(arg, argDepth, argHot)
+					lit, ok := ast.Unparen(arg).(*ast.FuncLit)
+					switch {
+					case !ok:
+						walk(arg, loopDepth, hot)
+					case runsCallback:
+						walk(lit.Body, loopDepth, hot)
+					default:
+						walk(lit.Body, 0, false)
 					}
 				}
 				return false
@@ -121,13 +122,33 @@ func regexpCompileFindings(rule *RegexpCompileInLoopRule, file *core.FileContext
 	return findings
 }
 
-func syncOnceDo(info *types.Info, call *ast.CallExpr) bool {
-	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-	if !ok {
+// callbackPackages run a function argument during the call (strings.FieldsFunc,
+// sort.Slice, slices.SortFunc, filepath.WalkDir) or, for sync.OnceValue and
+// its kin, make a new Once each time they are called. A callee from elsewhere
+// may store the callback (http.HandleFunc) or run it only on a cache miss.
+var callbackPackages = map[string]bool{
+	"bytes": true, "io/fs": true, "maps": true, "path/filepath": true,
+	"regexp": true, "slices": true, "sort": true, "strings": true, "sync": true,
+}
+
+// callbackRunsInCall reports whether a function literal passed to call runs on
+// each execution of the call. sync.Once.Do runs it at most once per Once.
+func callbackRunsInCall(info *types.Info, call *ast.CallExpr) bool {
+	var ident *ast.Ident
+	switch fun := ast.Unparen(call.Fun).(type) {
+	case *ast.Ident:
+		ident = fun
+	case *ast.SelectorExpr:
+		ident = fun.Sel
+	}
+	if ident == nil {
 		return false
 	}
-	fn, _ := info.Uses[sel.Sel].(*types.Func)
-	return fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == "sync" && fn.Name() == "Do"
+	fn, _ := info.Uses[ident].(*types.Func)
+	if fn == nil || fn.Pkg() == nil || !callbackPackages[fn.Pkg().Path()] {
+		return false
+	}
+	return fn.Pkg().Path() != "sync" || fn.Name() != "Do"
 }
 
 func regexpCall(info *types.Info, call *ast.CallExpr) bool {
