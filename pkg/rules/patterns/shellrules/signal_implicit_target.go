@@ -417,7 +417,8 @@ func goStringFindings(r *signalImplicitTargetRule, f *core.FileContext, info *ty
 		if script, ok := sshExecutionScript(call, info); ok {
 			calls, err := shellcmd.Calls(script)
 			if err == nil {
-				for _, remote := range calls {
+				for i := range calls {
+					remote := &calls[i]
 					if remote.Name != "kill" {
 						continue
 					}
@@ -530,7 +531,8 @@ func isWrappedKillFixture(text string) bool {
 		return false
 	}
 	kills := 0
-	for _, call := range calls {
+	for i := range calls {
+		call := &calls[i]
 		switch {
 		case call.Name == "kill":
 			kills++
