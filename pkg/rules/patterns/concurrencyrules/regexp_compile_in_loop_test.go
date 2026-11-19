@@ -13,6 +13,7 @@ const regexpCompileInLoopSource = `package units
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -47,16 +48,65 @@ func Hot(s string) {
 	regexp.MustCompile("hot") // want regexp-compile-in-loop
 	func() { regexp.Compile("iife") }() // want regexp-compile-in-loop
 	_ = func() { regexp.Compile("deferred literal") }
+	hotOnce.Do(func() { regexp.MustCompile("hot once") })
 }
+
+var hotOnce sync.Once
 
 func Once(lines []string) {
 	var once sync.Once
 	for _, line := range lines {
 		once.Do(func() { regexp.MustCompile("once") })
-		cached := sync.OnceValue(func() *regexp.Regexp { return regexp.MustCompile("value") })
+		cached := sync.OnceValue(func() *regexp.Regexp { return regexp.MustCompile("value") }) // want regexp-compile-in-loop
 		_ = cached()
-		_ = sync.OnceFunc(func() { regexp.MustCompile("func") })
+		_ = sync.OnceFunc(func() { regexp.MustCompile("func") }) // want regexp-compile-in-loop
+		_ = sync.OnceValues(func() (*regexp.Regexp, error) { return regexp.Compile("values") }) // want regexp-compile-in-loop
 		_ = line
+	}
+}
+
+func OnceOutside(lines []string) {
+	cached := sync.OnceValue(func() *regexp.Regexp { return regexp.MustCompile("cached outside") })
+	onceFunc := sync.OnceFunc(func() { regexp.MustCompile("func outside") })
+	onceValues := sync.OnceValues(func() (*regexp.Regexp, error) { return regexp.Compile("values outside") })
+	for _, line := range lines {
+		_ = cached()
+		onceFunc()
+		_, _ = onceValues()
+		_ = line
+	}
+}
+
+func ForCondition(s string) {
+	for regexp.MustCompile("condition").MatchString(s) { // want regexp-compile-in-loop
+		s = s[1:]
+	}
+}
+
+func ForPost(s string) {
+	for i := 0; i < 1; regexp.MatchString("post", s) { // want regexp-compile-in-loop
+		i++
+	}
+}
+
+func ForClauseForms() {
+	for i := 0; i < 1; i++ {
+		regexp.MustCompile("for clause") // want regexp-compile-in-loop
+	}
+	for {
+		regexp.MustCompile("infinite") // want regexp-compile-in-loop
+		break
+	}
+}
+
+func CallbackInLoop(lines []string) {
+	for _, line := range lines {
+		_ = len(strings.FieldsFunc(line, func(r rune) bool {
+			return regexp.MustCompile("callback").MatchString(string(r)) // want regexp-compile-in-loop
+		}))
+		sort.Slice([]string{line}, func(i, j int) bool {
+			return regexp.MustCompile("comparator").MatchString(line) // want regexp-compile-in-loop
+		})
 	}
 }
 
@@ -67,8 +117,26 @@ func Constants(lines []string) {
 }
 `
 
+const regexpCompileInLoopTestFileSource = `package units
+
+import "regexp"
+
+func TestForLoops() {
+	for i := 0; i < 1; i++ {
+		regexp.MustCompile("test file")
+	}
+	for {
+		regexp.MustCompile("test infinite")
+		break
+	}
+}
+`
+
 func TestRegexpCompileInLoop(t *testing.T) {
-	files := map[string]string{"units/units.go": regexpCompileInLoopSource}
+	files := map[string]string{
+		"units/units.go":      regexpCompileInLoopSource,
+		"units/units_test.go": regexpCompileInLoopTestFileSource,
+	}
 	violations, err := NewRegexpCompileInLoopRule().AnalyzeGoProject(rulestest.Project(t, files))
 	require.NoError(t, err)
 	assert.Equal(t, patterntest.WantedLines(files, "regexp-compile-in-loop"), patterntest.FoundLines(violations))

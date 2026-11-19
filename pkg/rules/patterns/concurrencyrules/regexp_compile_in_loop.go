@@ -59,41 +59,54 @@ func regexpCompileFindings(rule *RegexpCompileInLoopRule, file *core.FileContext
 			if n == nil {
 				return false
 			}
-			if n != node {
-				switch x := n.(type) {
-				case *ast.FuncLit:
-					// A function literal runs when it is called, not where it is
-					// written: sync.Once.Do(func(){…}) in a loop compiles once.
-					// One called on the spot is walked with its call below.
+			switch x := n.(type) {
+			case *ast.FuncLit:
+				if n != node {
+					// A function literal outside a call argument is its own
+					// context. Calls below walk their function literals according
+					// to how the call executes them.
 					walk(x.Body, 0, false)
 					return false
-				case *ast.ForStmt:
-					walk(x.Init, loopDepth, hot)
-					walk(x.Cond, loopDepth, hot)
-					walk(x.Post, loopDepth, hot)
-					walk(x.Body, loopDepth+1, hot)
-					return false
-				case *ast.RangeStmt:
-					walk(x.X, loopDepth, hot)
-					walk(x.Body, loopDepth+1, hot)
-					return false
-				case *ast.CallExpr:
-					if lit, ok := ast.Unparen(x.Fun).(*ast.FuncLit); ok {
-						walk(lit.Body, loopDepth, hot)
-						for _, arg := range x.Args {
-							walk(arg, loopDepth, hot)
-						}
-						return false
-					}
-					if regexpCall(info, x) && (loopDepth > 0 || hot) && constantRegexpPattern(info, x) {
-						line := file.LineFor(x)
-						message := "constant regexp pattern is compiled on every loop iteration or hot function call"
-						v := rule.CreateViolation(file.RelPath, line, message)
-						v.WithCode(file.GetLine(line))
-						v.WithSuggestion("Move the pattern to a package variable, for example var xRe = regexp.MustCompile(\"...\")")
-						findings = append(findings, v)
+				}
+			case *ast.ForStmt:
+				walk(x.Init, loopDepth, hot)
+				walk(x.Cond, loopDepth+1, hot)
+				walk(x.Post, loopDepth+1, hot)
+				walk(x.Body, loopDepth+1, hot)
+				return false
+			case *ast.RangeStmt:
+				walk(x.X, loopDepth, hot)
+				walk(x.Body, loopDepth+1, hot)
+				return false
+			case *ast.CallExpr:
+				if lit, ok := ast.Unparen(x.Fun).(*ast.FuncLit); ok {
+					walk(lit.Body, loopDepth, hot)
+				} else if regexpCall(info, x) && (loopDepth > 0 || hot) && constantRegexpPattern(info, x) {
+					line := file.LineFor(x)
+					message := "constant regexp pattern is compiled on every loop iteration or hot function call"
+					v := rule.CreateViolation(file.RelPath, line, message)
+					v.WithCode(file.GetLine(line))
+					v.WithSuggestion("Move the pattern to a package variable, for example var xRe = regexp.MustCompile(\"...\")")
+					findings = append(findings, v)
+				}
+				// Walk call children explicitly so a callback literal inherits
+				// the surrounding loop. Once.Do is the exception: its callback
+				// is invoked at most once by an Once that may outlive the loop.
+				if _, ok := ast.Unparen(x.Fun).(*ast.FuncLit); !ok {
+					walk(x.Fun, loopDepth, hot)
+				}
+				argDepth, argHot := loopDepth, hot
+				if syncOnceDo(info, x) {
+					argDepth, argHot = 0, false
+				}
+				for _, arg := range x.Args {
+					if lit, ok := ast.Unparen(arg).(*ast.FuncLit); ok {
+						walk(lit.Body, argDepth, argHot)
+					} else {
+						walk(arg, argDepth, argHot)
 					}
 				}
+				return false
 			}
 			return true
 		})
@@ -106,6 +119,15 @@ func regexpCompileFindings(rule *RegexpCompileInLoopRule, file *core.FileContext
 		walk(fn.Body, 0, patternkit.HasDirective(fn.Doc, patternkit.HotFunctionDirective))
 	}
 	return findings
+}
+
+func syncOnceDo(info *types.Info, call *ast.CallExpr) bool {
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	fn, _ := info.Uses[sel.Sel].(*types.Func)
+	return fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == "sync" && fn.Name() == "Do"
 }
 
 func regexpCall(info *types.Info, call *ast.CallExpr) bool {
