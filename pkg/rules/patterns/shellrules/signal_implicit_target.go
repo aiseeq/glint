@@ -558,10 +558,70 @@ func shellExecutedLiterals(file *ast.File, info *types.Info) map[*ast.BasicLit]b
 		}
 		if literal, ok := ast.Unparen(script).(*ast.BasicLit); ok && literal.Kind == token.STRING {
 			executed[literal] = true
+		} else if info != nil {
+			markLocalScriptLiterals(file, call, script, info, executed)
 		}
 		return true
 	})
 	return executed
+}
+
+// markLocalScriptLiterals follows a directly assigned string within the
+// function containing the exec call. It intentionally does not follow helper
+// calls or values from other functions.
+func markLocalScriptLiterals(file *ast.File, call *ast.CallExpr, script ast.Expr, info *types.Info, executed map[*ast.BasicLit]bool) {
+	id, ok := ast.Unparen(script).(*ast.Ident)
+	if !ok {
+		return
+	}
+	object := info.Uses[id]
+	if object == nil {
+		return
+	}
+	var function ast.Node
+	var best int
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.FuncDecl, *ast.FuncLit:
+			if n.Pos() <= call.Pos() && call.End() <= n.End() {
+				size := int(n.End() - n.Pos())
+				if function == nil || size < best {
+					function, best = n, size
+				}
+			}
+		}
+		return true
+	})
+	if function == nil {
+		return
+	}
+	mark := func(lhs ast.Expr, rhs ast.Expr) {
+		left, ok := ast.Unparen(lhs).(*ast.Ident)
+		if !ok || info.ObjectOf(left) != object {
+			return
+		}
+		literal, ok := ast.Unparen(rhs).(*ast.BasicLit)
+		if ok && literal.Kind == token.STRING {
+			executed[literal] = true
+		}
+	}
+	ast.Inspect(function, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range n.Lhs {
+				if i < len(n.Rhs) {
+					mark(lhs, n.Rhs[i])
+				}
+			}
+		case *ast.ValueSpec:
+			for i, lhs := range n.Names {
+				if i < len(n.Values) {
+					mark(lhs, n.Values[i])
+				}
+			}
+		}
+		return true
+	})
 }
 
 // dataLiterals returns the string literals that code reads as text rather

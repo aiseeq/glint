@@ -388,16 +388,30 @@ func shellExecutionScript(call *ast.CallExpr, info *types.Info) (ast.Expr, bool)
 	if len(call.Args) <= start {
 		return nil, false
 	}
-	command, ok := helpers.StringLiteral(call.Args[start])
-	if !ok {
+	if _, ok := helpers.StringLiteral(call.Args[start]); !ok {
 		return nil, false
 	}
-	command = filepath.Base(command)
-	if command == "sh" || command == "bash" {
-		return shellFlagScript(call.Args, start+1)
-	}
-	if command == "env" {
-		return envShellScript(call.Args, start+1)
+	for index := start; index < len(call.Args); {
+		command, ok := helpers.StringLiteral(call.Args[index])
+		if !ok {
+			return nil, false
+		}
+		switch filepath.Base(command) {
+		case "sh", "bash":
+			return shellFlagScript(call.Args, index+1)
+		case "env":
+			index, ok = envCommandIndex(call.Args, index+1)
+		case "sudo":
+			index, ok = sudoCommandIndex(call.Args, index+1)
+		case "nohup":
+			index++
+			ok = true
+		default:
+			return nil, false
+		}
+		if !ok {
+			return nil, false
+		}
 	}
 	return nil, false
 }
@@ -428,17 +442,22 @@ func shellFlagScript(args []ast.Expr, flagIndex int) (ast.Expr, bool) {
 		return nil, false
 	}
 	flag, ok := helpers.StringLiteral(args[flagIndex])
-	if !ok || flag != "-c" {
+	if !ok || len(flag) < 2 || flag[0] != '-' || strings.HasPrefix(flag, "--") || !strings.Contains(flag[1:], "c") {
 		return nil, false
+	}
+	for _, char := range flag[1:] {
+		if char < 'a' || char > 'z' {
+			return nil, false
+		}
 	}
 	return args[flagIndex+1], true
 }
 
-func envShellScript(args []ast.Expr, start int) (ast.Expr, bool) {
+func envCommandIndex(args []ast.Expr, start int) (int, bool) {
 	for i := start; i < len(args); i++ {
 		word, literal := helpers.StringLiteral(args[i])
 		if !literal {
-			return nil, false
+			return 0, false
 		}
 		if word == "--" || word == "-i" || word == "-0" || word == "-u" || strings.HasPrefix(word, "--unset=") || strings.HasPrefix(word, "--chdir=") {
 			if word == "-u" {
@@ -449,12 +468,33 @@ func envShellScript(args []ast.Expr, start int) (ast.Expr, bool) {
 		if strings.Contains(word, "=") && !strings.HasPrefix(word, "-") {
 			continue
 		}
-		if filepath.Base(word) != "sh" && filepath.Base(word) != "bash" {
-			return nil, false
-		}
-		return shellFlagScript(args, i+1)
+		return i, true
 	}
-	return nil, false
+	return 0, false
+}
+
+func sudoCommandIndex(args []ast.Expr, start int) (int, bool) {
+	for i := start; i < len(args); i++ {
+		word, literal := helpers.StringLiteral(args[i])
+		if !literal {
+			return 0, false
+		}
+		if word == "--" {
+			if i+1 < len(args) {
+				return i + 1, true
+			}
+			return 0, false
+		}
+		if strings.HasPrefix(word, "-") {
+			switch word {
+			case "-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T":
+				i++
+			}
+			continue
+		}
+		return i, true
+	}
+	return 0, false
 }
 
 func rangeCallFunc(call *ast.CallExpr, info *types.Info) *types.Func {

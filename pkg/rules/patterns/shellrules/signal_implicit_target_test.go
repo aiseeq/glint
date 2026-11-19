@@ -633,6 +633,33 @@ func run(command string) {
 	assert.GreaterOrEqual(t, rejected, 1)
 }
 
+func TestSignalImplicitTargetGoExecShellFlagsAndWrappers(t *testing.T) {
+	source := `package sample
+import (
+	"fmt"
+	"os/exec"
+)
+func run() {
+	_ = exec.Command("sh", "-ec", "kill 0").Run() // P1
+	_ = exec.Command("sh", "-xc", "kill 0").Run() // P2
+	_ = exec.Command("sh", "-euc", "kill 0").Run() // P3
+	_ = exec.Command("sudo", "sh", "-c", "kill 0").Run() // P4
+	_ = exec.Command("nohup", "bash", "-c", "kill 0").Run() // P5
+	_ = exec.Command("env", "LANG=C", "bash", "-xc", "kill 0").Run() // P6
+	_ = exec.Command("sudo", "nohup", "env", "LANG=C", "sh", "-ec", "kill 0").Run() // P7
+	s := "kill 0"
+	_ = exec.Command("env", "LANG=C", "bash", "-xc", s).Run() // P8
+	fmt.Println("kill 0") // N1
+	_ = exec.Command("grep", "-c", "kill 0", "log").Run() // N2
+	_ = exec.Command("sudo", "grep", "-c", "kill 0", "log").Run() // N3
+	_ = exec.Command("sh", "-ec", "echo kill 0").Run() // N4
+	_ = exec.Command("sh", "-e", "script.sh", "kill 0").Run() // N5
+}
+`
+	file, pkg := signalSourceTyped(t, "exec.go", source)
+	assert.Equal(t, []int{7, 8, 9, 10, 11, 12, 13, 14}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+}
+
 func signalSourceTyped(t *testing.T, filename, source string, otherSources ...string) (*core.FileContext, *signalPackage) {
 	t.Helper()
 	fset := token.NewFileSet()
