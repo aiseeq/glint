@@ -502,7 +502,7 @@ func checkIgnoredCheckFailure(r *shellRule, src *patternkit.ShellSource) []*core
 				continue
 			}
 			fallback := segs[k+1].Trimmed()
-			if !swallowFailure.MatchString(fallback) || regexp.MustCompile(`\bexit\s+[1-9]`).MatchString(fallback) {
+			if !swallowFailure.MatchString(fallback) || shellExitFailRe.MatchString(fallback) {
 				continue
 			}
 			out = appendReport(out, src.Report(r, l.LineAt(segs[k].Offset),
@@ -864,3 +864,5 @@ func checkSecretFileBackup(r *shellRule, src *patternkit.ShellSource) []*core.Vi
 	}
 	return out
 }
+
+var shellExitFailRe = regexp.MustCompile(`\bexit\s+[1-9]`)

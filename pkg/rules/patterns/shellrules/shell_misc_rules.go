@@ -415,7 +415,7 @@ func checkRmRfArgument(r *shellRule, src *patternkit.ShellSource) []*core.Violat
 		for arg := range strings.FieldsSeq(rmRecursive.ReplaceAllString(command, "")) {
 			arg = strings.Trim(arg, `"'`)
 			candidates := []string{arg}
-			if m := regexp.MustCompile(`^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$`).FindStringSubmatch(arg); m != nil {
+			if m := shellBareVarRe.FindStringSubmatch(arg); m != nil {
 				candidates = values[m[1]]
 			}
 			if underBase(candidates, tainted, validated) {
@@ -1005,3 +1005,5 @@ func (r *shellSiblingEnvRule) ReportsOn(ctx *core.FileContext) bool {
 func (r *shellCopyListRule) ReportsOn(ctx *core.FileContext) bool {
 	return shellProjectReportsOn(ctx)
 }
+
+var shellBareVarRe = regexp.MustCompile(`^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$`)

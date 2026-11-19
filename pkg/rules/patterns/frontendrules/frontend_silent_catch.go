@@ -168,7 +168,7 @@ func catchesInside(code []string, chain string) bool {
 		case '}':
 			depth--
 			if depth == 0 {
-				return regexp.MustCompile(`\bcatch\b`).MatchString(flat[def[1]:i])
+				return catchWordRe.MatchString(flat[def[1]:i])
 			}
 		}
 	}
@@ -293,3 +293,5 @@ func (r *FrontendSilentCatchRule) violation(ctx *core.FileContext, lineNum int, 
 	v.WithContext("language", "typescript")
 	return v
 }
+
+var catchWordRe = regexp.MustCompile(`\bcatch\b`)

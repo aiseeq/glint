@@ -424,7 +424,7 @@ func checkBackgroundWithoutTrap(r *shellRule, src *patternkit.ShellSource) []*co
 		}
 		failsLater := false
 		for _, later := range steps[i+1:] {
-			failsLater = failsLater || failExit.MatchString(later.Text) || regexp.MustCompile(`\breturn\s+[1-9]`).MatchString(later.Text)
+			failsLater = failsLater || failExit.MatchString(later.Text) || shellReturnFailRe.MatchString(later.Text)
 		}
 		if !killedLater && !failsLater {
 			continue
@@ -644,7 +644,7 @@ func checkTrapRemovesResults(r *shellRule, src *patternkit.ShellSource) []*core.
 	var out []*core.Violation
 	for i, l := range src.Lines {
 		m := trapRemove.FindStringSubmatch(l.Text)
-		if m == nil || regexp.MustCompile(`\b(?:cp|mv|rsync|tar)\b`).MatchString(m[2]) {
+		if m == nil || shellCopyCommandRe.MatchString(m[2]) {
 			continue
 		}
 		dir := removedDir.FindStringSubmatch(m[2])
@@ -784,7 +784,7 @@ func checkLockInherited(r *shellRule, src *patternkit.ShellSource) []*core.Viola
 	var out []*core.Violation
 	for _, l := range src.Lines {
 		text := patternkit.WithoutComment(l.Text)
-		if loc := regexp.MustCompile(`\bflock\b`).FindStringIndex(text); loc == nil || insideQuotes(text, loc[0]) {
+		if loc := shellFlockWordRe.FindStringIndex(text); loc == nil || insideQuotes(text, loc[0]) {
 			continue // a lock taken by a remote or nested shell
 		}
 		if fd := flockFd.FindStringSubmatch(text); fd != nil {
@@ -849,7 +849,7 @@ func checkSelfRelaunch(r *shellRule, src *patternkit.ShellSource) []*core.Violat
 		code[i] = patternkit.WithoutComment(l.Text)
 	}
 	whole := strings.Join(code, "\n")
-	if src.Make || !selfLock.MatchString(whole) || len(regexp.MustCompile(`\bflock\b`).FindAllString(whole, -1)) > 1 {
+	if src.Make || !selfLock.MatchString(whole) || len(shellFlockWordRe.FindAllString(whole, -1)) > 1 {
 		return nil // a second flock: the background branch takes a lock of its own
 	}
 	var out []*core.Violation
@@ -874,7 +874,7 @@ func checkLockFailureIgnored(r *shellRule, src *patternkit.ShellSource) []*core.
 	locking := map[string]bool{}
 	for name, fn := range funcs {
 		for _, l := range src.Body(fn) {
-			if regexp.MustCompile(`\bflock\b`).MatchString(l.Text) {
+			if shellFlockWordRe.MatchString(l.Text) {
 				locking[name] = true
 			}
 		}
@@ -1090,3 +1090,9 @@ func actsOnTimer(steps []patternkit.ShellStep, i int) bool {
 	}
 	return false
 }
+
+var shellReturnFailRe = regexp.MustCompile(`\breturn\s+[1-9]`)
+
+var shellCopyCommandRe = regexp.MustCompile(`\b(?:cp|mv|rsync|tar)\b`)
+
+var shellFlockWordRe = regexp.MustCompile(`\bflock\b`)

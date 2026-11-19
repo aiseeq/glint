@@ -832,7 +832,7 @@ func zeroCoercingFormatters(f patternkit.JsFlat) []jsFormatterAt {
 			continue
 		}
 		lineStart := strings.LastIndexAny(body[:loc[0]], "\n;{") + 1
-		if v := regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=`).FindStringSubmatch(body[lineStart:loc[0]]); v != nil && jsZeroAsMissingOf(v[1]).MatchString(body[loc[1]:]) {
+		if v := jsDeclaredNameRe.FindStringSubmatch(body[lineStart:loc[0]]); v != nil && jsZeroAsMissingOf(v[1]).MatchString(body[loc[1]:]) {
 			continue
 		}
 		found = append(found, jsFormatterAt{name: name, pos: m[0]})
@@ -900,3 +900,5 @@ func (r *CSVCellDisplayFormatterRule) AnalyzeFile(ctx *core.FileContext) []*core
 	}
 	return violations
 }
+
+var jsDeclaredNameRe = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=`)
