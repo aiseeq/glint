@@ -421,6 +421,78 @@ func TestTscStatCacheNestedNodeModulesWorkspaceSymlinkRetargeted(t *testing.T) {
 	assert.Greater(t, tscRunCount(t, log), before)
 }
 
+func TestTscStatCacheTracksNestedModulesInExcludedImportedDirectory(t *testing.T) {
+	root, local, log := countedTscProject(t, map[string]string{
+		"tsconfig.json":       `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"],"exclude":["src/legacy"]}`,
+		"src/main.ts":         "import { v } from './legacy/x'; export const value: number = v\n",
+		"src/legacy/x.ts":     "export { v } from '@demo/ui'\n",
+		"pkgs/a/package.json": `{"name":"@demo/ui","types":"index.d.ts"}`,
+		"pkgs/a/index.d.ts":   "export declare const v: number\n",
+		"pkgs/b/package.json": `{"name":"@demo/ui","types":"index.d.ts"}`,
+		"pkgs/b/index.d.ts":   "export declare const v: string\n",
+	})
+	link := filepath.Join(root, "src/legacy/node_modules/@demo/ui")
+	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+	require.NoError(t, os.Symlink("../../../../pkgs/a", link))
+	ageTscInputs(t, root, local)
+	assert.Empty(t, runCountedTsc(t, root))
+	before := tscRunCount(t, log)
+
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink("../../../../pkgs/b", link))
+	findings := runCountedTsc(t, root)
+	assert.Contains(t, strings.Join(findings, ""), "TS2322")
+	assert.Greater(t, tscRunCount(t, log), before, "package retargeted in an excluded imported directory must rerun tsc")
+}
+
+func TestTscStatCacheTracksNestedModulesBesideOutsideRootFile(t *testing.T) {
+	root, local, log := countedTscProject(t, map[string]string{
+		"app/tsconfig.json":   `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,
+		"app/src/main.ts":     "import { v } from '../../shared/x'; export const value: number = v\n",
+		"shared/x.ts":         "export { v } from '@demo/ui'\n",
+		"pkgs/a/package.json": `{"name":"@demo/ui","types":"index.d.ts"}`,
+		"pkgs/a/index.d.ts":   "export declare const v: number\n",
+		"pkgs/b/package.json": `{"name":"@demo/ui","types":"index.d.ts"}`,
+		"pkgs/b/index.d.ts":   "export declare const v: string\n",
+	})
+	link := filepath.Join(root, "shared/node_modules/@demo/ui")
+	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+	require.NoError(t, os.Symlink("../../../pkgs/a", link))
+	ageTscInputs(t, root, local)
+	_ = runCountedTsc(t, root)
+	before := tscRunCount(t, log)
+
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink("../../../pkgs/b", link))
+	findings := runCountedTsc(t, root)
+	assert.Contains(t, strings.Join(findings, ""), "TS2322")
+	assert.Greater(t, tscRunCount(t, log), before, "package retargeted beside an imported file outside the config root must rerun tsc")
+}
+
+func TestTscStatCacheTracksSymlinkedNestedNodeModules(t *testing.T) {
+	root, local, log := countedTscProject(t, map[string]string{
+		"tsconfig.json":       `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,
+		"src/m0/main.ts":      "import { v } from '@demo/ui'; export const value: number = v\n",
+		"pkgs/a/package.json": `{"name":"@demo/ui","types":"index.d.ts"}`,
+		"pkgs/a/index.d.ts":   "export declare const v: number\n",
+		"pkgs/b/package.json": `{"name":"@demo/ui","types":"index.d.ts"}`,
+		"pkgs/b/index.d.ts":   "export declare const v: string\n",
+	})
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "nm0/@demo"), 0o755))
+	require.NoError(t, os.Symlink("../../nm0", filepath.Join(root, "src/m0/node_modules")))
+	link := filepath.Join(root, "nm0/@demo/ui")
+	require.NoError(t, os.Symlink("../../pkgs/a", link))
+	ageTscInputs(t, root, local)
+	assert.Empty(t, runCountedTsc(t, root))
+	before := tscRunCount(t, log)
+
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink("../../pkgs/b", link))
+	findings := runCountedTsc(t, root)
+	assert.Contains(t, strings.Join(findings, ""), "TS2322")
+	assert.Greater(t, tscRunCount(t, log), before, "package retargeted in a symlinked node_modules must rerun tsc")
+}
+
 func TestTscStatCacheScopeDirectorySymlinkRetargeted(t *testing.T) {
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json":       `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,

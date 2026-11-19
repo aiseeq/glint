@@ -768,7 +768,7 @@ func statFingerprintKey(identity []string) string {
 	for i, part := range identity {
 		parts[i] = []byte(part)
 	}
-	return "stat-v4-" + toolcache.Key(parts...)
+	return "stat-v5-" + toolcache.Key(parts...)
 }
 
 func statPath(path string) (tscFileStat, error) {
@@ -800,6 +800,33 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 	}
 	if err := scanner.Err(); err != nil {
 		return tscStatFingerprint{}, fmt.Errorf("read the file list of tsc: %w", err)
+	}
+	// A listed file may be imported from outside the config root or from an
+	// excluded directory. Module resolution for that file can still consult
+	// node_modules at every ancestor, including a node_modules symlink that a
+	// directory walk would not enter.
+	moduleCandidates := map[string]bool{}
+	for path := range files {
+		if !isWithinNodeModules(path) {
+			for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+				moduleCandidates[filepath.Join(dir, "node_modules")] = true
+				if filepath.Dir(dir) == dir {
+					break
+				}
+			}
+		}
+	}
+	for path := range moduleCandidates {
+		info, err := os.Stat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return tscStatFingerprint{}, fmt.Errorf("stat a tsc module directory %s: %w", path, err)
+		}
+		if info.IsDir() {
+			optional[path] = true
+		}
 	}
 	root := ""
 	var scope *tsconfigScope
@@ -881,6 +908,17 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 		fingerprint.Dirs = append(fingerprint.Dirs, stamp)
 	}
 	return fingerprint, nil
+}
+
+func isWithinNodeModules(path string) bool {
+	for dir := filepath.Clean(path); ; dir = filepath.Dir(dir) {
+		if filepath.Base(dir) == "node_modules" {
+			return true
+		}
+		if filepath.Dir(dir) == dir {
+			return false
+		}
+	}
 }
 
 // addIncludedFingerprintDirs records directories that can contribute files
