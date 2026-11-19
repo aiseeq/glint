@@ -302,6 +302,56 @@ func TestTscFingerprintGainsDirectoryChangeTime(t *testing.T) {
 	assert.Equal(t, stamp.Entries, refreshed.Dirs[0].Entries)
 }
 
+func TestTscFingerprintKeepsChmodDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "node_modules", "@demo")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "entry.ts"), []byte("export {}\n"), 0o644))
+	stamp, err := statPath(dir)
+	require.NoError(t, err)
+	stamp.Entries, err = tscDirectoryEntries(dir)
+	require.NoError(t, err)
+	fingerprint := tscStatFingerprint{Dirs: []tscFileStat{stamp}}
+	require.NoError(t, os.Chmod(dir, 0o750))
+
+	stale, reuse, _, configChanged, refreshed, changed := tscFingerprintChangesWithRefresh(fingerprint, nil)
+	assert.False(t, stale, "chmod keeps the entries, so the answer stays")
+	assert.True(t, reuse, "a package directory with the same entries keeps the build info")
+	assert.False(t, configChanged)
+	assert.True(t, changed)
+	assert.NotEqual(t, stamp.ChangeNS, refreshed.Dirs[0].ChangeNS)
+}
+
+func TestTscFingerprintOldStampDetectsRenameWithRestoredStat(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "added.tx")
+	require.NoError(t, os.WriteFile(oldPath, []byte("export const n = 1\n"), 0o644))
+	oldDirStat, err := os.Stat(dir)
+	require.NoError(t, err)
+	stamp, err := statPath(dir)
+	require.NoError(t, err)
+	stamp.Entries, err = tscDirectoryEntries(dir)
+	require.NoError(t, err)
+	stamp.ChangeNS = 0 // saved before change times were recorded
+	fingerprint := tscStatFingerprint{Dirs: []tscFileStat{stamp}}
+
+	require.NoError(t, os.Rename(oldPath, filepath.Join(dir, "added.ts")))
+	require.NoError(t, os.Chtimes(dir, oldDirStat.ModTime(), oldDirStat.ModTime()))
+	stale, _, _, _ := tscFingerprintChanges(fingerprint, nil)
+	assert.True(t, stale, "without a saved change time the entries decide")
+}
+
+func TestTscModuleScopeDirsSkipDanglingScopeLink(t *testing.T) {
+	root := t.TempDir()
+	modules := filepath.Join(root, "node_modules")
+	require.NoError(t, os.MkdirAll(filepath.Join(modules, "@live"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(root, "gone"), filepath.Join(modules, "@gone")))
+	directories := map[string]bool{}
+
+	require.NoError(t, addModuleScopeDirs(map[string]bool{modules: true}, directories))
+	assert.True(t, directories[filepath.Join(modules, "@live")])
+	assert.False(t, directories[filepath.Join(modules, "@gone")])
+}
+
 func TestTscDirectoryEntriesDetectAdditionAndRemoval(t *testing.T) {
 	dir := t.TempDir()
 	stamp, err := statPath(dir)

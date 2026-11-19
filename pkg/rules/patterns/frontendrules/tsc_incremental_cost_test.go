@@ -291,7 +291,7 @@ exit "$status"
 	ageTscInputs(t, root, wrapper)
 	require.Empty(t, incrementalTscAnswer(t, root))
 	cache := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "glint", "tools", "tsc")
-	entries, err := filepath.Glob(filepath.Join(cache, "stat-v3-*.json"))
+	entries, err := filepath.Glob(filepath.Join(cache, "stat-v4-*.json"))
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	var fingerprint tscStatFingerprint

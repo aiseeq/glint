@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -767,7 +768,7 @@ func statFingerprintKey(identity []string) string {
 	for i, part := range identity {
 		parts[i] = []byte(part)
 	}
-	return "stat-v3-" + toolcache.Key(parts...)
+	return "stat-v4-" + toolcache.Key(parts...)
 }
 
 func statPath(path string) (tscFileStat, error) {
@@ -947,6 +948,11 @@ func addModuleScopeDirs(optional, directories map[string]bool) error {
 				continue
 			}
 			info, err := os.Stat(filepath.Join(path, entry.Name()))
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ELOOP) {
+				// expected: a dangling scope link adds no directory; the entries of
+				// node_modules itself already record its target
+				continue
+			}
 			if err != nil {
 				return fmt.Errorf("stat a tsc package scope %s: %w", filepath.Join(path, entry.Name()), err)
 			}
@@ -1172,13 +1178,9 @@ func tscFingerprintChangesWithRefresh(fingerprint tscStatFingerprint, tscPaths [
 			continue
 		}
 		statSame := current.Size == saved.Size && current.ModTimeNS == saved.ModTimeNS
-		if statSame && saved.ChangeNS != 0 && current.ChangeNS != 0 && current.ChangeNS != saved.ChangeNS {
-			stale = true
-			reuse = false
-			configChanged = true
-			continue
-		}
-		if !statSame || saved.ChangeNS == 0 || current.ChangeNS == 0 {
+		// Equal stat and change time mean the entries are as saved. A new change
+		// time alone (a rename with the mtime put back, but also chmod) reads them.
+		if !statSame || saved.ChangeNS == 0 || current.ChangeNS != saved.ChangeNS {
 			entries, readErr := tscDirectoryEntries(saved.Path)
 			if readErr != nil || entries != saved.Entries {
 				stale = true
@@ -1190,7 +1192,7 @@ func tscFingerprintChangesWithRefresh(fingerprint tscStatFingerprint, tscPaths [
 		if !statSame || saved.ChangeNS != current.ChangeNS {
 			// A fingerprint saved without a change time gains one here, so later
 			// hits stop reading the directory's entries.
-			if strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
+			if !statSame && strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
 				reuse = false
 				configChanged = true
 			}
