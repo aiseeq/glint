@@ -285,6 +285,23 @@ func TestTscFingerprintRefreshesUnchangedDirectoryEntries(t *testing.T) {
 	assert.Equal(t, now.UnixNano(), refreshed.Dirs[0].ModTimeNS)
 }
 
+func TestTscFingerprintGainsDirectoryChangeTime(t *testing.T) {
+	dir := t.TempDir()
+	stamp, err := statPath(dir)
+	require.NoError(t, err)
+	require.NotZero(t, stamp.ChangeNS)
+	stamp.Entries, err = tscDirectoryEntries(dir)
+	require.NoError(t, err)
+	stamp.ChangeNS = 0 // saved before change times were recorded
+	fingerprint := tscStatFingerprint{Dirs: []tscFileStat{stamp}}
+
+	stale, _, _, _, refreshed, changed := tscFingerprintChangesWithRefresh(fingerprint, nil)
+	assert.False(t, stale)
+	assert.True(t, changed, "an old fingerprint is refreshed so later hits skip reading entries")
+	assert.NotZero(t, refreshed.Dirs[0].ChangeNS)
+	assert.Equal(t, stamp.Entries, refreshed.Dirs[0].Entries)
+}
+
 func TestTscDirectoryEntriesDetectAdditionAndRemoval(t *testing.T) {
 	dir := t.TempDir()
 	stamp, err := statPath(dir)
@@ -306,6 +323,77 @@ func TestTscDirectoryEntriesDetectAdditionAndRemoval(t *testing.T) {
 	require.NoError(t, os.Remove(file))
 	stale, _, _, _ = tscFingerprintChanges(fingerprint, nil)
 	assert.True(t, stale, "removing an entry must invalidate the fingerprint")
+}
+
+func TestTscDirectoryEntriesDetectRenameWithRestoredStat(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "added.tx")
+	newPath := filepath.Join(dir, "added.ts")
+	require.NoError(t, os.WriteFile(oldPath, []byte("export const n = 1\n"), 0o644))
+	oldDirStat, err := os.Stat(dir)
+	require.NoError(t, err)
+	stamp, err := statPath(dir)
+	require.NoError(t, err)
+	stamp.Entries, err = tscDirectoryEntries(dir)
+	require.NoError(t, err)
+	fingerprint := tscStatFingerprint{Dirs: []tscFileStat{stamp}}
+
+	require.NoError(t, os.Rename(oldPath, newPath))
+	require.NoError(t, os.Chtimes(dir, oldDirStat.ModTime(), oldDirStat.ModTime()))
+	current, err := statPath(dir)
+	require.NoError(t, err)
+	require.Equal(t, stamp.Size, current.Size)
+	require.Equal(t, stamp.ModTimeNS, current.ModTimeNS)
+	stale, _, _, _ := tscFingerprintChanges(fingerprint, nil)
+	assert.True(t, stale, "renaming an entry must invalidate even when directory stat is restored")
+}
+
+func TestTscStatCacheNestedNodeModulesWorkspaceSymlinkRetargeted(t *testing.T) {
+	root, local, log := countedTscProject(t, map[string]string{
+		"tsconfig.json":       `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,
+		"src/m0/main.ts":      "import { v } from '@demo/ui'; export const value: number = v\n",
+		"pkgs/a/package.json": `{"name":"@demo/ui","types":"index.d.ts"}`,
+		"pkgs/a/index.d.ts":   "export declare const v: number\n",
+		"pkgs/b/package.json": `{"name":"@demo/ui","types":"index.d.ts"}`,
+		"pkgs/b/index.d.ts":   "export declare const v: string\n",
+	})
+	link := filepath.Join(root, "src/m0/node_modules/@demo/ui")
+	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+	require.NoError(t, os.Symlink("../../../../pkgs/a", link))
+	ageTscInputs(t, root, local)
+	assert.Empty(t, runCountedTsc(t, root))
+	before := tscRunCount(t, log)
+
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink("../../../../pkgs/b", link))
+	findings := runCountedTsc(t, root)
+	assert.Contains(t, strings.Join(findings, ""), "TS2322")
+	assert.Greater(t, tscRunCount(t, log), before)
+}
+
+func TestTscStatCacheScopeDirectorySymlinkRetargeted(t *testing.T) {
+	root, local, log := countedTscProject(t, map[string]string{
+		"tsconfig.json":       `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,
+		"src/main.ts":         "import { v } from '@demo/ui'; export const value: number = v\n",
+		"pkgs/a/package.json": `{"name":"@demo/ui","types":"index.d.ts"}`,
+		"pkgs/a/index.d.ts":   "export declare const v: number\n",
+		"pkgs/b/package.json": `{"name":"@demo/ui","types":"index.d.ts"}`,
+		"pkgs/b/index.d.ts":   "export declare const v: string\n",
+	})
+	scope := filepath.Join(root, "node_modules/@demo")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "scopes/@demo"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(root, "scopes/@demo"), scope))
+	link := filepath.Join(root, "scopes/@demo/ui")
+	require.NoError(t, os.Symlink("../../pkgs/a", link))
+	ageTscInputs(t, root, local)
+	assert.Empty(t, runCountedTsc(t, root))
+	before := tscRunCount(t, log)
+
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink("../../pkgs/b", link))
+	findings := runCountedTsc(t, root)
+	assert.Contains(t, strings.Join(findings, ""), "TS2322")
+	assert.Greater(t, tscRunCount(t, log), before)
 }
 
 func TestTscStatCacheWorkspaceSymlinkRetargeted(t *testing.T) {

@@ -745,6 +745,7 @@ type tscFileStat struct {
 	Path      string `json:"path"`
 	Size      int64  `json:"size"`
 	ModTimeNS int64  `json:"mtimeNs"`
+	ChangeNS  int64  `json:"changeNs,omitempty"`
 	Hash      string `json:"hash,omitempty"`
 	Directory bool   `json:"directory,omitempty"`
 	Missing   bool   `json:"missing,omitempty"`
@@ -774,7 +775,11 @@ func statPath(path string) (tscFileStat, error) {
 	if err != nil {
 		return tscFileStat{}, fmt.Errorf("stat %s: %w", path, err)
 	}
-	return tscFileStat{Path: path, Size: info.Size(), ModTimeNS: info.ModTime().UnixNano(), Directory: info.IsDir()}, nil
+	stamp := tscFileStat{Path: path, Size: info.Size(), ModTimeNS: info.ModTime().UnixNano(), Directory: info.IsDir()}
+	if stamp.Directory {
+		stamp.ChangeNS = statChangeTimeNS(info)
+	}
+	return stamp, nil
 }
 
 func makeStatFingerprint(tscPaths []string, config string, listed []byte, answerKey string, watchedDirs ...string) (tscStatFingerprint, error) {
@@ -824,7 +829,7 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 		}
 	}
 	if scope != nil {
-		if err := addIncludedFingerprintDirs(*scope, directories); err != nil {
+		if err := addIncludedFingerprintDirs(*scope, directories, optional); err != nil {
 			return tscStatFingerprint{}, err
 		}
 	}
@@ -878,9 +883,10 @@ func makeStatFingerprint(tscPaths []string, config string, listed []byte, answer
 }
 
 // addIncludedFingerprintDirs records directories that can contribute files
-// through tsconfig include patterns. It runs while building a fingerprint;
-// cache hits only stat the recorded directory entries.
-func addIncludedFingerprintDirs(scope tsconfigScope, directories map[string]bool) error {
+// through tsconfig include patterns, plus nested node_modules directories.
+// It runs while building a fingerprint; cache hits compare directory change
+// times and fall back to checking entries when the platform lacks them.
+func addIncludedFingerprintDirs(scope tsconfigScope, directories, optional map[string]bool) error {
 	return filepath.WalkDir(scope.base, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -889,6 +895,9 @@ func addIncludedFingerprintDirs(scope tsconfigScope, directories map[string]bool
 			return nil
 		}
 		if path != scope.base && entry.Name() == "node_modules" {
+			// Resolution can find packages in nested node_modules directories,
+			// whose symlinks do not appear in the config's ancestor directories.
+			optional[path] = true
 			return filepath.SkipDir
 		}
 		if scope.defaultExcludes && path != scope.base && (entry.Name() == "bower_components" || entry.Name() == "jspm_packages") {
@@ -937,7 +946,7 @@ func addModuleScopeDirs(optional, directories map[string]bool) error {
 			if !strings.HasPrefix(entry.Name(), "@") {
 				continue
 			}
-			info, err := entry.Info()
+			info, err := os.Stat(filepath.Join(path, entry.Name()))
 			if err != nil {
 				return fmt.Errorf("stat a tsc package scope %s: %w", filepath.Join(path, entry.Name()), err)
 			}
@@ -1162,25 +1171,36 @@ func tscFingerprintChangesWithRefresh(fingerprint tscStatFingerprint, tscPaths [
 			configChanged = true
 			continue
 		}
-		if current.Size != saved.Size || current.ModTimeNS != saved.ModTimeNS {
+		statSame := current.Size == saved.Size && current.ModTimeNS == saved.ModTimeNS
+		if statSame && saved.ChangeNS != 0 && current.ChangeNS != 0 && current.ChangeNS != saved.ChangeNS {
+			stale = true
+			reuse = false
+			configChanged = true
+			continue
+		}
+		if !statSame || saved.ChangeNS == 0 || current.ChangeNS == 0 {
 			entries, readErr := tscDirectoryEntries(saved.Path)
-			if strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
-				reuse = false
-				configChanged = true
-			}
 			if readErr != nil || entries != saved.Entries {
 				stale = true
 				reuse = false
 				configChanged = true
-			} else {
-				current.Entries = saved.Entries
-				if !dirsCopied {
-					refreshed.Dirs = append([]tscFileStat(nil), fingerprint.Dirs...)
-					dirsCopied = true
-				}
-				refreshed.Dirs[i] = current
-				changed = true
+				continue
 			}
+		}
+		if !statSame || saved.ChangeNS != current.ChangeNS {
+			// A fingerprint saved without a change time gains one here, so later
+			// hits stop reading the directory's entries.
+			if strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
+				reuse = false
+				configChanged = true
+			}
+			current.Entries = saved.Entries
+			if !dirsCopied {
+				refreshed.Dirs = append([]tscFileStat(nil), fingerprint.Dirs...)
+				dirsCopied = true
+			}
+			refreshed.Dirs[i] = current
+			changed = true
 		}
 	}
 	return stale, reuse, compilerChanged, configChanged, refreshed, changed
