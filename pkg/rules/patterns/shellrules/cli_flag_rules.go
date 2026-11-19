@@ -507,6 +507,11 @@ func flagMapLookups(feeds *flagFeeds, file *core.FileContext) []flagFinding {
 					checked[index] = true
 				}
 			}
+		case *ast.IncDecStmt:
+			// counts[*flag]++ updates the map: a missing key starting at zero is the point.
+			if index, ok := ast.Unparen(node.X).(*ast.IndexExpr); ok {
+				checked[index] = true
+			}
 		case *ast.ValueSpec:
 			if len(node.Names) == 2 && len(node.Values) == 1 {
 				if index, ok := ast.Unparen(node.Values[0]).(*ast.IndexExpr); ok {
