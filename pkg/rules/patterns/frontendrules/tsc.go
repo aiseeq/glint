@@ -1169,43 +1169,71 @@ func tscFingerprintChangesWithRefresh(fingerprint tscStatFingerprint, tscPaths [
 		}
 	}
 	for i, saved := range fingerprint.Dirs {
-		current, err := statPath(saved.Path)
+		current, verdict, err := compareFingerprintDir(saved)
 		if err != nil {
-			// expected: a directory that cannot be stat'ed is a change; tsc reruns from scratch and reports it
-			stale = true
-			reuse = false
-			configChanged = true
+			// expected: a directory that cannot be stat'ed or read is a change; tsc reruns from scratch and reports it
+			stale, reuse, configChanged = true, false, true
 			continue
 		}
-		statSame := current.Size == saved.Size && current.ModTimeNS == saved.ModTimeNS
-		// Equal stat and change time mean the entries are as saved. A new change
-		// time alone (a rename with the mtime put back, but also chmod) reads them.
-		if !statSame || saved.ChangeNS == 0 || current.ChangeNS != saved.ChangeNS {
-			entries, readErr := tscDirectoryEntries(saved.Path)
-			if readErr != nil || entries != saved.Entries {
-				stale = true
-				reuse = false
-				configChanged = true
-				continue
-			}
+		switch verdict {
+		case tscDirSame:
+			continue
+		case tscDirStale:
+			stale, reuse, configChanged = true, false, true
+			continue
+		case tscDirPackageMoved:
+			reuse, configChanged = false, true
+		case tscDirMoved:
 		}
-		if !statSame || saved.ChangeNS != current.ChangeNS {
-			// A fingerprint saved without a change time gains one here, so later
-			// hits stop reading the directory's entries.
-			if !statSame && strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
-				reuse = false
-				configChanged = true
-			}
-			current.Entries = saved.Entries
-			if !dirsCopied {
-				refreshed.Dirs = append([]tscFileStat(nil), fingerprint.Dirs...)
-				dirsCopied = true
-			}
-			refreshed.Dirs[i] = current
-			changed = true
+		if !dirsCopied {
+			refreshed.Dirs = append([]tscFileStat(nil), fingerprint.Dirs...)
+			dirsCopied = true
 		}
+		refreshed.Dirs[i] = current
+		changed = true
 	}
 	return stale, reuse, compilerChanged, configChanged, refreshed, changed
+}
+
+// tscDirVerdict is how a saved directory stamp compares with the directory now.
+type tscDirVerdict int
+
+const (
+	tscDirSame         tscDirVerdict = iota
+	tscDirStale                      // entries changed or cannot be read: tsc reruns from scratch
+	tscDirMoved                      // same entries, new stamp: the fingerprint is refreshed
+	tscDirPackageMoved               // the same inside node_modules: build info is not reused
+)
+
+// compareFingerprintDir returns the directory's current stamp and verdict, or
+// the error that kept it from being stat'ed or read.
+// Equal stat and change time mean the entries are as saved; a new change time
+// alone (a rename with the mtime put back, but also chmod) reads them.
+func compareFingerprintDir(saved tscFileStat) (tscFileStat, tscDirVerdict, error) {
+	current, err := statPath(saved.Path)
+	if err != nil {
+		return saved, tscDirStale, err
+	}
+	statSame := current.Size == saved.Size && current.ModTimeNS == saved.ModTimeNS
+	if !statSame || saved.ChangeNS == 0 || current.ChangeNS != saved.ChangeNS {
+		entries, err := tscDirectoryEntries(saved.Path)
+		if err != nil {
+			return saved, tscDirStale, err
+		}
+		if entries != saved.Entries {
+			return saved, tscDirStale, nil
+		}
+	}
+	if statSame && current.ChangeNS == saved.ChangeNS {
+		return saved, tscDirSame, nil
+	}
+	// A fingerprint saved without a change time gains one here, so later hits
+	// stop reading the directory's entries.
+	current.Entries = saved.Entries
+	if !statSame && strings.Contains(saved.Path+string(filepath.Separator), string(filepath.Separator)+"node_modules"+string(filepath.Separator)) {
+		return current, tscDirPackageMoved, nil
+	}
+	return current, tscDirMoved, nil
 }
 
 // refreshTscInputs captures the inputs just before a slow run. Comparing them
