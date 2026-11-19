@@ -13,6 +13,7 @@ const regexpCompileInLoopSource = `package units
 
 import (
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -107,6 +108,44 @@ func CallbackInLoop(lines []string) {
 		sort.Slice([]string{line}, func(i, j int) bool {
 			return regexp.MustCompile("comparator").MatchString(line) // want regexp-compile-in-loop
 		})
+	}
+}
+
+type memo struct{}
+
+func (memo) GetOrCreate(key string, make func() *regexp.Regexp) *regexp.Regexp { return make() }
+
+type runner struct{}
+
+func (runner) Do(f func()) { f() }
+
+func StoredCallbacks(paths []string, cache memo, handle func(string, func()), r runner) {
+	for _, path := range paths {
+		handle(path, func() { regexp.MustCompile("stored handler") })
+		_ = cache.GetOrCreate(path, func() *regexp.Regexp { return regexp.MustCompile("memo") })
+		r.Do(func() { regexp.MustCompile("custom do") })
+		func() { regexp.MustCompile("iife in loop") }() // want regexp-compile-in-loop
+		_ = slices.IndexFunc(paths, func(p string) bool { return regexp.MustCompile("generic").MatchString(p) }) // want regexp-compile-in-loop
+	}
+}
+
+//glint:hot
+func HotCallbacks(lines []string, handle func(func())) {
+	sort.Slice(lines, func(i, j int) bool { return regexp.MustCompile("hot comparator").MatchString(lines[i]) }) // want regexp-compile-in-loop
+	handle(func() { regexp.MustCompile("hot stored") })
+}
+
+func LoopHeaders(lines []string) {
+	for re := regexp.MustCompile("init"); re != nil; re = nil {
+		_ = re
+	}
+	for range regexp.MustCompile("range x").FindAllString("a", -1) {
+	}
+	for range func(yield func(int) bool) { regexp.MustCompile("iterator") } {
+	}
+	for range lines {
+		for range func(yield func(int) bool) { regexp.MustCompile("iterator in loop") } { // want regexp-compile-in-loop
+		}
 	}
 }
 
