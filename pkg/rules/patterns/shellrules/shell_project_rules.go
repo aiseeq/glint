@@ -73,7 +73,8 @@ func checkMissingScript(r *shellProjectRule, src *patternkit.ShellSource) []*cor
 		return checkMissingScriptFallback(r, src, dir, dirVars)
 	}
 	var out []*core.Violation
-	for _, call := range calls {
+	for i := range calls {
+		call := &calls[i]
 		lineText := ""
 		if call.Line > 0 && call.Line <= len(src.Ctx.Lines) {
 			lineText = src.Ctx.Lines[call.Line-1]
@@ -88,7 +89,7 @@ func checkMissingScript(r *shellProjectRule, src *patternkit.ShellSource) []*cor
 	return out
 }
 
-func isScriptInvocation(call shellcmd.Call) bool {
+func isScriptInvocation(call *shellcmd.Call) bool {
 	if call.Name == "" || call.Name == "." || call.Name == "source" ||
 		call.Name == "bash" || call.Name == "sh" || call.Name == "dash" ||
 		call.Name == "ksh" || call.Name == "zsh" {

@@ -98,7 +98,8 @@ func parseSignalUnit(text string, lineAt func(int) int) []int {
 		return fallbackSignalText(text, lineAt)
 	}
 	var found []int
-	for _, call := range calls {
+	for i := range calls {
+		call := &calls[i]
 		if !badKillArgs(call.Args, call.ArgLiteral) {
 			continue
 		}
