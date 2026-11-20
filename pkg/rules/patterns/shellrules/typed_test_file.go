@@ -1,10 +1,15 @@
 package shellrules
 
 import (
+	"fmt"
 	"go/ast"
 	"go/importer"
+	"go/token"
 	"go/types"
+	"io"
 	"maps"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -236,6 +241,26 @@ var signalStdPackages = struct {
 }{values: make(map[string]*types.Package)}
 
 func cachedSignalImporter() types.Importer {
-	signalImporterOnce.Do(func() { signalImporterValue = importer.Default() })
+	signalImporterOnce.Do(func() { signalImporterValue = newSignalStdImporter() })
 	return signalImporterValue
+}
+
+// newSignalStdImporter imports the standard library from the export data the
+// go command on PATH names. The default importer looks under the GOROOT of
+// the binary, which a build with -trimpath leaves empty: testing.T then has
+// no type, and no subtest body of a test-only package is checked.
+func newSignalStdImporter() types.Importer {
+	return importer.ForCompiler(token.NewFileSet(), "gc", goListExport)
+}
+
+func goListExport(path string) (io.ReadCloser, error) {
+	out, err := exec.Command("go", "list", "-export", "-f", "{{.Export}}", path).Output()
+	if err != nil {
+		return nil, fmt.Errorf("go list -export %s: %w", path, err)
+	}
+	file := strings.TrimSpace(string(out))
+	if file == "" {
+		return nil, fmt.Errorf("go list -export %s: no export data", path)
+	}
+	return os.Open(file)
 }

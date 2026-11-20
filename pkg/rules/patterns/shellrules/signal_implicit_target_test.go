@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -1164,7 +1165,7 @@ var fixed job
 func TestTable(t *testing.T) {
 	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("case", job{command: s}.run) } // WANT
 	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { j := job{command: s}; t.Run("case", j.run) } // WANT
-	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { j := job{command: s}; t.Run("case", (j.check)) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { j := job{command: s}; t.Run("case", (j.check)) } // WANT-NONE: resolved method only passes the field to a data helper
 	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { run := job{command: s}.run; t.Run("case", run) } // WANT
 	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { run := func(t *testing.T) { _ = exec.Command("sh", "-c", s).Run() }; t.Run("case", run) } // WANT
 	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("case", mk(s)) } // WANT
@@ -1184,6 +1185,120 @@ func TestTable(t *testing.T) {
 		}
 	}
 	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+}
+
+func TestSignalImplicitTargetRangeStringsReachNamedSubtestBodies(t *testing.T) {
+	source := `package sample
+import (
+	"os/exec"
+	"testing"
+)
+type job struct{ command string }
+func (j job) logIt(t *testing.T) { t.Log(j.command) }
+func (j job) runIt(t *testing.T) { _ = exec.Command("sh", "-c", j.command).Run() }
+func accept(body func(*testing.T)) {}
+func TestTable(t *testing.T) {
+	for _, s := range []string{"kill -9 $PPID"} {
+		body := func(t *testing.T) { t.Log(s) }
+		t.Run("case", body) // N1
+	}
+	for _, s := range []string{"kill -9 $PPID"} {
+		t.Run("case", job{command: s}.logIt) // N2
+	}
+	for _, s := range []string{"kill -9 $PPID"} { // P1
+		body := func(t *testing.T) { _ = exec.Command("sh", "-c", s).Run() }
+		t.Run("case", body)
+	}
+	for _, s := range []string{"kill -9 $PPID"} { // P2
+		t.Run("case", job{command: s}.runIt)
+	}
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} {
+		body := func(t *testing.T) { t.Log(s) }
+		t.Run("case", body) // N3
+	}
+}
+`
+
+	file, pkg := signalSourceTyped(t, "named_subtest_test.go", source)
+	want := []int{}
+	for i, line := range strings.Split(source, "\n") {
+		if strings.Contains(line, "// P") {
+			want = append(want, i+1)
+		}
+	}
+	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+	ast.Inspect(file.GoAST, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+		if ok && selector.Sel.Name == "Run" {
+			pkg.info.Types[selector.X] = types.TypeAndValue{Type: types.NewPointer(types.Typ[types.Invalid])}
+		}
+		return true
+	})
+	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+	ast.Inspect(file.GoAST, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Command" {
+			return true
+		}
+		delete(pkg.info.Selections, selector)
+		delete(pkg.info.Uses, selector.Sel)
+		if receiver, ok := ast.Unparen(selector.X).(*ast.Ident); ok {
+			delete(pkg.info.Uses, receiver)
+		}
+		return true
+	})
+	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+}
+
+func TestSignalImplicitTargetNamedSubtestBodiesInLoadedTestOnlyPackage(t *testing.T) {
+	root := t.TempDir()
+	appDir := filepath.Join(root, "app")
+	require.NoError(t, os.MkdirAll(appDir, 0700))
+	const source = `package app
+import (
+	"os/exec"
+	"testing"
+)
+type job struct{ command string }
+func (j job) logIt(t *testing.T) { t.Log(j.command) }
+func (j job) runIt(t *testing.T) { _ = exec.Command("sh", "-c", j.command).Run() }
+func N1(t *testing.T) {
+	for _, s := range []string{"kill -9 $PPID"} {
+		body := func(t *testing.T) { t.Log(s) }
+		t.Run("case", body)
+	}
+}
+func N2(t *testing.T) {
+	for _, s := range []string{"kill -9 $PPID"} {
+		t.Run("case", job{command: s}.logIt)
+	}
+}
+func P1(t *testing.T) {
+	for _, s := range []string{"kill -9 $PPID"} {
+		body := func(t *testing.T) { _ = exec.Command("sh", "-c", s).Run() }
+		t.Run("case", body)
+	}
+}
+func P2(t *testing.T) {
+	for _, s := range []string{"kill -9 $PPID"} {
+		t.Run("case", job{command: s}.runIt)
+	}
+}
+`
+	filePath := filepath.Join(appDir, "a_test.go")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/fx\n\ngo 1.26\n"), 0600))
+	require.NoError(t, os.WriteFile(filePath, []byte(source), 0600))
+	file, err := core.NewFileContextChecked(filePath, root, []byte(source), core.DefaultConfig())
+	require.NoError(t, err)
+	project, err := core.LoadGoProject(root, []*core.FileContext{file}, core.GoProjectOptions{RequireSSA: true})
+	require.NoError(t, err)
+	violations, err := newSignalImplicitTargetRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Equal(t, []int{21, 27}, rulestest.ViolationLines(violations))
 }
 
 // A lone kill behind wrappers that run it directly (sudo with its options and

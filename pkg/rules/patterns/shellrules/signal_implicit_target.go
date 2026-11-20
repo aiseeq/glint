@@ -690,12 +690,23 @@ func isSubtest(call *ast.CallExpr, info *types.Info) bool {
 	// A receiver typed only partially (a test file on an unloaded import) is
 	// known by its name.
 	if info != nil {
-		if t := info.TypeOf(sel.X); t != nil && t != types.Typ[types.Invalid] {
+		if t := info.TypeOf(sel.X); t != nil && !signalInvalidType(t) {
 			return testingReceiver(t)
 		}
 	}
 	id, ok := ast.Unparen(sel.X).(*ast.Ident)
 	return ok && (id.Name == "t" || id.Name == "b")
+}
+
+func signalInvalidType(t types.Type) bool {
+	switch t := t.(type) {
+	case *types.Pointer:
+		return signalInvalidType(t.Elem())
+	case *types.Named:
+		return signalInvalidType(t.Underlying())
+	default:
+		return t == types.Typ[types.Invalid]
+	}
 }
 
 // loggerPrefixes start the names of logging functions and methods, whatever

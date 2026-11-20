@@ -205,11 +205,28 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 			dependent = append(dependent, i)
 		}
 	}
-	if len(dependent) == 0 {
-		return
-	}
 	for _, i := range dependent {
 		markRangeUses(call.Args[i], tracked, info, handled)
+	}
+	if isSubtest(call, info) {
+		body, receiverFields, resolved := resolveRangeSubtestBody(call, tracked, info, pkg)
+		if resolved {
+			bodyTracked := make(map[types.Object]bool, len(tracked)+len(receiverFields))
+			for object := range tracked {
+				bodyTracked[object] = true
+			}
+			for object := range receiverFields {
+				bodyTracked[object] = true
+			}
+			markRangeUses(body, tracked, info, handled)
+			nested := analyzeRangeObject(body, bodyTracked, info, pkg, depth+1, stack)
+			result.executes = result.executes || nested.executes
+			result.unknown = result.unknown || nested.unknown
+			return
+		}
+	}
+	if len(dependent) == 0 {
+		return
 	}
 	if _, ok := shellExecutionScript(call, info); ok {
 		result.executes = true
@@ -230,6 +247,164 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 		return
 	}
 	result.unknown = true
+}
+
+// resolveRangeSubtestBody follows only bodies whose source is unambiguous:
+// a function literal assigned once in this function, or a method value for a
+// method declared in this package. Other function values remain unknown.
+func resolveRangeSubtestBody(call *ast.CallExpr, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage) (ast.Node, map[types.Object]bool, bool) {
+	if len(call.Args) < 2 {
+		return nil, nil, false
+	}
+	bodyExpr := ast.Unparen(call.Args[1])
+	switch body := bodyExpr.(type) {
+	case *ast.FuncLit:
+		return body.Body, nil, true
+	case *ast.Ident:
+		if body.Name == "_" {
+			return nil, nil, false
+		}
+		object := info.Uses[body]
+		if object == nil {
+			return nil, nil, false
+		}
+		function, unique := uniqueRangeFuncValue(call, object, info, pkg)
+		if !unique || function == nil {
+			return nil, nil, false
+		}
+		return function.Body, nil, true
+	case *ast.SelectorExpr:
+		selection := info.Selections[body]
+		if selection == nil || selection.Kind() != types.MethodVal {
+			return nil, nil, false
+		}
+		method, _ := selection.Obj().(*types.Func)
+		if method == nil || method.Pkg() == nil || method.Pkg().Path() != pkg.path {
+			return nil, nil, false
+		}
+		decl := rangeFunctionDecl(method, pkg, info)
+		if decl == nil || decl.Body == nil || decl.Recv == nil || len(decl.Recv.List) == 0 || len(decl.Recv.List[0].Names) == 0 {
+			return nil, nil, false
+		}
+		fields := rangeMethodValueFields(body.X, tracked, info, pkg)
+		if len(fields) == 0 {
+			return nil, nil, false
+		}
+		return decl.Body, fields, true
+	default:
+		return nil, nil, false
+	}
+}
+
+func uniqueRangeFuncValue(call *ast.CallExpr, object types.Object, info *types.Info, pkg *signalPackage) (*ast.FuncLit, bool) {
+	var scope *ast.BlockStmt
+	for _, file := range pkg.files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			if n == nil || scope != nil {
+				return scope == nil
+			}
+			switch function := n.(type) {
+			case *ast.FuncDecl:
+				if function.Body != nil && function.Body.Pos() <= call.Pos() && call.End() <= function.Body.End() {
+					scope = function.Body
+				}
+			case *ast.FuncLit:
+				if function.Body.Pos() <= call.Pos() && call.End() <= function.Body.End() {
+					scope = function.Body
+				}
+			}
+			return scope == nil
+		})
+	}
+	if scope == nil {
+		return nil, false
+	}
+	writes := 0
+	var value *ast.FuncLit
+	ast.Inspect(scope, func(n ast.Node) bool {
+		switch statement := n.(type) {
+		case *ast.ValueSpec:
+			for i, name := range statement.Names {
+				if info.Defs[name] != object {
+					continue
+				}
+				writes++
+				if i < len(statement.Values) {
+					value, _ = ast.Unparen(statement.Values[i]).(*ast.FuncLit)
+				}
+			}
+		case *ast.AssignStmt:
+			for i, lhs := range statement.Lhs {
+				id, ok := ast.Unparen(lhs).(*ast.Ident)
+				if !ok || info.Uses[id] != object && info.Defs[id] != object {
+					continue
+				}
+				writes++
+				value = nil
+				if i < len(statement.Rhs) {
+					value, _ = ast.Unparen(statement.Rhs[i]).(*ast.FuncLit)
+				}
+			}
+		}
+		return true
+	})
+	return value, writes == 1 && value != nil
+}
+
+func rangeMethodValueFields(receiver ast.Expr, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage) map[types.Object]bool {
+	var literal *ast.CompositeLit
+	switch receiver := ast.Unparen(receiver).(type) {
+	case *ast.CompositeLit:
+		literal = receiver
+	case *ast.Ident:
+		object := info.Uses[receiver]
+		var found int
+		for _, file := range pkg.files {
+			ast.Inspect(file, func(n ast.Node) bool {
+				switch statement := n.(type) {
+				case *ast.ValueSpec:
+					for i, name := range statement.Names {
+						if info.Defs[name] == object && i < len(statement.Values) {
+							found++
+							literal, _ = ast.Unparen(statement.Values[i]).(*ast.CompositeLit)
+						}
+					}
+				case *ast.AssignStmt:
+					for i, lhs := range statement.Lhs {
+						id, ok := ast.Unparen(lhs).(*ast.Ident)
+						if ok && (info.Uses[id] == object || info.Defs[id] == object) && i < len(statement.Rhs) {
+							found++
+							literal, _ = ast.Unparen(statement.Rhs[i]).(*ast.CompositeLit)
+						}
+					}
+				}
+				return true
+			})
+		}
+		if found != 1 {
+			return nil
+		}
+	default:
+		return nil
+	}
+	if literal == nil {
+		return nil
+	}
+	fields := make(map[types.Object]bool)
+	for _, element := range literal.Elts {
+		kv, ok := element.(*ast.KeyValueExpr)
+		if !ok || !rangeExprDepends(kv.Value, tracked, info) {
+			continue
+		}
+		key, ok := ast.Unparen(kv.Key).(*ast.Ident)
+		if !ok {
+			continue
+		}
+		if field := info.Uses[key]; field != nil {
+			fields[field] = true
+		}
+	}
+	return fields
 }
 
 func analyzeProjectRangeCall(call *ast.CallExpr, dependent []int, fn *types.Func, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool, result *rangeFlowResult) {
@@ -417,22 +592,34 @@ func shellExecutionScript(call *ast.CallExpr, info *types.Info) (ast.Expr, bool)
 }
 
 func shellCommandName(call *ast.CallExpr, info *types.Info) (string, bool) {
-	name := ""
-	if info == nil {
-		selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != "Command" && selector.Sel.Name != "CommandContext" {
-			return "", false
-		}
-		name = selector.Sel.Name
-	} else {
-		fn := rangeCallFunc(call, info)
-		if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != "os/exec" || fn.Name() != "Command" && fn.Name() != "CommandContext" {
-			return "", false
-		}
-		name = fn.Name()
-	}
-	if name != "Command" && name != "CommandContext" {
+	selector, isSelector := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !isSelector || selector.Sel.Name != "Command" && selector.Sel.Name != "CommandContext" {
 		return "", false
+	}
+	name := selector.Sel.Name
+	if info == nil {
+		return name, true
+	}
+	if info != nil {
+		fn := rangeCallFunc(call, info)
+		if fn != nil {
+			if fn.Pkg() == nil || fn.Pkg().Path() != "os/exec" || fn.Name() != name {
+				return "", false
+			}
+			return name, true
+		}
+		id, ok := ast.Unparen(selector.X).(*ast.Ident)
+		if !ok {
+			return "", false
+		}
+		if object := info.Uses[id]; object != nil {
+			pkgName, ok := object.(*types.PkgName)
+			if !ok || pkgName.Imported() == nil || pkgName.Imported().Path() != "os/exec" {
+				return "", false
+			}
+		} else if id.Name != "exec" {
+			return "", false
+		}
 	}
 	return name, true
 }
