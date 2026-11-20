@@ -266,7 +266,7 @@ func templateExpression(b []byte, start, at, end int) string {
 		// try, catch (e) and finally take a block, not a statement.
 		return "{}"
 	}
-	if isTemplateOperandEnd(previous) && isTemplateOperandStart(next) &&
+	if isTemplateOperandEnd(previous) && isTemplateOperandStart(next) && !templateControlHeaderEnd(code) &&
 		!templateKeyword(before) && (!templateKeyword(after) || templateValueKeywords[after]) {
 		return "+"
 	}
@@ -396,6 +396,36 @@ func templateKeyword(word string) bool {
 
 // lastWord returns the identifier that ends code, or "" when there is none
 // or it is a property name (opts.default).
+// templateControlHeaderEnd reports whether code ends with the closing
+// parenthesis of an if, while, for or with header: what follows it is the
+// statement body, not an operand.
+func templateControlHeaderEnd(code []byte) bool {
+	end := len(code)
+	for end > 0 && (code[end-1] == ' ' || code[end-1] == '\t' || code[end-1] == '\n' || code[end-1] == '\r') {
+		end--
+	}
+	if end == 0 || code[end-1] != ')' {
+		return false
+	}
+	depth := 0
+	for i := end - 1; i >= 0; i-- {
+		switch code[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+			if depth == 0 {
+				switch lastWord(code[:i]) {
+				case "if", "while", "for", "with":
+					return true
+				}
+				return false
+			}
+		}
+	}
+	return false
+}
+
 func lastWord(code []byte) string {
 	end := len(code)
 	for end > 0 && (code[end-1] == ' ' || code[end-1] == '\t') {

@@ -267,6 +267,15 @@ func TestExtractTemplateJavaScriptActionNextToKeywordIsNotBinaryOperator(t *test
 		{"f(of {{.Op}} 2);", "f(of +" + strings.Repeat(" ", len("{{.Op}}")-1) + " 2);"},
 		{"f(let {{.Op}} other);", "f(let +" + strings.Repeat(" ", len("{{.Op}}")-1) + " other);"},
 		{"p.catch(report) " + action, "p.catch(report) " + statement},
+		{"if (a) " + action + " x = 1;", "if (a) " + statement + " x = 1;"},
+		{"if (f(a)) " + action + " b();", "if (f(a)) " + statement + " b();"},
+		{"while (c) " + action + " i++;", "while (c) " + statement + " i++;"},
+		{"with (o) " + action + " x = 1;", "with (o) " + statement + " x = 1;"},
+		{"for (const k of arr) " + action + " x = 1;", "for (const k of arr) " + statement + " x = 1;"},
+		{"for (;;) " + action + " (b || c)();", "for (;;) " + statement + " (b || c)();"},
+		{"f(a) {{.Op}} b;", "f(a) +" + strings.Repeat(" ", len("{{.Op}}")-1) + " b;"},
+		{"const v = (a) {{.Op}} b;", "const v = (a) +" + strings.Repeat(" ", len("{{.Op}}")-1) + " b;"},
+		{"const v = o.if(a) {{.Op}} b;", "const v = o.if(a) +" + strings.Repeat(" ", len("{{.Op}}")-1) + " b;"},
 	} {
 		source := "<script>\n" + tc.line + "\n</script>\n"
 		ctx := NewFileContext("/project/templates/keyword.html", "/project", []byte(source), DefaultConfig())
