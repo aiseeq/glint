@@ -106,3 +106,104 @@ function optionalBankName() {
 	}
 	assert.Equal(t, []string{"templates/page.html:4"}, rulestest.ViolationPlaces(rule.AnalyzeFile(virtual[0])))
 }
+
+func TestTSConstantKeyReadUncheckedSecondPass(t *testing.T) {
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `type Prov = { name: string; x: number }
+interface Dict { [k: string]: Prov }
+type Banks = Record<string, Prov>
+export function interfaceIndex(d: Dict) { return d['THA'].name }
+export function aliasIndex(b: Banks) { return b['THA'].name }
+export function savedPath(raw: string) {
+  const cfg = JSON.parse(raw)
+  const bank = cfg.banks['THA']
+  return bank.name
+}
+export function noExit(m: Record<string, Prov>) {
+  if (m['K'] === undefined) console.warn('missing')
+  return m['K'].x
+}
+export function otherDict(m: Record<string, Prov>, mm: Record<string, Prov>) {
+  if (!('K' in mm)) return 0
+  return m['K'].x
+}
+export function otherBranch(m: Record<string, Prov>) {
+  if ('K' in m) { console.log('present') } else { return m['K'].x }
+  return 0
+}
+export function truthyBlock(m: Record<string, Prov>) {
+  if (m['K']) { return m['K'].x }
+  return 0
+}
+export function truthyInline(m: Record<string, Prov>) {
+  if (m['K']) return m['K'].x
+  return 0
+}
+export function savedTruthy(m: Record<string, Prov>) {
+  const v = m['K']
+  if (v) { return v.x }
+  return 0
+}
+export function savedAnd(m: Record<string, Prov>) {
+  const v = m['K']
+  return v && v.x
+}
+export function savedTernary(m: Record<string, Prov>) {
+  const v = m['K']
+  return v ? v.x : 0
+}
+export function savedOr(m: Record<string, Prov>) {
+  const v = m['K'] || { name: '', x: 0 }
+  return v.x
+}
+export function literalKeys(m: Record<'THA' | 'VNM', Prov>) { return m['THA'].name }
+export function written(m: Record<string, Prov>) {
+  m['K'] = { name: 'k', x: 1 }
+  return m['K'].x
+}
+export function own(m: Record<string, Prov>) {
+  if (!Object.hasOwn(m, 'K')) return 0
+  return m['K'].x
+}
+export function keys(m: Record<string, Prov>) {
+  if (!Object.keys(m).includes('K')) return 0
+  return m['K'].x
+}
+export function fieldNotAlias(m: Record<string, Prov>, o: { v: Prov }) {
+  const v = m['K']
+  return o.v.x + (v ? v.x : 0)
+}
+export function scopedName(m: Record<string, Prov>) { return m['K'].x }
+export function scopedName(m: Prov) { return m.name.length }
+export function unrelatedTyped(m: Record<string, Prov>) { return m['K'].x }
+export function scopedPlain(m: Prov) { return m['name'].length }
+export function plainObject(m: Prov) { return m['name'].length }
+`
+	got := patterntest.LinesOf(t, rule, "src/second.ts", source)
+	assert.Equal(t, []string{"src/second.ts:13", "src/second.ts:17", "src/second.ts:20", "src/second.ts:4", "src/second.ts:5", "src/second.ts:65", "src/second.ts:67", "src/second.ts:8"}, got)
+}
+
+func TestTSConstantKeyReadUncheckedSecondPassTemplate(t *testing.T) {
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `<script>
+var ctx = {{.Ctx}};
+var banks = {{.Banks}};
+function saved() {
+  var bank = ctx.banks['IDN'];
+  return bank.code;
+}
+function plainVariable() { return banks['MYS'].name; }
+function guarded() { if (ctx.banks['THA']) { return ctx.banks['THA'].name; } }
+</script>`
+	virtual := core.ExtractTemplateJavaScript(rulestest.TextFile(t, "templates/second.html", source))
+	if !assert.Len(t, virtual, 1) {
+		return
+	}
+	assert.Equal(t, []string{"templates/second.html:5", "templates/second.html:8"}, rulestest.ViolationPlaces(rule.AnalyzeFile(virtual[0])))
+}
