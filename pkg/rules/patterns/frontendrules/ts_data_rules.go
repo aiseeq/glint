@@ -23,6 +23,7 @@ func init() {
 	rules.Register(NewAsyncIIFEResultUnawaitedRule())
 	rules.Register(NewEnvSecretLiteralFallbackRule())
 	rules.Register(NewDefaultInventsDomainValueRule())
+	rules.Register(NewTSConstantKeyReadUncheckedRule())
 	rules.Register(NewMissingAmountCoercedToZeroRule())
 	rules.Register(NewCSVCellDisplayFormatterRule())
 }
