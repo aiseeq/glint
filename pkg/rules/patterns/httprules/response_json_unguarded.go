@@ -22,8 +22,10 @@ func init() {
 // A plain-text refusal from a middleware, a proxy's HTML page or a cut-off
 // body makes .json() throw a SyntaxError, and the screen shows "Unexpected
 // token ... is not valid JSON" instead of the reason. The parse is guarded by
-// a .catch in its chain or a try block around it — or it goes through a
-// helper that reads text and turns a bad body into an error with the status.
+// a .catch in its chain or a try block around it, or by the callers of a
+// helper of the file when every call of it ends in a .catch — or it goes
+// through a helper that reads text and turns a bad body into an error with
+// the status.
 // A response is a variable assigned from fetch, or one named response, resp,
 // res, r or ...Response. Test code reads raw responses on purpose and is not
 // checked.
@@ -61,6 +63,8 @@ func (r *ResponseJSONUnguardedRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 		}
 	}
 	var violations []*core.Violation
+	var helpers []jsHelper
+	helpersRead := false
 	depth := 0
 	var tries []int // depths inside the try blocks open here
 	for i, line := range code {
@@ -74,6 +78,12 @@ func (r *ResponseJSONUnguardedRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 				name := line[m[2]:m[3]]
 				isResponse := fetched[name] || responseName.MatchString(name)
 				if len(tries) > 0 || !isResponse || caughtInChain(code, i, m[1]) {
+					continue
+				}
+				if !helpersRead {
+					helpers, helpersRead = fileHelpers(code), true
+				}
+				if caughtByCallers(code, helpers, i, m[0]) {
 					continue
 				}
 				if ctx.IsSuppressed(i+1, r.Name()) {
@@ -221,6 +231,135 @@ func continuesOnNextLine(code []string, line, last int) bool {
 	for i := line; i <= last; i++ {
 		if rest := strings.TrimSpace(code[i]); rest != "" {
 			return strings.ContainsRune(".)]},", rune(rest[0]))
+		}
+	}
+	return false
+}
+
+// jsHelper is a function of the file with a block body, from the '{' to the
+// '}' of the body.
+type jsHelper struct {
+	name                         string
+	startLine, startCol, endLine int
+	endCol                       int
+	exported                     bool
+}
+
+var helperHead = regexp.MustCompile(`(?:\bfunction\s+([A-Za-z_$][\w$]*)\s*(?:<[^>(]*>)?\(|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=\s*(?:async\s+)?(?:function\b[^(]*\(|\())`)
+
+// fileHelpers lists the named functions of the file whose body is a block.
+func fileHelpers(code []string) []jsHelper {
+	var helpers []jsHelper
+	for i, text := range code {
+		for _, m := range helperHead.FindAllStringSubmatchIndex(text, -1) {
+			name := ""
+			if m[2] >= 0 {
+				name = text[m[2]:m[3]]
+			} else {
+				name = text[m[4]:m[5]]
+			}
+			bl, bc, ok := helperBody(code, i, m[1]-1)
+			if !ok {
+				continue
+			}
+			el, ec, ok := patternkit.JsBlockEnd(code, bl, bc)
+			if !ok {
+				continue
+			}
+			helpers = append(helpers, jsHelper{
+				name: name, startLine: bl, startCol: bc, endLine: el, endCol: ec,
+				exported: strings.Contains(text[:m[0]], "export"),
+			})
+		}
+	}
+	return helpers
+}
+
+// helperBody finds the '{' of the body after the parameter list opened at
+// code[line][col]: past the list, an optional return type and an arrow.
+func helperBody(code []string, line, col int) (int, int, bool) {
+	el, ec, ok := closingParen(code, line, col)
+	if !ok {
+		return 0, 0, false
+	}
+	for i, from := el, ec; i < len(code) && i <= el+3; i, from = i+1, 0 {
+		if j := strings.IndexAny(code[i][from:], "{;"); j >= 0 {
+			if code[i][from+j] == ';' {
+				return 0, 0, false
+			}
+			return i, from + j, true
+		}
+	}
+	return 0, 0, false
+}
+
+// closingParen returns the position after the ')' that closes the '(' at
+// code[line][col].
+func closingParen(code []string, line, col int) (int, int, bool) {
+	depth := 0
+	for i, from := line, col; i < len(code) && i <= line+chainWindowLines; i, from = i+1, 0 {
+		for j := from; j < len(code[i]); j++ {
+			switch code[i][j] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					return i, j + 1, true
+				}
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// caughtByCallers reports a parse inside a helper of the file whose every
+// use in the file is a call that ends in a .catch: the helper hands the parse
+// to its callers, and they catch it. An exported helper has callers
+// elsewhere, and a helper passed as a value has callers out of sight.
+func caughtByCallers(code []string, helpers []jsHelper, line, col int) bool {
+	var inner *jsHelper
+	for k := range helpers {
+		h := &helpers[k]
+		if containsPos(h, line, col) && (inner == nil || containsPos(inner, h.startLine, h.startCol)) {
+			inner = h
+		}
+	}
+	if inner == nil || inner.exported {
+		return false
+	}
+	use := regexp.MustCompile(`(?:^|[^\w$.])(` + regexp.QuoteMeta(inner.name) + `)\b(\s*\()?`)
+	calls := 0
+	for i, text := range code {
+		for _, m := range use.FindAllStringSubmatchIndex(text, -1) {
+			if declaresName(text[:m[2]]) {
+				continue
+			}
+			if m[4] < 0 {
+				return false
+			}
+			el, ec, ok := closingParen(code, i, m[5]-1)
+			if !ok || !caughtInChain(code, el, ec) {
+				return false
+			}
+			calls++
+		}
+	}
+	return calls > 0
+}
+
+func containsPos(h *jsHelper, line, col int) bool {
+	after := line > h.startLine || (line == h.startLine && col > h.startCol)
+	before := line < h.endLine || (line == h.endLine && col < h.endCol)
+	return after && before
+}
+
+// declaresName reports the text before a name that declares it.
+func declaresName(before string) bool {
+	before = strings.TrimRight(before, " \t")
+	for _, keyword := range []string{"function", "const", "let", "var"} {
+		if strings.HasSuffix(before, keyword) && (len(before) == len(keyword) || !patternkit.IsWordChar(before[len(before)-len(keyword)-1])) {
+			return true
 		}
 	}
 	return false

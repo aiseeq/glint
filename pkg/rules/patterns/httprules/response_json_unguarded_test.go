@@ -119,3 +119,57 @@ function parseOne(r) { return r.json(); } other().catch(function() {});
 fetch('/f').then(function(r) { var d = r.json(); other().catch(function() {}); return d; });
 `))
 }
+
+// A helper of the file returns the parse to its callers: when every call
+// of it in the file ends in a .catch, the parse is guarded there.
+func TestResponseJSONUnguardedHelperCaughtByCallers(t *testing.T) {
+	assert.Empty(t, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "web/static/corridor.js", `function fetchJSON(url) {
+  return fetch(url).then(function(r) {
+    if (r.ok) return r.json();
+    return Promise.reject(new Error('HTTP ' + r.status));
+  });
+}
+function loadBanks() {
+  fetchJSON('/banks').then(show).catch(showError);
+}
+var loadOptions = function() {
+  fetchJSON('/options?type=' + encodeURIComponent(kind))
+    .then(function(o) { fill(o); })
+    .catch(function(e) { console.warn(e); });
+};
+`))
+}
+
+// A helper with a call that nothing catches, a helper handed over as a
+// value, an exported helper and a helper nobody calls in the file leave the
+// parse unguarded.
+func TestResponseJSONUnguardedHelperNotCaughtEverywhere(t *testing.T) {
+	assert.Equal(t, []int{2, 7, 12, 17}, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "web/src/lib/helpers.ts", `function getA(url: string) {
+  return fetch(url).then((r) => r.json())
+}
+getA('/a').catch(report)
+getA('/b').then(show)
+function getB(url: string) {
+  return fetch(url).then((r) => r.json())
+}
+getB('/a').catch(report)
+urls.map(getB)
+export function getC(url: string) {
+  return fetch(url).then((r) => r.json())
+}
+getC('/a').catch(report)
+const getD = async (url: string) => {
+  const response = await fetch(url)
+  return response.json()
+}
+`))
+	assert.Equal(t, []int{3}, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "web/static/nested.js", `function outer() {
+  function inner(url) {
+    return fetch(url).then(function(r) { return r.json(); });
+  }
+  inner('/x').then(show);
+  return Promise.resolve();
+}
+outer().catch(report);
+`), "the innermost helper hands the parse over")
+}
