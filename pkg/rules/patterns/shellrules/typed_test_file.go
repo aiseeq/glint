@@ -253,22 +253,26 @@ func cachedSignalImporter() types.Importer {
 // project it checks, and a go.mod there must not decide the standard library.
 func newSignalStdImporter() types.Importer {
 	goroot := build.Default.GOROOT
+	var gorootErr error
 	if goroot == "" {
-		goroot = goEnvGOROOT()
+		goroot, gorootErr = goEnvGOROOT()
 	}
 	return importer.ForCompiler(token.NewFileSet(), "gc", func(path string) (io.ReadCloser, error) {
+		if gorootErr != nil {
+			return nil, fmt.Errorf("go list -export %s: %w", path, gorootErr)
+		}
 		return goListExport(goroot, path)
 	})
 }
 
-func goEnvGOROOT() string {
+func goEnvGOROOT() (string, error) {
 	cmd := exec.Command("go", "env", "GOROOT")
 	cmd.Dir = os.TempDir()
 	out, err := cmd.Output()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("go env GOROOT: %w", err)
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(string(out)), nil
 }
 
 func goListExport(goroot, path string) (io.ReadCloser, error) {
