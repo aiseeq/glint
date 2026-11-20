@@ -158,7 +158,6 @@ func blank(b []byte, start, end int) {
 
 type templateBranch struct {
 	parentActive bool
-	elseSeen     bool
 }
 
 // maskTemplateActions removes Go actions while keeping JavaScript parseable
@@ -202,11 +201,10 @@ func maskTemplateActions(b []byte, start, end int) {
 			branches = append(branches, templateBranch{parentActive: active})
 			blank(b, a, z)
 		case "else":
+			// The first branch is the one kept: every else, else if and
+			// else with after it is another version of the same code.
 			if len(branches) > 0 {
-				branch := &branches[len(branches)-1]
-				useElse := !branch.elseSeen
-				branch.elseSeen = true
-				active = branch.parentActive && !useElse
+				active = false
 			}
 			blank(b, a, z)
 		case "end":
@@ -229,9 +227,9 @@ func maskTemplateActions(b []byte, start, end int) {
 		default:
 			if !active {
 				blank(b, a, z)
-			} else if kind == "template" {
-				replaceTemplateAction(b, a, z, ";")
 			} else {
+				// A template call is a statement or a value, like any other
+				// action: the code before it tells which.
 				replaceTemplateAction(b, a, z, templateExpression(b, start, a))
 			}
 		}
@@ -272,7 +270,7 @@ func templateExpression(b []byte, start, at int) string {
 		if b[i] == '\n' || b[i] == '\r' {
 			continue
 		}
-		if strings.ContainsRune("=([{,:+-*/%!&|^<>?", rune(b[i])) {
+		if strings.ContainsRune("=([{,:+-*/%!&|^<>?.", rune(b[i])) {
 			return "null"
 		}
 		if b[i] == ' ' || b[i] == '\t' {

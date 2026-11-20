@@ -128,3 +128,41 @@ func TestExtractTemplateJavaScriptAfterNonASCIIKeepsOffsets(t *testing.T) {
 		t.Errorf("script tags are kept:\n%s", got[0].Content)
 	}
 }
+
+// An else if chain keeps its first branch only: the later branches are other
+// versions of the same code, and two of them side by side declare the same
+// name twice or read as a copied block.
+func TestExtractTemplateJavaScriptElseIfChainKeepsFirstBranch(t *testing.T) {
+	source := "<script>\n{{if eq .Mode \"a\"}}\nconst mode = \"a\";\n{{else if eq .Mode \"b\"}}\nconst mode = \"b\";\n{{else}}\nconst mode = \"c\";\n{{end}}\n{{range .Items}}\nshow(1);\n{{else}}\nconst none = 1;\n{{end}}\n</script>\n"
+	ctx := NewFileContext("/project/templates/page.html", "/project", []byte(source), DefaultConfig())
+	got := ExtractTemplateJavaScript(ctx)
+	if len(got) != 1 {
+		t.Fatalf("got %d scripts, want 1", len(got))
+	}
+	code := string(got[0].Content)
+	if !strings.Contains(code, `const mode = "a";`) || !strings.Contains(code, "show(1);") {
+		t.Errorf("the first branch is lost:\n%s", code)
+	}
+	for _, unwanted := range []string{`"b"`, `"c"`, "none"} {
+		if strings.Contains(code, unwanted) {
+			t.Errorf("virtual source keeps %s from a later branch:\n%s", unwanted, code)
+		}
+	}
+}
+
+// A template call or a field name in an expression is a value, not a
+// statement: a semicolon there breaks the parse of the whole script.
+func TestExtractTemplateJavaScriptExpressionActionsStayValues(t *testing.T) {
+	source := "<script>\nconst a = {{template \"val\" .}};\nconst b = obj.{{.Field}};\n{{template \"extra\" .}}\n</script>\n"
+	ctx := NewFileContext("/project/templates/page.html", "/project", []byte(source), DefaultConfig())
+	got := ExtractTemplateJavaScript(ctx)
+	if len(got) != 1 {
+		t.Fatalf("got %d scripts, want 1", len(got))
+	}
+	lines := got[0].Lines
+	for i, want := range map[int]string{1: "const a = null", 2: "const b = obj.null", 3: ";"} {
+		if line := strings.Join(strings.Fields(lines[i]), " "); !strings.HasPrefix(strings.ReplaceAll(line, ". null", ".null"), want) {
+			t.Errorf("line %d = %q, want it to start with %q", i+1, lines[i], want)
+		}
+	}
+}
