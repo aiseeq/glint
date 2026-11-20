@@ -262,6 +262,11 @@ func TestExtractTemplateJavaScriptActionNextToKeywordIsNotBinaryOperator(t *test
 		{"const v = [el.class {{.Op}} b];", "const v = [el.class +" + strings.Repeat(" ", len("{{.Op}}")-1) + " b];"},
 		{"f(a {{.Op}} new Date());", "f(a +" + strings.Repeat(" ", len("{{.Op}}")-1) + " new Date());"},
 		{"f(a {{.Op}} typeof b);", "f(a +" + strings.Repeat(" ", len("{{.Op}}")-1) + " typeof b);"},
+		{"p.then(ok).catch(fail) {{.Op}} next();", "p.then(ok).catch(fail) +" + strings.Repeat(" ", len("{{.Op}}")-1) + " next();"},
+		{"f(p.catch {{.Op}} 1);", "f(p.catch +" + strings.Repeat(" ", len("{{.Op}}")-1) + " 1);"},
+		{"f(of {{.Op}} 2);", "f(of +" + strings.Repeat(" ", len("{{.Op}}")-1) + " 2);"},
+		{"f(let {{.Op}} other);", "f(let +" + strings.Repeat(" ", len("{{.Op}}")-1) + " other);"},
+		{"p.catch(report) " + action, "p.catch(report) " + statement},
 	} {
 		source := "<script>\n" + tc.line + "\n</script>\n"
 		ctx := NewFileContext("/project/templates/keyword.html", "/project", []byte(source), DefaultConfig())

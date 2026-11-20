@@ -368,16 +368,17 @@ func isTemplateWordBoundary(c byte) bool {
 	}
 }
 
-// templateKeywords are the JavaScript words that are not values: an action
+// templateKeywords are the JavaScript reserved words that are not values
+// (let, of, yield and await are names outside their contexts): an action
 // next to one (if (a) {{template "s" .}} else ..., do {{...}} while) is a
 // statement, not an operator between two operands.
 var templateKeywords = map[string]bool{
 	"break": true, "case": true, "catch": true, "class": true, "const": true, "continue": true,
 	"debugger": true, "default": true, "delete": true, "do": true, "else": true, "export": true,
 	"extends": true, "finally": true, "for": true, "function": true, "if": true, "import": true,
-	"in": true, "instanceof": true, "let": true, "new": true, "of": true, "return": true,
+	"in": true, "instanceof": true, "new": true, "return": true,
 	"switch": true, "throw": true, "try": true, "typeof": true, "var": true, "void": true,
-	"while": true, "with": true, "yield": true, "await": true,
+	"while": true, "with": true,
 }
 
 // templateValueKeywords start a value: a {{.Op}} new Date() is still an
@@ -386,7 +387,8 @@ var templateValueKeywords = map[string]bool{
 	"new": true, "typeof": true, "void": true, "delete": true, "function": true, "class": true, "await": true,
 }
 
-var templateCatchClause = regexp.MustCompile(`\bcatch\s*(\([^()]*\))?\s*$`)
+// templateCatchClause is a catch clause, not a .catch method or property.
+var templateCatchClause = regexp.MustCompile(`(?:^|[^.\s])\s*\bcatch\s*(\([^()]*\))?\s*$`)
 
 func templateKeyword(word string) bool {
 	return templateKeywords[word]
