@@ -1334,3 +1334,35 @@ func TestSignalImplicitTargetWrappedKillIsFixture(t *testing.T) {
 	}
 	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
 }
+
+// A method value whose method hands its receiver on — to another method or
+// to a function — may run the table string out of sight, like an unknown
+// function value.
+func TestSignalImplicitTargetMethodValuePassingReceiverOn(t *testing.T) {
+	source := `package sample
+import (
+	"os/exec"
+	"testing"
+)
+type task struct{ cmd string }
+func (k task) shellIt(t *testing.T) { _ = exec.Command("sh", "-c", k.cmd).Run() }
+func (k task) viaMethod(t *testing.T) { k.shellIt(t) }
+func (k task) viaStruct(t *testing.T) { runTask(k) }
+func (k task) logIt(t *testing.T) { t.Log(k.cmd) }
+func runTask(k task) { _ = exec.Command("sh", "-c", k.cmd).Run() }
+func TestTable(t *testing.T) {
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("a", task{cmd: s}.viaMethod) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("b", task{cmd: s}.viaStruct) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("c", task{cmd: s}.shellIt) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("d", task{cmd: s}.logIt) }
+}
+`
+	file, pkg := signalSourceTyped(t, "receiver_on_test.go", source)
+	var want []int
+	for i, line := range strings.Split(source, "\n") {
+		if strings.Contains(line, "// WANT") {
+			want = append(want, i+1)
+		}
+	}
+	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+}

@@ -287,7 +287,7 @@ func resolveRangeSubtestBody(call *ast.CallExpr, tracked map[types.Object]bool, 
 			return nil, nil, false
 		}
 		fields := rangeMethodValueFields(body.X, tracked, info, pkg)
-		if len(fields) == 0 {
+		if len(fields) == 0 || !receiverOnlyReadsFields(decl, info) {
 			return nil, nil, false
 		}
 		return decl.Body, fields, true
@@ -823,4 +823,36 @@ func rangeIdentInEquality(id *ast.Ident, scope ast.Node, tracked map[types.Objec
 		return !found
 	})
 	return found
+}
+
+// receiverOnlyReadsFields reports a method that uses its receiver only to read
+// fields. A receiver handed to a function or a method called on it may carry
+// the table string where the walk of this body does not follow.
+func receiverOnlyReadsFields(decl *ast.FuncDecl, info *types.Info) bool {
+	receiver := info.Defs[decl.Recv.List[0].Names[0]]
+	if receiver == nil {
+		return false
+	}
+	only := true
+	ast.Inspect(decl.Body, func(n ast.Node) bool {
+		if !only {
+			return false
+		}
+		switch n := n.(type) {
+		case *ast.SelectorExpr:
+			id, ok := ast.Unparen(n.X).(*ast.Ident)
+			if !ok || info.Uses[id] != receiver {
+				return true
+			}
+			selection := info.Selections[n]
+			only = selection != nil && selection.Kind() == types.FieldVal
+			return false
+		case *ast.Ident:
+			if info.Uses[n] == receiver {
+				only = false
+			}
+		}
+		return only
+	})
+	return only
 }

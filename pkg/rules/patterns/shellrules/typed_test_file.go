@@ -3,6 +3,7 @@ package shellrules
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/importer"
 	"go/token"
 	"go/types"
@@ -245,16 +246,39 @@ func cachedSignalImporter() types.Importer {
 	return signalImporterValue
 }
 
-// newSignalStdImporter imports the standard library from the export data the
-// go command on PATH names. The default importer looks under the GOROOT of
-// the binary, which a build with -trimpath leaves empty: testing.T then has
-// no type, and no subtest body of a test-only package is checked.
+// newSignalStdImporter imports the standard library from the export data
+// the go command of GOROOT names, run in GOROOT as the default importer does.
+// A build with -trimpath leaves the binary without a GOROOT: then the go
+// command on PATH names it, asked outside any module — glint runs in the
+// project it checks, and a go.mod there must not decide the standard library.
 func newSignalStdImporter() types.Importer {
-	return importer.ForCompiler(token.NewFileSet(), "gc", goListExport)
+	goroot := build.Default.GOROOT
+	if goroot == "" {
+		goroot = goEnvGOROOT()
+	}
+	return importer.ForCompiler(token.NewFileSet(), "gc", func(path string) (io.ReadCloser, error) {
+		return goListExport(goroot, path)
+	})
 }
 
-func goListExport(path string) (io.ReadCloser, error) {
-	out, err := exec.Command("go", "list", "-export", "-f", "{{.Export}}", path).Output()
+func goEnvGOROOT() string {
+	cmd := exec.Command("go", "env", "GOROOT")
+	cmd.Dir = os.TempDir()
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func goListExport(goroot, path string) (io.ReadCloser, error) {
+	if goroot == "" {
+		return nil, fmt.Errorf("go list -export %s: GOROOT unknown", path)
+	}
+	cmd := exec.Command(filepath.Join(goroot, "bin", "go"), "list", "-export", "-f", "{{.Export}}", path)
+	cmd.Dir = goroot
+	cmd.Env = append(os.Environ(), "PWD="+goroot, "GOROOT="+goroot)
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("go list -export %s: %w", path, err)
 	}
