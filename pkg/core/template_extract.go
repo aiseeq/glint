@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 )
 
@@ -260,8 +261,13 @@ func templateExpression(b []byte, start, at, end int) string {
 	lineStart := bytes.LastIndexAny(code, "\r\n") + 1
 	previous := lastNonSpaceByte(code[lineStart:])
 	next := nextNonSpaceByte(b, end)
+	before, after := lastWord(code[lineStart:]), nextWord(b, end)
+	if before == "try" || before == "finally" || templateCatchClause.Match(code[lineStart:]) {
+		// try, catch (e) and finally take a block, not a statement.
+		return "{}"
+	}
 	if isTemplateOperandEnd(previous) && isTemplateOperandStart(next) &&
-		!templateKeyword(lastWord(code[lineStart:])) && !templateKeyword(nextWord(b, end)) {
+		!templateKeyword(before) && (!templateKeyword(after) || templateValueKeywords[after]) {
 		return "+"
 	}
 	for i := at - 1; i >= start; i-- {
@@ -374,11 +380,20 @@ var templateKeywords = map[string]bool{
 	"while": true, "with": true, "yield": true, "await": true,
 }
 
+// templateValueKeywords start a value: a {{.Op}} new Date() is still an
+// operator between operands.
+var templateValueKeywords = map[string]bool{
+	"new": true, "typeof": true, "void": true, "delete": true, "function": true, "class": true, "await": true,
+}
+
+var templateCatchClause = regexp.MustCompile(`\bcatch\s*(\([^()]*\))?\s*$`)
+
 func templateKeyword(word string) bool {
 	return templateKeywords[word]
 }
 
-// lastWord returns the identifier that ends code, or "".
+// lastWord returns the identifier that ends code, or "" when there is none
+// or it is a property name (opts.default).
 func lastWord(code []byte) string {
 	end := len(code)
 	for end > 0 && (code[end-1] == ' ' || code[end-1] == '\t') {
@@ -387,6 +402,13 @@ func lastWord(code []byte) string {
 	start := end
 	for start > 0 && !isTemplateWordBoundary(code[start-1]) {
 		start--
+	}
+	dot := start
+	for dot > 0 && (code[dot-1] == ' ' || code[dot-1] == '\t') {
+		dot--
+	}
+	if dot > 0 && code[dot-1] == '.' {
+		return ""
 	}
 	return string(code[start:end])
 }

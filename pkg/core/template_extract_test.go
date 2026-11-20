@@ -253,8 +253,15 @@ func TestExtractTemplateJavaScriptActionNextToKeywordIsNotBinaryOperator(t *test
 		{"if (a) " + action + " else b();", "if (a) " + statement + " else b();"},
 		{"do " + action + " while (x);", "do " + statement + " while (x);"},
 		{"if (a) x(); else " + action + " b();", "if (a) x(); else " + statement + " b();"},
+		{"try " + action + " finally {}", "try " + "{}" + strings.Repeat(" ", len(action)-2) + " finally {}"},
+		{"try {} catch (e) " + action, "try {} catch (e) " + "{}" + strings.Repeat(" ", len(action)-2)},
+		{"try {} finally " + action, "try {} finally " + "{}" + strings.Repeat(" ", len(action)-2)},
 		{"const v = a {{.Op}} b;", "const v = a +" + strings.Repeat(" ", len("{{.Op}}")-1) + " b;"},
 		{"const t = done {{.Op}} other;", "const t = done +" + strings.Repeat(" ", len("{{.Op}}")-1) + " other;"},
+		{"f(opts.default {{.Op}} 1);", "f(opts.default +" + strings.Repeat(" ", len("{{.Op}}")-1) + " 1);"},
+		{"const v = [el.class {{.Op}} b];", "const v = [el.class +" + strings.Repeat(" ", len("{{.Op}}")-1) + " b];"},
+		{"f(a {{.Op}} new Date());", "f(a +" + strings.Repeat(" ", len("{{.Op}}")-1) + " new Date());"},
+		{"f(a {{.Op}} typeof b);", "f(a +" + strings.Repeat(" ", len("{{.Op}}")-1) + " typeof b);"},
 	} {
 		source := "<script>\n" + tc.line + "\n</script>\n"
 		ctx := NewFileContext("/project/templates/keyword.html", "/project", []byte(source), DefaultConfig())
