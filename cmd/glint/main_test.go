@@ -47,7 +47,7 @@ func TestTemplateJavaScriptFileRulesAndTemplateActions(t *testing.T) {
 	root := t.TempDir()
 	makeContext := func(script string) *core.FileContext {
 		t.Helper()
-		source := "<html>\n<script>\n" + script + "\n</script>\n</html>\n"
+		source := "<html>{{/* page */}}\n<script>\n" + script + "\n</script>\n</html>\n"
 		return core.NewFileContext(filepath.Join(root, "templates/page.html"), root, []byte(source), core.DefaultConfig())
 	}
 	var duplicateBody strings.Builder

@@ -45,7 +45,6 @@ var (
 	responseJSONCall = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*\.json\s*\(\s*\)`)
 	responseName     = regexp.MustCompile(`^(?:r|res|resp|response|[\w$]*Response|[\w$]*Resp)$`)
 	fetchAssign      = regexp.MustCompile(`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?fetch\s*\(`)
-	chainCatch       = regexp.MustCompile(`^\s*\.(?:catch|then\s*\([^)]*,)`)
 	tryKeyword       = regexp.MustCompile(`\btry\s*$`)
 )
 
@@ -119,22 +118,109 @@ func endsWithTryKeyword(line string, end int) bool {
 
 func notSpace(r rune) bool { return r != ' ' && r != '\t' }
 
-// caughtInChain reports a .catch after the parse: later on its line, or on
-// the lines that continue the chain.
+// caughtInChain reports a .catch, or a .then with a rejection handler, that
+// continues the chain the parse belongs to: its own chain, or the chain of a
+// call whose callback holds it, however many lines that callback spans. A
+// statement end, or a block that is not a callback argument, cuts the link
+// until the walk climbs out to the next enclosing call.
 func caughtInChain(code []string, line, col int) bool {
-	if strings.Contains(code[line][col:], ".catch(") {
+	depth, outer := 0, 0
+	broken := false
+	last := min(len(code)-1, line+chainWindowLines)
+	budget := chainWindowBytes
+	for i := line; i <= last && budget > 0; i++ {
+		text := code[i]
+		from := 0
+		if i == line {
+			from = col
+		}
+		for j := from; j < len(text) && budget > 0; j++ {
+			budget--
+			switch c := text[j]; c {
+			case '(', '[', '{':
+				depth++
+			case ')', ']', '}':
+				depth--
+				if depth < outer {
+					outer = depth
+					broken = c == '}' && !callbackEnd(code, i, j+1, last)
+				}
+			case ';':
+				if depth == outer {
+					broken = true
+				}
+			case '.':
+				if depth == outer && !broken && handlesRejection(code, i, j, last) {
+					return true
+				}
+			}
+		}
+		if depth == outer && !continuesOnNextLine(code, i+1, last) {
+			broken = true
+		}
+	}
+	return false
+}
+
+const (
+	chainWindowLines = 80
+	chainWindowBytes = 1 << 14
+)
+
+var (
+	catchCall = regexp.MustCompile(`^\.\s*catch\s*\(`)
+	thenCall  = regexp.MustCompile(`^\.\s*then\s*\(`)
+)
+
+// handlesRejection reports a .catch( at code[line][col], or a .then( there
+// with a second argument.
+func handlesRejection(code []string, line, col, last int) bool {
+	rest := code[line][col:]
+	if catchCall.MatchString(rest) {
 		return true
 	}
-	for i := line + 1; i < len(code) && i <= line+5; i++ {
-		trimmed := strings.TrimSpace(code[i])
-		if trimmed == "" {
-			continue
+	m := thenCall.FindStringIndex(rest)
+	if m == nil {
+		return false
+	}
+	depth := 1
+	for i, from := line, col+m[1]; i <= last; i, from = i+1, 0 {
+		for _, c := range []byte(code[i][from:]) {
+			switch c {
+			case '(', '[', '{':
+				depth++
+			case ')', ']', '}':
+				depth--
+				if depth == 0 {
+					return false
+				}
+			case ',':
+				if depth == 1 {
+					return true
+				}
+			}
 		}
-		if !strings.HasPrefix(trimmed, ".") {
-			return false
+	}
+	return false
+}
+
+// callbackEnd reports a ')' or ',' as the next code after a closing brace: the
+// block was a function passed as an argument.
+func callbackEnd(code []string, line, col, last int) bool {
+	for i, from := line, col; i <= last; i, from = i+1, 0 {
+		if rest := strings.TrimSpace(code[i][from:]); rest != "" {
+			return rest[0] == ')' || rest[0] == ','
 		}
-		if chainCatch.MatchString(code[i]) || strings.Contains(trimmed, ".catch(") {
-			return true
+	}
+	return false
+}
+
+// continuesOnNextLine reports that the next code line goes on with the
+// expression: a chained call, a closing bracket or another argument.
+func continuesOnNextLine(code []string, line, last int) bool {
+	for i := line; i <= last; i++ {
+		if rest := strings.TrimSpace(code[i]); rest != "" {
+			return strings.ContainsRune(".)]},", rune(rest[0]))
 		}
 	}
 	return false

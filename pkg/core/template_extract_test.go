@@ -54,15 +54,26 @@ show([{{.}}]);
 }
 
 func TestExtractTemplateJavaScriptNoScriptAndMultipleScripts(t *testing.T) {
-	ctx := NewFileContext("/project/templates/page.html", "/project", []byte(`<script>let a = 1;</script><div>markup</div><script>let b = 2;</script>`), DefaultConfig())
+	// Every script of a template goes into one virtual file of the template's
+	// size, not one full-size copy per script.
+	ctx := NewFileContext("/project/templates/page.html", "/project", []byte(`<title>{{.T}}</title><script>let a = 1;</script><div>markup</div><script>let b = 2;</script>`), DefaultConfig())
 	got := ExtractTemplateJavaScript(ctx)
-	if len(got) != 2 {
-		t.Fatalf("got %d scripts, want 2", len(got))
+	if len(got) != 1 {
+		t.Fatalf("got %d virtual files, want 1", len(got))
 	}
-	if strings.Contains(string(got[0].Content), "markup") || strings.Contains(string(got[1].Content), "markup") {
+	code := string(got[0].Content)
+	if !strings.Contains(code, "let a = 1;") || !strings.Contains(code, "let b = 2;") {
+		t.Fatalf("a script is missing from the virtual file:\n%s", code)
+	}
+	if strings.Contains(code, "markup") || strings.Contains(code, "title") {
 		t.Fatal("markup leaked into a virtual script")
 	}
-	json := NewFileContext("/project/templates/data.html", "/project", []byte(`<script type="application/json">{"x":1}</script><script type="module">let x = 1;</script>`), DefaultConfig())
+	// A file without a template action is plain HTML, not a Go template.
+	staticPage := NewFileContext("/project/docs/prototype.html", "/project", []byte(`<script>let a = 1;</script>`), DefaultConfig())
+	if got := ExtractTemplateJavaScript(staticPage); len(got) != 0 {
+		t.Fatalf("got %d virtual files for plain HTML, want 0", len(got))
+	}
+	json := NewFileContext("/project/templates/data.html", "/project", []byte(`{{/* data */}}<script type="application/json">{"x":1}</script><script type="module">let x = 1;</script>`), DefaultConfig())
 	if scripts := ExtractTemplateJavaScript(json); len(scripts) != 1 || !strings.Contains(string(scripts[0].Content), "let x = 1") {
 		t.Fatalf("non-JavaScript script was extracted: %#v", scripts)
 	}
@@ -104,7 +115,7 @@ func TestExtractTemplateJavaScriptDefineBodyIsBlank(t *testing.T) {
 // A character whose lower case is longer in bytes before the script must not
 // shift the script's position in the virtual source.
 func TestExtractTemplateJavaScriptAfterNonASCIIKeepsOffsets(t *testing.T) {
-	source := "<p>İİİİ</p>\n<SCRIPT>\nconst kept = 1;\n</SCRIPT>\n"
+	source := "<p>İİİİ {{.X}}</p>\n<SCRIPT>\nconst kept = 1;\n</SCRIPT>\n"
 	ctx := NewFileContext("/project/templates/page.html", "/project", []byte(source), DefaultConfig())
 	got := ExtractTemplateJavaScript(ctx)
 	if len(got) != 1 {

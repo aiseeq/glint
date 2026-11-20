@@ -66,3 +66,56 @@ const s = 'response.json()'
 	assert.Empty(t, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "web/src/__tests__/api.test.ts", code))
 	assert.Empty(t, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "api/x.go", "package api\n// await response.json()\n"))
 }
+
+// A .catch that ends the chain several lines below a multi-line callback
+// catches the parse inside it, and so does the second handler of the .then
+// that follows the parse.
+func TestResponseJSONUnguardedCaughtFurtherDownTheChain(t *testing.T) {
+	assert.Empty(t, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "web/static/poll.js", `(function poll(){
+  fetch('/api/status').then(function(r){return r.json()}).then(function(d){
+    if(d.ready){ location.reload(); } else {setTimeout(poll,3000)}
+  }).catch(function(e){console.warn('poll failed', e);setTimeout(poll,5000)});
+})();
+function load(url) {
+  fetch(url, {headers: {'Accept': 'application/json'}})
+    .then(function(r) {
+      if (r.ok) return r.json();
+      return r.json().then(function(body) {
+        return Promise.reject(body.error);
+      }, function() { return Promise.reject('HTTP ' + r.status); });
+    })
+    .then(function(data) { show(data); })
+    .catch(function(e) { showError(e); });
+}
+fetch('/e').then(function(r) { return r.json().then(show, function() { showError(); }); });
+`))
+}
+
+// A .catch of another statement or of another chain does not guard the parse,
+// nor does the rejection handler of the .then whose callback parses.
+func TestResponseJSONUnguardedCatchOfAnotherStatement(t *testing.T) {
+	assert.Equal(t, []int{2, 7, 12, 16, 18, 22, 23}, rulestest.TextFileRuleLines(t, NewResponseJSONUnguardedRule(), "web/static/other.js", `fetch('/a').then(function(r) {
+  var d = r.json();
+  other().catch(function() {});
+  return d;
+});
+function parse(r) {
+  return r.json();
+}
+other().catch(function() {});
+fetch('/b').then(function(r) {
+  if (r.ok) {
+    return r.json()
+  }
+  other().catch(function() {})
+});
+fetch('/c').then(function(r) { return r.json(); }, function() { return null; });
+fetch('/d').then((r) => {
+  const d = r.json()
+  other().catch(() => {})
+  return d
+})
+function parseOne(r) { return r.json(); } other().catch(function() {});
+fetch('/f').then(function(r) { var d = r.json(); other().catch(function() {}); return d; });
+`))
+}

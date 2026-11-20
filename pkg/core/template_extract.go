@@ -5,15 +5,17 @@ import (
 	"strings"
 )
 
-// ExtractTemplateJavaScript returns JavaScript contexts for inline scripts in
-// a Go HTML template. The virtual source keeps the template's byte offsets and
-// line numbers so rules can report against the original .html path.
+// ExtractTemplateJavaScript returns one JavaScript context holding every inline
+// script of a Go HTML template. The virtual source keeps the template's byte
+// offsets and line numbers so rules can report against the original .html
+// path. A file without a template action is plain HTML, not a Go template, and
+// gets none.
 func ExtractTemplateJavaScript(ctx *FileContext) []*FileContext {
-	if ctx == nil || !ctx.IsTemplate() {
+	if ctx == nil || !ctx.IsTemplate() || !bytes.Contains(ctx.Content, []byte("{{")) {
 		return nil
 	}
 	source := string(ctx.Content)
-	var out []*FileContext
+	var virtual []byte
 	for offset := 0; offset < len(source); {
 		start, end, ok := scriptTag(source, offset)
 		if !ok {
@@ -23,25 +25,24 @@ func ExtractTemplateJavaScript(ctx *FileContext) []*FileContext {
 		if closeStart < 0 {
 			break
 		}
+		offset = closeEnd
 		if !isJavaScriptScriptTag(source[start:end]) {
-			offset = closeEnd
 			continue
 		}
-		virtual := []byte(source)
-		blank(virtual, 0, len(virtual))
-		copy(virtual[start:end], source[start:end])
+		if virtual == nil {
+			virtual = []byte(source)
+			blank(virtual, 0, len(virtual))
+		}
+		// Tags are markup, not JavaScript: only the body is copied.
 		copy(virtual[end:closeStart], source[end:closeStart])
-		copy(virtual[closeStart:closeEnd], source[closeStart:closeEnd])
-		// Tags are markup, not JavaScript.
-		blank(virtual, start, end)
-		blank(virtual, closeStart, closeEnd)
 		maskTemplateActions(virtual, end, closeStart)
-		v := NewFileContext(ctx.Path, ctx.ProjectRoot, virtual, ctx.Config)
-		v.VirtualJavaScript = true
-		out = append(out, v)
-		offset = closeEnd
 	}
-	return out
+	if virtual == nil {
+		return nil
+	}
+	v := NewFileContext(ctx.Path, ctx.ProjectRoot, virtual, ctx.Config)
+	v.VirtualJavaScript = true
+	return []*FileContext{v}
 }
 
 func isJavaScriptScriptTag(tag string) bool {
