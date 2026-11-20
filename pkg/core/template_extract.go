@@ -394,8 +394,6 @@ func templateKeyword(word string) bool {
 	return templateKeywords[word]
 }
 
-// lastWord returns the identifier that ends code, or "" when there is none
-// or it is a property name (opts.default).
 // templateControlHeaderEnd reports whether code ends with the closing
 // parenthesis of an if, while, for or with header: what follows it is the
 // statement body, not an operand.
@@ -426,6 +424,8 @@ func templateControlHeaderEnd(code []byte) bool {
 	return false
 }
 
+// lastWord returns the identifier that ends code, or "" when there is none
+// or it is a property name (opts.default).
 func lastWord(code []byte) string {
 	end := len(code)
 	for end > 0 && (code[end-1] == ' ' || code[end-1] == '\t') {
