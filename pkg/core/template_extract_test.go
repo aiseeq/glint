@@ -35,12 +35,12 @@ show([{{.}}]);
 		t.Fatalf("source dimensions changed: bytes %d/%d, lines %d/%d", len(virtual.Content), len(source), len(virtual.Lines), len(ctx.Lines))
 	}
 	code := string(virtual.Content)
-	for _, want := range []string{"const providers =", "const title =", "const count =", "function show(list) { return list.length; }", "show([", "0"} {
+	for _, want := range []string{"const providers =", "const title =", "const count =", "function show(list) { return list.length; }", "show([null"} {
 		if !strings.Contains(code, want) {
 			t.Errorf("virtual source does not contain %q:\n%s", want, code)
 		}
 	}
-	if !strings.Contains(code, "null") || !strings.Contains(code, `"  x`) || !strings.Contains(code, "null") || !strings.Contains(code, "+ 1") {
+	if !strings.Contains(code, "null") || !strings.Contains(code, `"x`) || !strings.Contains(code, "+ 1") {
 		t.Fatalf("template insertions did not retain neutral JS values:\n%s", code)
 	}
 	if strings.Contains(code, "return 0") || strings.Contains(code, "{{") || strings.Contains(code, "</script>") {
@@ -160,9 +160,88 @@ func TestExtractTemplateJavaScriptExpressionActionsStayValues(t *testing.T) {
 		t.Fatalf("got %d scripts, want 1", len(got))
 	}
 	lines := got[0].Lines
-	for i, want := range map[int]string{1: "const a = null", 2: "const b = obj.null", 3: ";"} {
-		if line := strings.Join(strings.Fields(lines[i]), " "); !strings.HasPrefix(strings.ReplaceAll(line, ". null", ".null"), want) {
+	for i, want := range map[int]string{1: "const a = null", 2: "const b = obj._", 3: ";"} {
+		if line := strings.Join(strings.Fields(lines[i]), " "); !strings.HasPrefix(line, want) {
 			t.Errorf("line %d = %q, want it to start with %q", i+1, lines[i], want)
+		}
+	}
+}
+
+func TestExtractTemplateJavaScriptQuotesInCommentsDoNotChangeActionContext(t *testing.T) {
+	source := "<script>\n// it's a comment\nconst single = {{.A}};\n/* it's also a comment */ const double = {{.B}};\n</script>\n"
+	ctx := NewFileContext("/project/templates/comments.html", "/project", []byte(source), DefaultConfig())
+	got := ExtractTemplateJavaScript(ctx)
+	if len(got) != 1 {
+		t.Fatalf("got %d scripts, want 1", len(got))
+	}
+	lines := got[0].Lines
+	for i, want := range map[int]string{
+		2: "const single = null  ;",
+		3: "/* it's also a comment */ const double = null  ;",
+	} {
+		if lines[i] != want {
+			t.Errorf("line %d = %q, want exact virtual line %q", i+1, lines[i], want)
+		}
+	}
+}
+
+func TestExtractTemplateJavaScriptActionBetweenOperandsIsOperator(t *testing.T) {
+	source := "<script>\nconst sum = 1 {{.Operator}} 2;\n</script>\n"
+	ctx := NewFileContext("/project/templates/operator.html", "/project", []byte(source), DefaultConfig())
+	got := ExtractTemplateJavaScript(ctx)
+	if len(got) != 1 {
+		t.Fatalf("got %d scripts, want 1", len(got))
+	}
+	want := "const sum = 1 +" + strings.Repeat(" ", len("{{.Operator}}")-1) + " 2;"
+	if got[0].Lines[1] != want {
+		t.Errorf("line 2 = %q, want exact virtual line %q", got[0].Lines[1], want)
+	}
+}
+
+func TestExtractTemplateJavaScriptOwnLineActionIsNotBinaryOperator(t *testing.T) {
+	action := `{{template "init" .}}`
+	source := "<script>\nconst a = 1\n" + action + "\nconst b = 2\n</script>\n"
+	ctx := NewFileContext("/project/templates/asi.html", "/project", []byte(source), DefaultConfig())
+	got := ExtractTemplateJavaScript(ctx)
+	if len(got) != 1 {
+		t.Fatalf("got %d scripts, want 1", len(got))
+	}
+	want := ";" + strings.Repeat(" ", len(action)-1)
+	if got[0].Lines[2] != want {
+		t.Errorf("line 3 = %q, want exact virtual line %q", got[0].Lines[2], want)
+	}
+}
+
+func TestExtractTemplateJavaScriptImportSourceIsStringLiteral(t *testing.T) {
+	source := "<script>\nimport value from {{.DefaultModule}};\nimport { item } from {{.NamedModule}};\n</script>\n"
+	ctx := NewFileContext("/project/templates/import.html", "/project", []byte(source), DefaultConfig())
+	got := ExtractTemplateJavaScript(ctx)
+	if len(got) != 1 {
+		t.Fatalf("got %d scripts, want 1", len(got))
+	}
+	for i, want := range map[int]string{
+		1: `import value from "x"` + strings.Repeat(" ", len("{{.DefaultModule}}")-3) + ";",
+		2: `import { item } from "x"` + strings.Repeat(" ", len("{{.NamedModule}}")-3) + ";",
+	} {
+		if got[0].Lines[i] != want {
+			t.Errorf("line %d = %q, want exact virtual line %q", i+1, got[0].Lines[i], want)
+		}
+	}
+}
+
+func TestExtractTemplateJavaScriptActionAfterDotIsIdentifier(t *testing.T) {
+	source := "<script>\nconst a = obj.{{.ID}};\nconst b = obj.{{.FieldName}}.trim();\n</script>\n"
+	ctx := NewFileContext("/project/templates/property.html", "/project", []byte(source), DefaultConfig())
+	got := ExtractTemplateJavaScript(ctx)
+	if len(got) != 1 {
+		t.Fatalf("got %d scripts, want 1", len(got))
+	}
+	for i, want := range map[int]string{
+		1: "const a = obj._" + strings.Repeat(" ", len("{{.ID}}")-1) + ";",
+		2: "const b = obj._" + strings.Repeat(" ", len("{{.FieldName}}")-1) + ".trim();",
+	} {
+		if got[0].Lines[i] != want {
+			t.Errorf("line %d = %q, want exact virtual line %q", i+1, got[0].Lines[i], want)
 		}
 	}
 }

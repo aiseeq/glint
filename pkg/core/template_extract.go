@@ -230,7 +230,7 @@ func maskTemplateActions(b []byte, start, end int) {
 			} else {
 				// A template call is a statement or a value, like any other
 				// action: the code before it tells which.
-				replaceTemplateAction(b, a, z, templateExpression(b, start, a))
+				replaceTemplateAction(b, a, z, templateExpression(b, start, a, z))
 			}
 		}
 		i = z
@@ -240,31 +240,28 @@ func maskTemplateActions(b []byte, start, end int) {
 	}
 }
 
-func templateExpression(b []byte, start, at int) string {
-	quote := byte(0)
-	escaped := false
-	for i := start; i < at; i++ {
-		c := b[i]
-		if quote != 0 {
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == quote {
-				quote = 0
-			}
-		} else if c == '\'' || c == '"' || c == '`' {
-			quote = c
-		}
-	}
-	if quote != 0 {
+func templateExpression(b []byte, start, at, end int) string {
+	code, inQuote := templateCodePrefix(b, start, at)
+	if inQuote {
 		return "x"
 	}
-	prefix := strings.TrimSpace(string(b[start:at]))
+	prefix := strings.TrimSpace(string(code))
+	if strings.HasSuffix(prefix, ".") {
+		return "_"
+	}
+	if strings.HasSuffix(prefix, "from") && (len(prefix) == len("from") || isTemplateWordBoundary(prefix[len(prefix)-len("from")-1])) {
+		return `"x"`
+	}
 	for _, keyword := range []string{"return", "throw", "yield", "await", "typeof", "void", "delete", "new", "=>"} {
 		if strings.HasSuffix(prefix, keyword) {
 			return "null"
 		}
+	}
+	lineStart := bytes.LastIndexAny(code, "\r\n") + 1
+	previous := lastNonSpaceByte(code[lineStart:])
+	next := nextNonSpaceByte(b, end)
+	if isTemplateOperandEnd(previous) && isTemplateOperandStart(next) {
+		return "+"
 	}
 	for i := at - 1; i >= start; i-- {
 		if b[i] == '\n' || b[i] == '\r' {
@@ -281,37 +278,109 @@ func templateExpression(b []byte, start, at int) string {
 	return ";"
 }
 
+func templateCodePrefix(b []byte, start, at int) ([]byte, bool) {
+	quote := byte(0)
+	escaped := false
+	lineComment := false
+	blockComment := false
+	code := make([]byte, 0, at-start)
+	for i := start; i < at; i++ {
+		c := b[i]
+		if lineComment {
+			if c == '\n' || c == '\r' {
+				lineComment = false
+				code = append(code, c)
+			}
+			continue
+		}
+		if blockComment {
+			if c == '\n' || c == '\r' {
+				code = append(code, c)
+			} else if c == '*' && i+1 < at && b[i+1] == '/' {
+				blockComment = false
+				i++
+				code = append(code, ' ')
+			}
+			continue
+		}
+		if quote != 0 {
+			code = append(code, c)
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == quote {
+				quote = 0
+			}
+		} else if c == '/' && i+1 < at && b[i+1] == '/' {
+			lineComment = true
+			code = append(code, ' ')
+			i++
+		} else if c == '/' && i+1 < at && b[i+1] == '*' {
+			blockComment = true
+			code = append(code, ' ')
+			i++
+		} else if c == '\'' || c == '"' || c == '`' {
+			quote = c
+			code = append(code, c)
+		} else {
+			code = append(code, c)
+		}
+	}
+	return code, quote != 0
+}
+
+func lastNonSpaceByte(b []byte) byte {
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] != ' ' && b[i] != '\t' && b[i] != '\r' && b[i] != '\n' {
+			return b[i]
+		}
+	}
+	return 0
+}
+
+func nextNonSpaceByte(b []byte, at int) byte {
+	for at < len(b) {
+		if b[at] == '\r' || b[at] == '\n' {
+			return 0
+		}
+		if b[at] != ' ' && b[at] != '\t' {
+			return b[at]
+		}
+		at++
+	}
+	return 0
+}
+
+func isTemplateWordBoundary(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '$':
+		return false
+	default:
+		return true
+	}
+}
+
+func isTemplateOperandEnd(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$' || c == ')' || c == ']' || c == '\'' || c == '"' || c == '`'
+}
+
+func isTemplateOperandStart(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$' || c == '(' || c == '[' || c == '\'' || c == '"' || c == '`'
+}
+
 func replaceTemplateAction(b []byte, start, end int, replacement string) {
 	blank(b, start, end)
-	segmentStart, segmentEnd := -1, -1
-	for i := start + 2; i < end-2; {
-		j := i
-		for j < end-2 && b[j] != '\n' && b[j] != '\r' {
-			j++
-		}
-		if j-i >= len(replacement) {
-			segmentStart, segmentEnd = i, j
-			break
-		}
-		i = j + 1
+	segmentEnd := start
+	for segmentEnd < end && b[segmentEnd] != '\n' && b[segmentEnd] != '\r' {
+		segmentEnd++
 	}
-	if segmentStart < 0 {
+	if segmentEnd-start < len(replacement) {
 		// Tiny actions such as {{.}} cannot hold "null"; zero is a valid
 		// neutral expression and keeps the original source width.
 		replacement = "0"
-		for i := start + 2; i < end-2; {
-			j := i
-			for j < end-2 && b[j] != '\n' && b[j] != '\r' {
-				j++
-			}
-			if j > i {
-				segmentStart, segmentEnd = i, j
-				break
-			}
-			i = j + 1
-		}
 	}
-	if segmentStart >= 0 && segmentEnd-segmentStart >= len(replacement) {
-		copy(b[segmentStart:], replacement)
+	if segmentEnd-start >= len(replacement) {
+		copy(b[start:], replacement)
 	}
 }
