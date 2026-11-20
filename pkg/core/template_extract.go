@@ -260,7 +260,8 @@ func templateExpression(b []byte, start, at, end int) string {
 	lineStart := bytes.LastIndexAny(code, "\r\n") + 1
 	previous := lastNonSpaceByte(code[lineStart:])
 	next := nextNonSpaceByte(b, end)
-	if isTemplateOperandEnd(previous) && isTemplateOperandStart(next) {
+	if isTemplateOperandEnd(previous) && isTemplateOperandStart(next) &&
+		!templateKeyword(lastWord(code[lineStart:])) && !templateKeyword(nextWord(b, end)) {
 		return "+"
 	}
 	for i := at - 1; i >= start; i-- {
@@ -359,6 +360,47 @@ func isTemplateWordBoundary(c byte) bool {
 	default:
 		return true
 	}
+}
+
+// templateKeywords are the JavaScript words that are not values: an action
+// next to one (if (a) {{template "s" .}} else ..., do {{...}} while) is a
+// statement, not an operator between two operands.
+var templateKeywords = map[string]bool{
+	"break": true, "case": true, "catch": true, "class": true, "const": true, "continue": true,
+	"debugger": true, "default": true, "delete": true, "do": true, "else": true, "export": true,
+	"extends": true, "finally": true, "for": true, "function": true, "if": true, "import": true,
+	"in": true, "instanceof": true, "let": true, "new": true, "of": true, "return": true,
+	"switch": true, "throw": true, "try": true, "typeof": true, "var": true, "void": true,
+	"while": true, "with": true, "yield": true, "await": true,
+}
+
+func templateKeyword(word string) bool {
+	return templateKeywords[word]
+}
+
+// lastWord returns the identifier that ends code, or "".
+func lastWord(code []byte) string {
+	end := len(code)
+	for end > 0 && (code[end-1] == ' ' || code[end-1] == '\t') {
+		end--
+	}
+	start := end
+	for start > 0 && !isTemplateWordBoundary(code[start-1]) {
+		start--
+	}
+	return string(code[start:end])
+}
+
+// nextWord returns the identifier that starts after at on the same line, or "".
+func nextWord(b []byte, at int) string {
+	for at < len(b) && (b[at] == ' ' || b[at] == '\t') {
+		at++
+	}
+	end := at
+	for end < len(b) && !isTemplateWordBoundary(b[end]) {
+		end++
+	}
+	return string(b[at:end])
 }
 
 func isTemplateOperandEnd(c byte) bool {

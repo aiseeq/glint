@@ -245,3 +245,25 @@ func TestExtractTemplateJavaScriptActionAfterDotIsIdentifier(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractTemplateJavaScriptActionNextToKeywordIsNotBinaryOperator(t *testing.T) {
+	action := `{{template "stmt" .}}`
+	statement := ";" + strings.Repeat(" ", len(action)-1)
+	for _, tc := range []struct{ line, want string }{
+		{"if (a) " + action + " else b();", "if (a) " + statement + " else b();"},
+		{"do " + action + " while (x);", "do " + statement + " while (x);"},
+		{"if (a) x(); else " + action + " b();", "if (a) x(); else " + statement + " b();"},
+		{"const v = a {{.Op}} b;", "const v = a +" + strings.Repeat(" ", len("{{.Op}}")-1) + " b;"},
+		{"const t = done {{.Op}} other;", "const t = done +" + strings.Repeat(" ", len("{{.Op}}")-1) + " other;"},
+	} {
+		source := "<script>\n" + tc.line + "\n</script>\n"
+		ctx := NewFileContext("/project/templates/keyword.html", "/project", []byte(source), DefaultConfig())
+		got := ExtractTemplateJavaScript(ctx)
+		if len(got) != 1 {
+			t.Fatalf("got %d scripts, want 1", len(got))
+		}
+		if got[0].Lines[1] != tc.want {
+			t.Errorf("%q: virtual line = %q, want %q", tc.line, got[0].Lines[1], tc.want)
+		}
+	}
+}
