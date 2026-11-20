@@ -2009,7 +2009,7 @@ func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *cor
 	if err != nil {
 		return nil, append(panics, templatePanics...), err
 	}
-	violations = appendTemplateFindings(violations, templateFindings)
+	violations = violations.AppendNew(templateFindings)
 	panics = append(panics, templatePanics...)
 	if len(prepared.excludedInstructions) == 0 {
 		return violations, panics, nil
@@ -2038,26 +2038,6 @@ func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *cor
 	violations = append(violations, readOnlyFindings...)
 	violations = append(violations, readOnlySuppressions...)
 	return violations, append(panics, keptPanics...), validateFindingFiles(kept, readers, prepared.excludedInstructions)
-}
-
-func appendTemplateFindings(existing, extracted core.ViolationList) core.ViolationList {
-	type key struct {
-		rule, file, message string
-		line                int
-	}
-	seen := make(map[key]bool, len(existing))
-	for _, finding := range existing {
-		seen[key{finding.Rule, finding.File, finding.Message, finding.Line}] = true
-	}
-	for _, finding := range extracted {
-		findingKey := key{finding.Rule, finding.File, finding.Message, finding.Line}
-		if seen[findingKey] {
-			continue
-		}
-		seen[findingKey] = true
-		existing = append(existing, finding)
-	}
-	return existing
 }
 
 func analyzeTemplateJavaScript(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config) (core.ViolationList, rulePanics, error) {

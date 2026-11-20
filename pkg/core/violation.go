@@ -130,6 +130,28 @@ func (v *Violation) String() string {
 // ViolationList is a slice of violations with helper methods
 type ViolationList []*Violation
 
+// AppendNew appends the findings of other that the list does not hold yet: the
+// same rule, file, line and message is one finding, found twice.
+func (vl ViolationList) AppendNew(other ViolationList) ViolationList {
+	type key struct {
+		rule, file, message string
+		line                int
+	}
+	seen := make(map[key]bool, len(vl))
+	for _, finding := range vl {
+		seen[key{finding.Rule, finding.File, finding.Message, finding.Line}] = true
+	}
+	for _, finding := range other {
+		findingKey := key{finding.Rule, finding.File, finding.Message, finding.Line}
+		if seen[findingKey] {
+			continue
+		}
+		seen[findingKey] = true
+		vl = append(vl, finding)
+	}
+	return vl
+}
+
 // BySeverity returns violations filtered by minimum severity
 func (vl ViolationList) BySeverity(minSeverity Severity) ViolationList {
 	result := make(ViolationList, 0, len(vl))

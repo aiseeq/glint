@@ -88,3 +88,17 @@ func TestViolationListCountByRule(t *testing.T) {
 	assert.Equal(t, 2, counts["rule-a"])
 	assert.Equal(t, 1, counts["rule-b"])
 }
+
+// A finding the template script repeats from the template itself is kept once.
+func TestViolationListAppendNewSkipsRepeats(t *testing.T) {
+	first := &Violation{Rule: "r", File: "templates/page.html", Line: 3, Message: "m"}
+	list := ViolationList{first}
+	got := list.AppendNew(ViolationList{
+		{Rule: "r", File: "templates/page.html", Line: 3, Message: "m"},
+		{Rule: "r", File: "templates/page.html", Line: 4, Message: "m"},
+		{Rule: "r", File: "templates/page.html", Line: 4, Message: "m"},
+	})
+	if len(got) != 2 || got[0] != first || got[1].Line != 4 {
+		t.Fatalf("got %d findings, want the old one and line 4 once", len(got))
+	}
+}
