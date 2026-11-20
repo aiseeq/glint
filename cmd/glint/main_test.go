@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -16,9 +17,12 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/deadcode"
+	"github.com/aiseeq/glint/pkg/rules/duplication"
 	"github.com/aiseeq/glint/pkg/rules/patterns/dbrules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/errrules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/frontendrules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/gorules"
+	"github.com/aiseeq/glint/pkg/rules/patterns/httprules"
 	"github.com/aiseeq/glint/pkg/rules/typesafety"
 )
 
@@ -36,6 +40,61 @@ func TestSuppressionWithoutReasonRule(t *testing.T) {
 	found := deadcode.NewSuppressionWithoutReasonRule().AnalyzeFile(ctx)
 	if len(found) != 2 || found[0].Line != 2 || found[1].Line != 4 {
 		t.Fatalf("unexpected findings: %#v", found)
+	}
+}
+
+func TestTemplateJavaScriptFileRulesAndTemplateActions(t *testing.T) {
+	root := t.TempDir()
+	makeContext := func(script string) *core.FileContext {
+		t.Helper()
+		source := "<html>\n<script>\n" + script + "\n</script>\n</html>\n"
+		return core.NewFileContext(filepath.Join(root, "templates/page.html"), root, []byte(source), core.DefaultConfig())
+	}
+	var duplicateBody strings.Builder
+	for i := range 40 {
+		fmt.Fprintf(&duplicateBody, "  const result%d = input%d + %d;\n", i, i, i+1)
+	}
+	duplicateScript := "function first() {\n" + duplicateBody.String() + "}\nfunction second() {\n" + duplicateBody.String() + "}"
+	tests := []struct {
+		name   string
+		rule   rules.Rule
+		script string
+		line   int
+	}{
+		{"duplicate block", duplication.NewDuplicateBlockRule(), duplicateScript, 46},
+		{"silent catch", frontendrules.NewFrontendSilentCatchRule(), "fetch('/api').catch(error => {\n  console.error(error);\n});", 3},
+		{"unguarded response json", httprules.NewResponseJSONUnguardedRule(), "const response = await fetch('/api');\nconst body = await response.json();", 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := makeContext(tt.script)
+			found, panics, err := analyzeTemplateJavaScript([]*core.FileContext{ctx}, []rules.Rule{tt.rule}, core.DefaultConfig())
+			if err != nil || len(panics) != 0 {
+				t.Fatalf("analyze template JS: findings=%v panics=%v err=%v", found, panics, err)
+			}
+			if len(found) == 0 || found[0].File != "templates/page.html" || found[0].Line != tt.line {
+				t.Fatalf("finding=%#v, want templates/page.html:%d", found, tt.line)
+			}
+		})
+	}
+
+	clean := makeContext(`const providers = {{.Providers}};
+const title = "{{.Title}}";
+const count = {{len .Providers}} + 1;
+{{template "extra" .}}
+{{if .Enabled}}
+function show(list) { return list.length; }
+{{else}}
+function show(list) { return list[0]; }
+{{end}}
+{{range .Providers}}
+show([{{.}}]);
+{{end}}
+show(providers);`)
+	selected := []rules.Rule{duplication.NewDuplicateBlockRule(), frontendrules.NewFrontendSilentCatchRule(), httprules.NewResponseJSONUnguardedRule()}
+	found, panics, err := analyzeTemplateJavaScript([]*core.FileContext{clean}, selected, core.DefaultConfig())
+	if err != nil || len(panics) != 0 || len(found) != 0 {
+		t.Fatalf("clean template actions: findings=%v panics=%v err=%v", found, panics, err)
 	}
 }
 

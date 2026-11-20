@@ -2005,6 +2005,12 @@ func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *cor
 	if err != nil {
 		return violations, panics, err
 	}
+	templateFindings, templatePanics, err := analyzeTemplateJavaScript(prepared.contexts, enabledRules, cfg)
+	if err != nil {
+		return nil, append(panics, templatePanics...), err
+	}
+	violations = appendTemplateFindings(violations, templateFindings)
+	panics = append(panics, templatePanics...)
 	if len(prepared.excludedInstructions) == 0 {
 		return violations, panics, nil
 	}
@@ -2032,6 +2038,68 @@ func analyzePrepared(prepared *preparedRoot, enabledRules []rules.Rule, cfg *cor
 	violations = append(violations, readOnlyFindings...)
 	violations = append(violations, readOnlySuppressions...)
 	return violations, append(panics, keptPanics...), validateFindingFiles(kept, readers, prepared.excludedInstructions)
+}
+
+func appendTemplateFindings(existing, extracted core.ViolationList) core.ViolationList {
+	type key struct {
+		rule, file, message string
+		line                int
+	}
+	seen := make(map[key]bool, len(existing))
+	for _, finding := range existing {
+		seen[key{finding.Rule, finding.File, finding.Message, finding.Line}] = true
+	}
+	for _, finding := range extracted {
+		findingKey := key{finding.Rule, finding.File, finding.Message, finding.Line}
+		if seen[findingKey] {
+			continue
+		}
+		seen[findingKey] = true
+		existing = append(existing, finding)
+	}
+	return existing
+}
+
+func analyzeTemplateJavaScript(contexts []*core.FileContext, enabledRules []rules.Rule, cfg *core.Config) (core.ViolationList, rulePanics, error) {
+	var virtual []*core.FileContext
+	for _, ctx := range contexts {
+		virtual = append(virtual, core.ExtractTemplateJavaScript(ctx)...)
+	}
+	if len(virtual) == 0 {
+		return nil, nil, nil
+	}
+	var findings core.ViolationList
+	var panics rulePanics
+	for _, rule := range enabledRules {
+		if !rules.FileLocal(rule) {
+			continue
+		}
+		if _, typed := rule.(rules.TypedGoProjectRule); typed {
+			continue
+		}
+		if _, projectFiles := rule.(rules.ProjectFilesRule); projectFiles {
+			continue
+		}
+		if _, external := rule.(rules.ExternalToolRule); external {
+			continue
+		}
+		eligible := virtual
+		if declared, ok := rule.(rules.FindingFileRule); ok {
+			eligible = slices.DeleteFunc(slices.Clone(virtual), func(ctx *core.FileContext) bool {
+				return !declared.ReportsOn(ctx)
+			})
+		}
+		if len(eligible) == 0 {
+			continue
+		}
+		found, failed, err := analyzeFilesContained(eligible, []rules.Rule{rule}, cfg, nil, nil)
+		if err != nil {
+			return findings, append(panics, failed...), err
+		}
+		findings = append(findings, found...)
+		panics = append(panics, failed...)
+	}
+	return findings, panics, nil
 }
 
 // analyzeProjectContained runs the project and the file rules on contexts,

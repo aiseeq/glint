@@ -26,6 +26,9 @@ type FileContext struct {
 	// File content
 	Content []byte   // Raw file content
 	Lines   []string // Lines for positional access
+	// VirtualJavaScript marks extracted inline script whose diagnostic path is
+	// the original template path rather than a .js path.
+	VirtualJavaScript bool
 
 	// Go-specific (nil for non-Go files)
 	GoAST       *ast.File
@@ -108,7 +111,7 @@ func (ctx *FileContext) IsTypeScriptFile() bool {
 
 // IsJavaScriptFile returns true if this is a JavaScript file
 func (ctx *FileContext) IsJavaScriptFile() bool {
-	return slices.Contains(JavaScriptExtensions, filepath.Ext(ctx.Path))
+	return ctx.VirtualJavaScript || slices.Contains(JavaScriptExtensions, filepath.Ext(ctx.Path))
 }
 
 // IsShellFile reports a shell script: a .sh or .bash file, or a file
@@ -146,7 +149,7 @@ func isMakefileName(name string) bool {
 
 // IsTemplate reports an HTML or Go template file: *.html, *.tmpl, *.gohtml.
 func (ctx *FileContext) IsTemplate() bool {
-	return IsTemplateName(ctx.Path)
+	return !ctx.VirtualJavaScript && IsTemplateName(ctx.Path)
 }
 
 // IsTemplateName reports the name of an HTML or Go template file.
