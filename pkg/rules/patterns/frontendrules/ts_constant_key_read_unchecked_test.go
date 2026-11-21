@@ -543,3 +543,68 @@ export function otherKey(details: Record<string, { name: string }>) {
 `
 	assert.Equal(t, []string{"src/typeof-guard.ts:18"}, patterntest.LinesOf(t, rule, "src/typeof-guard.ts", source))
 }
+
+func TestTSConstantKeyReadUncheckedGuardAndObjectRegressions(t *testing.T) {
+	positive, negative := tsConditionGuard("returnObject.keys(m).includes('K')", "m", "K")
+	assert.True(t, positive)
+	assert.False(t, negative)
+	positive, negative = tsConditionGuard("(('K'inm)&&ready)", "m", "K")
+	assert.True(t, positive)
+	assert.False(t, negative)
+	short := "return Object.keys(m).includes('K') && m['K'].name"
+	assert.True(t, tsGuardedByShortCircuit(short, len("return Object.keys(m).includes('K') && "), "m", "K"))
+	assert.True(t, tsGuardedRead(short, len("return Object.keys(m).includes('K') && "), "m", "K"))
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `type Item = { x: number }
+function typeofExit(m: Record<string, Item>) {
+  if (typeof m['K'] !== 'object') return -1
+  return m['K'].x
+}
+function negativeTernary(m: Record<string, Item>) { return !('K' in m) ? null : m['K'].x }
+function invariantGuard(m: Record<string, Item>) {
+  invariant('K' in m, 'required')
+  return m['K'].x
+}
+function shortCircuitOr(m: Record<string, Item>) {
+  if (!('K' in m) || !m['K'].x) return
+}
+function parenthesizedAnd(m: Record<string, Item>, ready: boolean) {
+  if (('K' in m) && ready) return m['K'].x
+}
+function optionalChainGuard(m: Record<string, Item>) {
+  if (m['K']?.x) return m['K'].x.toString()
+}
+function assignedTernary(m: Record<string, Item>) {
+  const t = 'K' in m ? m['K'].x : ''
+  const quoted = ("K" in m) ? m["K"].x : ''
+  return t
+}
+function multilineThrow(m: Record<string, Item>) {
+  if (!('K' in m)) { throw new Error(
+    'missing'
+  ) }
+  return m['K'].x
+}
+function quotedObjectKey() {
+  const m: Record<string, string> = { 'not-found': 'value' }
+  return m['not-found'].length
+}
+function declarationsDoNotEatInitializer() {
+  declare const base: string
+  let current: string
+  const m: Record<string, Item> = { K: { x: 1 } }
+  return m['K'].x
+}
+class LabelStore {
+  private labels: Record<string, string> = { save: 'Save' }
+  label() { return this.labels['save'].length }
+}
+function unsafeFalseArm(m: Record<string, Item>) { return 'K' in m ? '' : m['K'].x.toString() }
+function unsafeNegatedTrueArm(m: Record<string, Item>) { return !m['K'] ? m['K'].x.toString() : 'guest' }
+`
+	assert.Equal(t, []string{"src/guard-regressions.ts:45", "src/guard-regressions.ts:46"},
+		patterntest.LinesOf(t, rule, "src/guard-regressions.ts", source))
+}

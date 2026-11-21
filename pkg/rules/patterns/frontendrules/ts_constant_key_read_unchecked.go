@@ -36,8 +36,11 @@ var (
 	tsParamRecord          = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\??\s*:\s*(?:Readonly\s*<\s*)?Record\s*<\s*string\s*,`)
 	tsParamIndex           = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\??\s*:\s*\{\s*\[\s*[A-Za-z_$][\w$]*\s*:\s*string\s*\]`)
 	tsParamNamed           = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\??\s*:\s*([A-Za-z_$][\w$]*)`)
-	tsObjectDecl           = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b[^=]*=\s*\{`)
-	tsObjectKey            = regexp.MustCompile(`(?:^|[,\n])\s*(?:['"]([A-Za-z_$][\w$]*)['"]|([A-Za-z_$][\w$]*))\s*:`)
+	tsObjectDecl           = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b[^=;\n]*=\s*\{`)
+	tsClassFieldObjectDecl = regexp.MustCompile(`\b(?:public\s+|private\s+|protected\s+|readonly\s+)*([A-Za-z_$][\w$]*)\s*(?::[^=;\n]+)?=\s*\{`)
+	tsObjectKey            = regexp.MustCompile(`(?:^|[,\n])\s*(?:['"]([^'"\n]+)['"]|([A-Za-z_$][\w$]*))\s*:`)
+	tsIndexedInGuard       = regexp.MustCompile(`['"]([^'"\n]+)['"]\s+in\s+([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)`)
+	tsIndexedLookupGuard   = regexp.MustCompile(`([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\[\s*['"]([^'"\n]+)['"]\s*\]`)
 	tsTemplateNull         = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*null\b`)
 	tsTypeBody             = regexp.MustCompile(`(?s)\b(?:interface|type)\s+([A-Za-z_$][\w$]*)\s*(?:=\s*)?\{([^}]*)\}`)
 	tsRecordField          = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*:\s*(?:Readonly\s*<\s*)?Record\s*<\s*string\s*,`)
@@ -51,6 +54,7 @@ var (
 	tsAnnotatedDecl        = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$]*)\s*=`)
 	tsFunctionRecordReturn = regexp.MustCompile(`(?:\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\))\s*:\s*(?:Readonly\s*<\s*)?Record\s*<\s*string\s*,`)
 	tsCallDecl             = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\(`)
+	tsQuoteNormalizer      = strings.NewReplacer("\"", "'", "`", "'")
 )
 
 // AnalyzeFile reports unchecked constant-key reads in production TS/JS. The
@@ -77,25 +81,33 @@ func (r *TSConstantKeyReadUncheckedRule) AnalyzeFile(ctx *core.FileContext) []*c
 	globalNames := tsDictionaryNames(globalCode, ctx.VirtualJavaScript, dictTypes)
 	tsAddCallReturnNames(f.Code, globalNames)
 	analyzer := tsConstantReadAnalyzer{
-		rule:        r,
-		ctx:         ctx,
-		file:        f,
-		dictTypes:   dictTypes,
-		globalNames: globalNames,
-		dictNames:   make(map[[2]int]map[string]bool),
-		reads:       reads,
+		rule:         r,
+		ctx:          ctx,
+		file:         f,
+		globalCode:   globalCode,
+		dictTypes:    dictTypes,
+		globalNames:  globalNames,
+		dictNames:    make(map[[2]int]map[string]bool),
+		objectKeys:   make(map[[2]int]map[string]map[string]bool),
+		guardIndexes: make(map[[2]int]*tsGuardIndex),
+		aliasReads:   make(map[[2]int][][]int),
+		reads:        reads,
 	}
 	return analyzer.analyze()
 }
 
 type tsConstantReadAnalyzer struct {
-	rule        *TSConstantKeyReadUncheckedRule
-	ctx         *core.FileContext
-	file        patternkit.JsFlat
-	dictTypes   map[string]bool
-	globalNames map[string]bool
-	dictNames   map[[2]int]map[string]bool
-	reads       [][]int
+	rule         *TSConstantKeyReadUncheckedRule
+	ctx          *core.FileContext
+	file         patternkit.JsFlat
+	globalCode   string
+	dictTypes    map[string]bool
+	globalNames  map[string]bool
+	dictNames    map[[2]int]map[string]bool
+	objectKeys   map[[2]int]map[string]map[string]bool
+	guardIndexes map[[2]int]*tsGuardIndex
+	aliasReads   map[[2]int][][]int
+	reads        [][]int
 }
 
 type tsReadScope struct {
@@ -126,8 +138,14 @@ func (a *tsConstantReadAnalyzer) analyzeMatch(match []int) []*core.Violation {
 	if ok && tsTypeIndexedAccess(scope.body, scope.localStart) {
 		return nil
 	}
-	if !ok || !a.isDictionary(scope, base) || tsLocalObjectHasKey(scope.body, scope.text, base, key) ||
-		tsLocalObjectHasKey(a.file.Code, a.file.Text, base, key) {
+	globalCode, globalText := a.globalCode, a.file.Text[:len(a.globalCode)]
+	globalKey := [2]int{0, len(globalCode)}
+	if strings.HasPrefix(base, "this.") {
+		globalCode, globalText = a.file.Code, a.file.Text
+		globalKey = [2]int{0, len(a.file.Code)}
+	}
+	if !ok || !a.isDictionary(scope, base) || a.localObjectHasKey(scope.cacheKey, scope.body, scope.text, base, key) ||
+		a.localObjectHasKey(globalKey, globalCode, globalText, base, key) {
 		return nil
 	}
 	if tsWrittenBefore(scope.text, scope.localStart, base, key) || tsOptionalRead(scope.body, scope.localEnd) {
@@ -137,12 +155,30 @@ func (a *tsConstantReadAnalyzer) analyzeMatch(match []int) []*core.Violation {
 		return a.analyzeDirectRead(match[0], scope, base, key)
 	}
 	if tsDestructuredRead(scope.body, scope.localStart) {
-		if tsGuardedRead(scope.text, scope.localStart, base, key) || tsOuterGuardedRead(a.file, match[0], base, key) || tsDestructuredFallback(scope.body, scope.localEnd) {
+		if a.guarded(scope, scope.localStart, base, key) || tsOuterGuardedRead(a.file, match[0], base, key) || tsDestructuredFallback(scope.body, scope.localEnd) {
 			return nil
 		}
 		return a.report(match[0], "Dictionary key "+key+" may be absent, so destructuring reads an undefined value")
 	}
 	return a.analyzeAliasRead(scope, base, key)
+}
+
+func (a *tsConstantReadAnalyzer) guarded(scope tsReadScope, pos int, base, key string) bool {
+	index := a.guardIndexes[scope.cacheKey]
+	if index == nil {
+		index = newTSGuardIndex(scope.text)
+		a.guardIndexes[scope.cacheKey] = index
+	}
+	return index.guarded(pos, base, key)
+}
+
+func (a *tsConstantReadAnalyzer) localObjectHasKey(cacheKey [2]int, code, text, name, key string) bool {
+	objects, ok := a.objectKeys[cacheKey]
+	if !ok {
+		objects = tsObjectLiteralKeys(code, text)
+		a.objectKeys[cacheKey] = objects
+	}
+	return objects[name][key]
 }
 
 func tsTypeIndexedAccess(body string, pos int) bool {
@@ -255,7 +291,7 @@ func (a *tsConstantReadAnalyzer) namesForScope(key [2]int, code string, template
 }
 
 func (a *tsConstantReadAnalyzer) analyzeDirectRead(pos int, scope tsReadScope, base, key string) []*core.Violation {
-	if tsGuardedRead(scope.text, scope.localStart, base, key) || tsOuterGuardedRead(a.file, scope.start+scope.localStart, base, key) {
+	if a.guarded(scope, scope.localStart, base, key) || tsOuterGuardedRead(a.file, scope.start+scope.localStart, base, key) {
 		return nil
 	}
 	return a.report(pos, "Dictionary key "+key+" may be absent, so this read is undefined and the property access or call fails")
@@ -263,7 +299,12 @@ func (a *tsConstantReadAnalyzer) analyzeDirectRead(pos int, scope tsReadScope, b
 
 func (a *tsConstantReadAnalyzer) analyzeAliasRead(scope tsReadScope, base, key string) []*core.Violation {
 	var out []*core.Violation
-	for _, alias := range tsAliasRead.FindAllStringSubmatchIndex(scope.body, -1) {
+	aliases, ok := a.aliasReads[scope.cacheKey]
+	if !ok {
+		aliases = tsAliasRead.FindAllStringSubmatchIndex(scope.body, -1)
+		a.aliasReads[scope.cacheKey] = aliases
+	}
+	for _, alias := range aliases {
 		if !a.matchAlias(alias, scope, base, key) {
 			continue
 		}
@@ -433,32 +474,32 @@ func tsAddCallReturnNames(code string, names map[string]bool) {
 	}
 }
 
-func tsLocalObjectHasKey(code, text, name, key string) bool {
-	if strings.Contains(name, ".") {
-		return false
-	}
-	var loc []int
-	for _, match := range tsObjectDecl.FindAllStringSubmatchIndex(code, -1) {
-		if code[match[2]:match[3]] == name {
-			loc = match[:2]
-			break
-		}
-	}
-	if loc == nil {
-		return false
-	}
-	open := strings.LastIndex(code[loc[0]:loc[1]], "{") + loc[0]
+func tsObjectLiteralKeys(code, text string) map[string]map[string]bool {
+	objects := make(map[string]map[string]bool)
 	flat := patternkit.JsFlat{Code: code}
-	close, ok := flat.Closing(open)
-	if !ok {
-		return false
-	}
-	for _, match := range tsObjectKey.FindAllStringSubmatch(text[open+1:close], -1) {
-		if match[1] == key || match[2] == key {
-			return true
+	add := func(name string, match []int) {
+		open := strings.LastIndex(code[match[0]:match[1]], "{") + match[0]
+		close, ok := flat.Closing(open)
+		if !ok {
+			return
 		}
+		keys := make(map[string]bool)
+		for _, keyMatch := range tsObjectKey.FindAllStringSubmatch(text[open+1:close], -1) {
+			key := keyMatch[1]
+			if key == "" {
+				key = keyMatch[2]
+			}
+			keys[key] = true
+		}
+		objects[name] = keys
 	}
-	return false
+	for _, match := range tsObjectDecl.FindAllStringSubmatchIndex(code, -1) {
+		add(code[match[2]:match[3]], match[:2])
+	}
+	for _, match := range tsClassFieldObjectDecl.FindAllStringSubmatchIndex(code, -1) {
+		add("this."+code[match[2]:match[3]], match[:2])
+	}
+	return objects
 }
 
 func tsOptionalRead(code string, end int) bool {
@@ -544,15 +585,87 @@ func tsDestructuredFallback(body string, end int) bool {
 // tsGuardedRead accepts a guard only when the read is in the branch where the
 // key is present, or follows a guard-failure branch that terminates.
 func tsGuardedRead(body string, pos int, base, key string) bool {
-	for _, start := range tsIfStart.FindAllStringIndex(body[:pos], -1) {
-		if tsGuardedByIf(body, pos, base, key, start[0]) {
+	return newTSGuardIndex(body).guarded(pos, base, key)
+}
+
+type tsGuardBranch struct {
+	start    int
+	branches tsIfBranchSet
+}
+
+type tsGuardIndex struct {
+	body    string
+	flat    patternkit.JsFlat
+	ifs     []tsGuardBranch
+	byGuard map[string][]tsIndexedGuardBranch
+	whiles  []int
+}
+
+type tsIndexedGuardBranch struct {
+	branch             tsGuardBranch
+	condition          string
+	positive, negative bool
+}
+
+func newTSGuardIndex(body string) *tsGuardIndex {
+	index := &tsGuardIndex{body: body, flat: patternkit.JsFlat{Code: body}, byGuard: make(map[string][]tsIndexedGuardBranch)}
+	for _, start := range tsIfStart.FindAllStringIndex(body, -1) {
+		branches, ok := tsFindIfBranches(body, start[0])
+		if !ok {
+			continue
+		}
+		item := tsGuardBranch{start: start[0], branches: branches}
+		condStart := strings.IndexByte(body[start[0]:], '(') + start[0] + 1
+		condition := body[condStart:branches.conditionEnd]
+		matches := tsIndexedInGuard.FindAllStringSubmatch(condition, -1)
+		lookups := tsIndexedLookupGuard.FindAllStringSubmatch(condition, -1)
+		if len(matches) == 0 && len(lookups) == 0 {
+			index.ifs = append(index.ifs, item)
+			continue
+		}
+		for _, match := range matches {
+			base := strings.Join(strings.Fields(match[2]), "")
+			positive, negative := tsConditionGuard(condition, base, match[1])
+			candidate := tsIndexedGuardBranch{branch: item, condition: compactJS(condition), positive: positive, negative: negative}
+			index.byGuard[base+"\x00"+match[1]] = append(index.byGuard[base+"\x00"+match[1]], candidate)
+		}
+		for _, match := range lookups {
+			base := strings.Join(strings.Fields(match[1]), "")
+			positive, negative := tsConditionGuard(condition, base, match[2])
+			candidate := tsIndexedGuardBranch{branch: item, condition: compactJS(condition), positive: positive, negative: negative}
+			index.byGuard[base+"\x00"+match[2]] = append(index.byGuard[base+"\x00"+match[2]], candidate)
+		}
+	}
+	for _, loop := range tsWhileStart.FindAllStringIndex(body, -1) {
+		index.whiles = append(index.whiles, loop[0])
+	}
+	return index
+}
+
+func (index *tsGuardIndex) guarded(pos int, base, key string) bool {
+	body := index.body
+	for _, item := range index.byGuard[base+"\x00"+key] {
+		if item.branch.start >= pos {
+			break
+		}
+		if tsGuardedByBranchPolarity(body, pos, item.branch.branches, item.condition, item.positive, item.negative) {
 			return true
 		}
 	}
-	for _, loop := range tsWhileStart.FindAllStringIndex(body[:pos], -1) {
-		open := strings.IndexByte(body[loop[0]:], '(') + loop[0]
-		flat := patternkit.JsFlat{Code: body}
-		close, ok := flat.Closing(open)
+	for _, item := range index.ifs {
+		if item.start >= pos {
+			break
+		}
+		if tsGuardedByBranches(body, pos, base, key, item.start, item.branches) {
+			return true
+		}
+	}
+	for _, loop := range index.whiles {
+		if loop >= pos {
+			break
+		}
+		open := strings.IndexByte(body[loop:], '(') + loop
+		close, ok := index.flat.Closing(open)
 		if !ok || close >= pos {
 			continue
 		}
@@ -561,27 +674,35 @@ func tsGuardedRead(body string, pos int, base, key string) bool {
 			continue
 		}
 		stmtStart := tsSkipSpace(body, close+1)
-		stmtEnd, valid := tsBranchEnd(body, stmtStart, flat)
+		stmtEnd, valid := tsBranchEnd(body, stmtStart, index.flat)
 		if valid && stmtEnd <= pos {
 			return true
 		}
 	}
 	prior := compactJS(body[:pos])
 	assertion := "assert('" + key + "'in" + compactJS(base)
-	if strings.Contains(prior, assertion) || strings.Contains(prior, "assert("+compactJS(base)+"['"+key+"']") {
+	condition := assertion[len("assert("):]
+	if strings.Contains(prior, assertion) || strings.Contains(prior, "assert("+compactJS(base)+"['"+key+"']") ||
+		strings.Contains(prior, "invariant("+condition) || strings.Contains(prior, "tinyinvariant("+condition) {
 		return true
 	}
-	return tsGuardedByShortCircuit(body, pos, base, key)
+	return tsGuardedByTernary(body, pos, base, key) || tsGuardedByShortCircuit(body, pos, base, key)
 }
 
-func tsGuardedByIf(body string, pos int, base, key string, ifStart int) bool {
-	branches, ok := tsFindIfBranches(body, ifStart)
-	if !ok || branches.conditionEnd >= pos {
+func tsGuardedByBranches(body string, pos int, base, key string, ifStart int, branches tsIfBranchSet) bool {
+	if branches.conditionEnd >= pos {
 		return false
 	}
 	condStart := strings.IndexByte(body[ifStart:], '(') + ifStart + 1
 	cond := compactJS(body[condStart:branches.conditionEnd])
 	positive, negative := tsConditionGuard(cond, base, key)
+	return tsGuardedByBranchPolarity(body, pos, branches, cond, positive, negative)
+}
+
+func tsGuardedByBranchPolarity(body string, pos int, branches tsIfBranchSet, cond string, positive, negative bool) bool {
+	if branches.conditionEnd >= pos {
+		return false
+	}
 	if pos >= branches.then.start && pos < branches.then.end && positive {
 		return true
 	}
@@ -594,15 +715,6 @@ func tsGuardedByIf(body string, pos int, base, key string, ifStart int) bool {
 	if branches.hasElse && pos >= branches.otherwise.end && positive && tsTerminates(body[branches.otherwise.start:branches.otherwise.end]) {
 		return true
 	}
-	// A condition can also be the test of a ternary; the true arm is guarded.
-	question := strings.IndexByte(body[branches.conditionEnd+1:], '?')
-	if question >= 0 {
-		q := branches.conditionEnd + 1 + question
-		colon := strings.IndexByte(body[q+1:], ':')
-		if colon >= 0 && pos > q && pos < q+1+colon && positive {
-			return true
-		}
-	}
 	// An assertion function establishes the condition for the rest of its scope.
 	if pos >= branches.then.end && positive && tsAssertionCondition(body[branches.then.start:branches.then.end], cond) {
 		return true
@@ -611,7 +723,7 @@ func tsGuardedByIf(body string, pos int, base, key string, ifStart int) bool {
 }
 
 func tsConditionGuard(cond, base, key string) (bool, bool) {
-	cond = tsNormalizeQuotes(compactJS(cond))
+	cond = tsStripConditionParens(tsNormalizeQuotes(compactJS(cond)))
 	if arrow := strings.LastIndex(cond, "=>"); arrow >= 0 {
 		cond = cond[arrow+2:]
 	}
@@ -621,17 +733,18 @@ func tsConditionGuard(cond, base, key string) (bool, bool) {
 	if jsx := strings.LastIndex(cond, "{"); jsx >= 0 {
 		cond = cond[jsx+1:]
 	}
-	cond = strings.TrimLeft(cond, "({[<")
 	positive, negative := tsGuardPolarity(cond, base, key)
 	if positive || negative {
 		return positive, negative
 	}
 	for term := range strings.SplitSeq(cond, "&&") {
+		term = tsStripConditionParens(term)
 		if p, _ := tsGuardPolarity(term, base, key); p {
 			return true, false
 		}
 	}
 	for term := range strings.SplitSeq(cond, "||") {
+		term = tsStripConditionParens(term)
 		if _, n := tsGuardPolarity(term, base, key); n {
 			return false, true
 		}
@@ -639,8 +752,17 @@ func tsConditionGuard(cond, base, key string) (bool, bool) {
 	return false, false
 }
 
+func tsStripConditionParens(cond string) string {
+	cond = strings.TrimSpace(cond)
+	for len(cond) >= 2 && cond[0] == '(' && cond[len(cond)-1] == ')' {
+		cond = cond[1 : len(cond)-1]
+		cond = strings.TrimSpace(cond)
+	}
+	return cond
+}
+
 func tsNormalizeQuotes(s string) string {
-	return strings.NewReplacer("\"", "'", "`", "'").Replace(s)
+	return tsQuoteNormalizer.Replace(s)
 }
 
 func tsAssertionCondition(stmt, cond string) bool {
@@ -713,7 +835,6 @@ func tsGuardedByShortCircuit(body string, pos int, base, key string) bool {
 	lookup := compactJS(base) + "['" + key + "']"
 	quoteLookup := strings.ReplaceAll(lookup, "'", `"`)
 	if strings.Contains(prefix, lookup+"&&") || strings.Contains(prefix, quoteLookup+"&&") ||
-		strings.Contains(prefix, lookup+"?") || strings.Contains(prefix, quoteLookup+"?") ||
 		strings.Contains(prefix, lookup+"||") || strings.Contains(prefix, quoteLookup+"||") {
 		return true
 	}
@@ -727,12 +848,27 @@ func tsGuardedByShortCircuit(body string, pos int, base, key string) bool {
 	}
 	if and := strings.LastIndex(prefix, "&&"); and >= 0 {
 		left := prefix[:and]
+		if at := strings.LastIndex(left, "if("); at >= 0 {
+			left = left[at+3:]
+		}
 		if positive, _ := tsConditionGuard(left, base, key); positive {
+			return true
+		}
+	}
+	if or := strings.LastIndex(prefix, "||"); or >= 0 {
+		left := prefix[:or]
+		if at := strings.LastIndex(left, "if("); at >= 0 {
+			left = left[at+3:]
+		}
+		if _, negative := tsConditionGuard(left, base, key); negative {
 			return true
 		}
 	}
 	// The right hand side of a true ternary arm is protected by its condition.
 	if q := strings.LastIndex(prefix, "?"); q >= 0 {
+		if strings.Contains(prefix[q+1:], ":") {
+			return false
+		}
 		cond := strings.TrimRight(prefix[:q], "( ")
 		if at := strings.LastIndex(cond, "return"); at >= 0 {
 			cond = cond[at+len("return"):]
@@ -748,6 +884,31 @@ func tsGuardedByShortCircuit(body string, pos int, base, key string) bool {
 	return false
 }
 
+func tsGuardedByTernary(body string, pos int, base, key string) bool {
+	q := strings.LastIndexByte(body[:pos], '?')
+	if q < 0 {
+		return false
+	}
+	colonRel := strings.IndexByte(body[q+1:], ':')
+	if colonRel < 0 {
+		return false
+	}
+	colon := q + 1 + colonRel
+	condStart := strings.LastIndexAny(body[:q], "=;,\n") + 1
+	if condStart < q && body[condStart] == '>' {
+		condStart++ // the preceding '=' belongs to an arrow's '=>'
+	}
+	cond := strings.TrimSpace(body[condStart:q])
+	if strings.HasPrefix(cond, "(") && !strings.HasSuffix(cond, ")") {
+		cond = strings.TrimSpace(cond[1:])
+	}
+	positive, negative := tsConditionGuard(cond, base, key)
+	if pos < colon {
+		return positive
+	}
+	return negative
+}
+
 func compactJS(s string) string { return strings.Join(strings.Fields(s), "") }
 
 func tsGuardPolarity(cond, base, key string) (bool, bool) {
@@ -757,6 +918,9 @@ func tsGuardPolarity(cond, base, key string) (bool, bool) {
 	forms = append(forms, b+"."+key)
 	for _, lookup := range forms {
 		guard := cond
+		if strings.HasPrefix(guard, lookup+"?.") || strings.HasPrefix(guard, lookup+"?[") {
+			return true, false
+		}
 		if strings.HasPrefix(guard, "!") && strings.HasPrefix(strings.TrimPrefix(guard, "!"), lookup+"?.") {
 			return false, true
 		}
@@ -810,7 +974,7 @@ func tsLookupGuardPolarity(cond, lookup string) (bool, bool, bool) {
 				return !isEqual, isEqual, true
 			}
 			if value != "''" {
-				return isEqual, false, true
+				return isEqual, !isEqual, true
 			}
 			break
 		}
@@ -862,11 +1026,34 @@ func tsTerminates(stmt string) bool {
 	trimmed := strings.TrimSpace(stmt)
 	trimmed = strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(trimmed, "}"), "{"))
 	trimmed = strings.TrimSpace(strings.TrimSuffix(trimmed, ";"))
-	if end := strings.LastIndexAny(trimmed, ";\n"); end >= 0 {
-		trimmed = strings.TrimSpace(trimmed[end+1:])
+	start, paren, bracket, brace := 0, 0, 0, 0
+	for i := 0; i < len(trimmed); i++ {
+		switch trimmed[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			brace--
+		case ';', '\n':
+			if paren == 0 && bracket == 0 && brace == 0 {
+				start = i + 1
+			}
+		}
 	}
-	return strings.HasPrefix(trimmed, "return") || strings.HasPrefix(trimmed, "throw") ||
-		strings.HasPrefix(trimmed, "continue") || strings.HasPrefix(trimmed, "break")
+	last := strings.TrimSpace(trimmed[start:])
+	for _, keyword := range []string{"return", "throw", "continue", "break"} {
+		if strings.HasPrefix(last, keyword) && (len(last) == len(keyword) || !isJSIdent(last[len(keyword)])) {
+			return true
+		}
+	}
+	return false
 }
 
 func tsAliasDereferenced(after, name string) bool {
