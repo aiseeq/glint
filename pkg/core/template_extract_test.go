@@ -384,17 +384,24 @@ func TestExtractTemplateJavaScriptFreshRegressions(t *testing.T) {
 	}{
 		{"multiline object value", "const o = {\n  a: {{.A}},\n};", `{{.A}}`, "null"},
 		{"multiline object value in call argument", "render(App, {\n  user: {{.User}},\n});", `{{.User}}`, "null"},
+		{"multiline object value in method argument", "$.extend(window.CFG, {\n  locale: {{.Locale}},\n});", `{{.Locale}}`, "null"},
+		{"multiline object key in method argument", "o.set(x, {\n  {{.K}}: 1,\n});", `{{.K}}`, "null"},
 		{"multiline object value with crlf", "const o = {\r\n  a: {{.A}},\r\n};", `{{.A}}`, "null"},
 		{"multiline object key", "const o = {\n  {{.K}}: 1,\n};", `{{.K}}`, "null"},
 		{"regex action prefix", `const re = /^{{.Prefix}}-\d+$/;`, `{{.Prefix}}`, "x"},
 		{"regex action word", `const re = /{{.Word}}s/i;`, `{{.Word}}`, "x"},
 		{"template inside function after switch", "switch (a) {}\nfunction f() {\n  {{template \"b\" .}}\n}", `{{template "b" .}}`, ";"},
+		{"template in existing switch default", "switch (k) {\n  default:\n    a();\n    {{template \"t\" .}}\n}", `{{template "t" .}}`, ";"},
+		{"nested template literal closing tag", "const s = `${f(`</b>`)}`;\nconst op = a {{.Op}} b;", `{{.Op}}`, "+"},
+		{"nested template literal interpolation slash", "const s = `${f(`${a}/${b}`)}`;\nconst op = a {{.Op}} b;", `{{.Op}}`, "+"},
 		{"digit ending identifier before dot", `v = row1.{{.K}};`, `{{.K}}`, "_"},
 		{"number before dot", `v = 1.{{.F}};`, `{{.F}}`, "0"},
 		{"case value member continuation", `switch (k) { case 1: {{.O}}.r(); break; }`, `{{.O}}`, "null"},
 		{"label value member continuation", `lbl: {{.O}}.go();`, `{{.O}}`, "null"},
 		{"division after increment", `x = i++ / 2 / {{.N}};`, `{{.N}}`, "null"},
 		{"default newline call", "switch (k) {\n  default:\n    {{.Fn}}(1);\n}", `{{.Fn}}`, "null"},
+		{"ternary trailing colon on prior line", "v = ok ?\n  a :\n  {{.B}};", `{{.B}}`, "null"},
+		{"of variable before division", "var of = 4, h = of / 2 / {{.N}};", `{{.N}}`, "null"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			source := "<script>\n" + tc.source + "\n</script>\n"

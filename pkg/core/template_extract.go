@@ -457,7 +457,7 @@ func templateNextActionIsValue(b []byte, end int) bool {
 }
 
 func templateSwitchBlock(code []byte) bool {
-	open := bytes.LastIndexByte(code, '{')
+	open := templateUnmatchedOpenBrace(code)
 	if open < 0 {
 		return false
 	}
@@ -473,11 +473,38 @@ func templateSwitchBlock(code []byte) bool {
 		case '(':
 			depth--
 			if depth == 0 {
-				return lastWord(head[:i]) == "switch"
+				return lastWord(head[:i]) == "switch" && !templateSwitchDefault.Match(code[open+1:])
 			}
 		}
 	}
 	return false
+}
+
+func templateUnmatchedOpenBrace(code []byte) int {
+	depth := 0
+	for i := len(code) - 1; i >= 0; i-- {
+		switch code[i] {
+		case '}':
+			depth++
+		case '{':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+	return -1
+}
+
+func templateTernaryColon(code []byte) bool {
+	end := len(code)
+	for end > 0 && (code[end-1] == ' ' || code[end-1] == '\t' || code[end-1] == '\r' || code[end-1] == '\n') {
+		end--
+	}
+	if end > 0 && code[end-1] == ':' {
+		end--
+	}
+	return bytes.LastIndexByte(code[:end], '?') > bytes.LastIndexByte(code[:end], ':')
 }
 
 func templateDecimalPoint(code []byte) bool {
@@ -516,7 +543,7 @@ func templateForEachHeader(line []byte) bool {
 }
 
 func templateCaseOrLabelColon(line, code []byte) bool {
-	if templateObjectLiteralContext(code) {
+	if templateObjectLiteralContext(code) || templateTernaryColon(code) {
 		return false
 	}
 	trimmed := bytes.TrimSpace(line)
@@ -558,11 +585,20 @@ func templateObjectLiteralContext(code []byte) bool {
 	}
 	if strings.HasSuffix(before, ",") {
 		call := bytes.LastIndexByte(code[:open], '(')
-		if call >= 0 && lastWord(code[:call]) != "" {
+		if call >= 0 && templateCallHead(code[:call]) {
 			return true
 		}
 	}
 	return strings.Contains(before, "=") || strings.HasSuffix(before, "return") || strings.HasSuffix(before, "(") || strings.HasSuffix(before, ":")
+}
+
+func templateCallHead(code []byte) bool {
+	code = bytes.TrimSpace(code)
+	if len(code) == 0 {
+		return false
+	}
+	last := code[len(code)-1]
+	return isTemplateOperandEnd(last) || last == '>'
 }
 
 type templatePrefixScanner struct {
@@ -572,6 +608,13 @@ type templatePrefixScanner struct {
 	lineComment  bool
 	blockComment bool
 	inRegex      bool
+	templates    []templateLiteralFrame
+}
+
+type templateLiteralFrame struct {
+	inExpression bool
+	braceDepth   int
+	escaped      bool
 }
 
 func templateCodePrefix(b []byte, start, at int) ([]byte, bool) {
@@ -579,10 +622,13 @@ func templateCodePrefix(b []byte, start, at int) ([]byte, bool) {
 	for i := start; i < at; {
 		i = scanner.consume(b, i, at)
 	}
-	return scanner.code, scanner.quote != 0 || scanner.inRegex
+	return scanner.code, scanner.quote != 0 || scanner.inRegex || scanner.inTemplateRaw()
 }
 
 func (s *templatePrefixScanner) consume(b []byte, i, end int) int {
+	if s.inTemplateRaw() {
+		return s.consumeTemplateRaw(b, i, end)
+	}
 	c := b[i]
 	if s.lineComment {
 		return s.consumeLineComment(c, i)
@@ -592,6 +638,9 @@ func (s *templatePrefixScanner) consume(b []byte, i, end int) int {
 	}
 	if s.quote != 0 {
 		return s.consumeQuoted(c, i)
+	}
+	if len(s.templates) > 0 && s.templates[len(s.templates)-1].inExpression && (c == '{' || c == '}') {
+		return s.consumeTemplateBrace(c, i)
 	}
 	if c == '/' && i+1 < end && (b[i+1] == '/' || b[i+1] == '*') {
 		s.code = append(s.code, ' ')
@@ -605,8 +654,56 @@ func (s *templatePrefixScanner) consume(b []byte, i, end int) int {
 	if c == '/' && templateRegexCanStart(s.code) {
 		return s.consumeRegex(b, i, end)
 	}
-	if c == '\'' || c == '"' || c == '`' {
+	if c == '`' {
+		s.templates = append(s.templates, templateLiteralFrame{})
+		s.code = append(s.code, c)
+		return i + 1
+	}
+	if c == '\'' || c == '"' {
 		s.quote = c
+	}
+	s.code = append(s.code, c)
+	return i + 1
+}
+
+func (s *templatePrefixScanner) inTemplateRaw() bool {
+	return len(s.templates) > 0 && !s.templates[len(s.templates)-1].inExpression
+}
+
+func (s *templatePrefixScanner) consumeTemplateRaw(b []byte, i, end int) int {
+	frame := &s.templates[len(s.templates)-1]
+	c := b[i]
+	s.code = append(s.code, c)
+	if frame.escaped {
+		frame.escaped = false
+		return i + 1
+	}
+	if c == '\\' {
+		frame.escaped = true
+		return i + 1
+	}
+	if c == '`' {
+		s.templates = s.templates[:len(s.templates)-1]
+		return i + 1
+	}
+	if c == '$' && i+1 < end && b[i+1] == '{' {
+		frame.inExpression = true
+		frame.braceDepth = 1
+		s.code = append(s.code, '{')
+		return i + 2
+	}
+	return i + 1
+}
+
+func (s *templatePrefixScanner) consumeTemplateBrace(c byte, i int) int {
+	frame := &s.templates[len(s.templates)-1]
+	if c == '{' {
+		frame.braceDepth++
+	} else {
+		frame.braceDepth--
+		if frame.braceDepth == 0 {
+			frame.inExpression = false
+		}
 	}
 	s.code = append(s.code, c)
 	return i + 1
@@ -684,8 +781,15 @@ func templateRegexCanStart(code []byte) bool {
 	if previous == 0 || strings.ContainsRune("=(:,[!&|?{};+-*%^~<>", rune(previous)) {
 		return true
 	}
-	switch lastWord(code) {
-	case "return", "throw", "case", "delete", "void", "typeof", "instanceof", "in", "of", "yield", "await":
+	word := lastWord(code)
+	if word == "of" && !templateForEachHeader(lastTemplateCodeLine(code)) {
+		return false
+	}
+	if (word == "await" || word == "yield") && templateContextualBinding.Match(code) {
+		return false
+	}
+	switch word {
+	case "return", "throw", "case", "delete", "void", "typeof", "instanceof", "in", "yield", "await":
 		return true
 	}
 	return false
@@ -743,6 +847,8 @@ var templateValueKeywords = map[string]bool{
 
 // templateCatchPrefix is a catch clause, not a .catch method or property.
 var templateCatchPrefix = regexp.MustCompile(`(?:^|[^.\s])\s*\bcatch\b`)
+var templateContextualBinding = regexp.MustCompile(`\b(?:var|let|const)\s+(?:await|yield)\b`)
+var templateSwitchDefault = regexp.MustCompile(`\bdefault\s*:`)
 
 func templateIsCatchClause(line []byte) bool {
 	match := templateCatchPrefix.FindIndex(line)
