@@ -138,7 +138,8 @@ func (a *tsConstantReadAnalyzer) readScope(match []int) (tsReadScope, bool) {
 		scope.inFunction = true
 	}
 	if a.ctx.VirtualJavaScript && !inFunction {
-		scope.end = a.topLevelEnd
+		// Names come from the declarations before the first function; the
+		// read itself may stand anywhere at the top level.
 		scope.dictCode = a.file.Code[:a.topLevelEnd]
 		scope.cacheKey[1] = a.topLevelEnd
 	}

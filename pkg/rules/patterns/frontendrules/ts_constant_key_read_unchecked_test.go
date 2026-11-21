@@ -371,3 +371,25 @@ function log(): void {}
 `
 	assert.Equal(t, []string{"src/destructure.ts:31"}, patterntest.LinesOf(t, rule, "src/destructure.ts", source))
 }
+
+// Template scripts often declare helpers first and run their setup after
+// them: a top-level read past the first function is still read, and must
+// not take the run down.
+func TestTSConstantKeyReadUncheckedTemplateTopLevelAfterFunction(t *testing.T) {
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `<script>
+var banks = {{.Banks}};
+function g() { return 1; }
+render(banks['ACME']);
+show(banks['ACME'].name);
+if ('BETA' in banks) { show(banks['BETA'].name) }
+</script>`
+	virtual := core.ExtractTemplateJavaScript(rulestest.TextFile(t, "templates/after.html", source))
+	if !assert.Len(t, virtual, 1) {
+		return
+	}
+	assert.Equal(t, []string{"templates/after.html:5"}, rulestest.ViolationPlaces(rule.AnalyzeFile(virtual[0])))
+}
