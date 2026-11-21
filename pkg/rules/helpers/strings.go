@@ -49,6 +49,23 @@ func ContainsAny(s string, needles []string) bool {
 	return false
 }
 
+// foldOnlyLetters are the letters a (?i) regexp matches with a basic Latin
+// or Cyrillic letter while strings.ToLower leaves them as they are: the long
+// s and the round Cyrillic forms (unicode.SimpleFold orbits).
+const foldOnlyLetters = "ſᲀᲁᲂᲃᲄᲅᲆᲇᲈ"
+
+var foldOnlyReplacer = strings.NewReplacer("ſ", "s", "ᲀ", "в", "ᲁ", "д", "ᲂ", "о", "ᲃ", "с", "ᲄ", "т", "ᲅ", "т", "ᲆ", "ъ", "ᲇ", "ѣ", "ᲈ", "ꙋ")
+
+// FoldLower lowers s for a literal prefilter in front of a (?i) regexp: a
+// letter the regexp folds into a keyword lowers into that keyword too.
+func FoldLower(s string) string {
+	lower := strings.ToLower(s)
+	if !strings.ContainsAny(lower, foldOnlyLetters) {
+		return lower
+	}
+	return foldOnlyReplacer.Replace(lower)
+}
+
 // jsMaskKey keys the masked views of a file in core.FileShared.
 type jsMaskKey struct{ maskLiterals bool }
 

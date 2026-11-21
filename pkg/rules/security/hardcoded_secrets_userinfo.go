@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 // urlUserinfoPassword finds the password of scheme://user:password@host.
@@ -22,12 +24,18 @@ var envTemplateNotSecretKey = regexp.MustCompile(`(?i)_(?:file|path|dir|name|url
 // adminDSN is a password whatever its variable is called), and in an env
 // template the value of a secret key. "" when there is none.
 func credentialInLine(line string, envTemplate bool) string {
-	for _, m := range urlUserinfoPassword.FindAllStringSubmatch(line, -1) {
-		if realLookingSecret(m[1], 8) {
-			return m[1]
+	if strings.Contains(line, "://") && strings.Contains(line, "@") {
+		for _, m := range urlUserinfoPassword.FindAllStringSubmatch(line, -1) {
+			if realLookingSecret(m[1], 8) {
+				return m[1]
+			}
 		}
 	}
 	if !envTemplate {
+		return ""
+	}
+	lowerLine := helpers.FoldLower(line)
+	if !strings.Contains(line, "=") || !(strings.Contains(lowerLine, "pass") || strings.Contains(lowerLine, "secret") || strings.Contains(lowerLine, "token") || strings.Contains(lowerLine, "api") || strings.Contains(lowerLine, "private")) {
 		return ""
 	}
 	m := envTemplateSecret.FindStringSubmatch(strings.TrimSpace(line))

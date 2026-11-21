@@ -62,6 +62,9 @@ func (r *NullableObjectCallRule) AnalyzeFile(ctx *core.FileContext) []*core.Viol
 	table := fileTable{roots: fileTableRoots(src.Code), loose: looseProperties(src.Code)}
 	var violations []*core.Violation
 	for i, code := range src.Code {
+		if !strings.Contains(code, "Object.") {
+			continue
+		}
 		for _, loc := range r.objectCall.FindAllStringIndex(code, -1) {
 			arg, ok := patternkit.JsFirstArgument(src, i, loc[1]-1, nullableArgMaxLines)
 			if !ok || !isUnsafeNullableObjectArg(src.Text[i][:loc[0]], arg) || filled[patternkit.JsCompact(arg)] || table.holds(arg) {

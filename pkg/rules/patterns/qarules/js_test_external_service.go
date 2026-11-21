@@ -95,15 +95,20 @@ func gateText(text []string) []string {
 	out := make([]string, len(text))
 	constants := map[string]string{}
 	for i, line := range text {
-		out[i] = jsEnvBracket.ReplaceAllString(line, "process.env.$1")
-		if m := jsFlagConstant.FindStringSubmatch(out[i]); m != nil {
-			constants[m[1]] = m[2]
+		out[i] = line
+		if strings.Contains(line, "process.env[") {
+			out[i] = jsEnvBracket.ReplaceAllString(line, "process.env.$1")
+		}
+		if strings.Contains(out[i], "process.env") {
+			if m := jsFlagConstant.FindStringSubmatch(out[i]); m != nil {
+				constants[m[1]] = m[2]
+			}
 		}
 	}
 	for name, read := range constants {
 		use := regexp.MustCompile(`(^|[^\w$.])` + regexp.QuoteMeta(name) + `\b`)
 		for i, line := range out {
-			if jsFlagConstant.MatchString(line) {
+			if strings.Contains(line, "process.env") && jsFlagConstant.MatchString(line) {
 				continue
 			}
 			out[i] = use.ReplaceAllString(line, "${1}("+strings.ReplaceAll(read, "$", "$$")+")")
@@ -120,7 +125,14 @@ func (r *JSTestExternalServiceRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 	code := helpers.FileJSCode(ctx)
 	text := helpers.FileJSText(ctx)
 	whole := strings.Join(text, "\n")
-	httpReplaced, commandReplaced := jsHTTPReplaced.MatchString(whole), jsCommandReplaced.MatchString(whole)
+	httpReplaced := false
+	if helpers.ContainsAny(whole, []string{"setupServer", "setupWorker", "nock", "spyOn", "stubGlobal", "fetchMock", "mockFetch", "global.fetch", "globalThis.fetch", "window.fetch", "jest.mock", "vi.mock"}) {
+		httpReplaced = jsHTTPReplaced.MatchString(whole)
+	}
+	commandReplaced := false
+	if strings.Contains(whole, "jest.mock") || strings.Contains(whole, "vi.mock") {
+		commandReplaced = jsCommandReplaced.MatchString(whole)
+	}
 	covered, envErr := r.gatedLines(ctx, code, text)
 	// Флаг нельзя проверить по .env - гейты не засчитываются, и находка
 	// называет причину.
@@ -135,13 +147,17 @@ func (r *JSTestExternalServiceRule) AnalyzeFile(ctx *core.FileContext) []*core.V
 			continue
 		}
 		what := ""
-		if m := jsHTTPCall.FindStringSubmatch(line); m != nil && !httpReplaced && r.urls.externalURLOf(m[1]) != "" {
-			what = "вызывает " + m[1]
+		if strings.Contains(line, "://") && !httpReplaced {
+			if m := jsHTTPCall.FindStringSubmatch(line); m != nil && r.urls.externalURLOf(m[1]) != "" {
+				what = "вызывает " + m[1]
+			}
 		}
-		if m := jsCommandCall.FindStringSubmatch(line); what == "" && m != nil && !commandReplaced {
-			command := strings.TrimSpace(m[1] + " " + strings.Trim(m[2], "[]',\")` "))
-			if jsNetworkCommand.MatchString(command) && !jsLocalURL.MatchString(command) {
-				what = "запускает " + strings.Fields(m[1])[0] + " с выходом в сеть"
+		if what == "" && !commandReplaced && (strings.Contains(line, "exec") || strings.Contains(line, "spawn") || strings.Contains(line, "execa")) {
+			if m := jsCommandCall.FindStringSubmatch(line); m != nil {
+				command := strings.TrimSpace(m[1] + " " + strings.Trim(m[2], "[]',\")` "))
+				if jsNetworkCommand.MatchString(command) && !jsLocalURL.MatchString(command) {
+					what = "запускает " + strings.Fields(m[1])[0] + " с выходом в сеть"
+				}
 			}
 		}
 		if what == "" {
@@ -163,6 +179,9 @@ func (r *JSTestExternalServiceRule) gatedLines(ctx *core.FileContext, code, text
 	var env *projectEnv
 	text = gateText(text)
 	for i, line := range text {
+		if !strings.Contains(line, "process.env") {
+			continue
+		}
 		m := jsEnvGate.FindStringSubmatch(line)
 		if m == nil || strings.TrimSpace(code[i]) == "" {
 			continue

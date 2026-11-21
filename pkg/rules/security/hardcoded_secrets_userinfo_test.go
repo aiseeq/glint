@@ -58,3 +58,17 @@ UPSTREAM_SECRET_FILE=/run/secrets/upstream
 		})
 	}
 }
+
+func TestCredentialInLineLiteralPrefilterKeepsURLAndEnvAlternatives(t *testing.T) {
+	assert.Equal(t, "Abcdef123456", credentialInLine("mysql://reader:Abcdef123456@db.internal/app", false))
+	assert.Equal(t, "Abcdef123456", credentialInLine("CUSTOM_PRIVATE_KEY=Abcdef123456", true))
+	assert.Empty(t, credentialInLine("mysql://db.internal/app", false))
+	assert.Empty(t, credentialInLine("CACHE_PATH=/run/secrets/app", true))
+}
+
+// (?i) folds ſ with s, which strings.ToLower leaves as it is: the keyword
+// prefilter must not drop APP_ſECRET or DB_PAſſWORD.
+func TestCredentialInLineLiteralPrefilterKeepsUnicodeFolds(t *testing.T) {
+	assert.Equal(t, "Ab3dEf6hIj9kLm2n", credentialInLine("APP_ſECRET=Ab3dEf6hIj9kLm2n", true))
+	assert.Equal(t, "Ab3dEf6hIj9kLm2n", credentialInLine("DB_PAſſWORD=Ab3dEf6hIj9kLm2n", true))
+}

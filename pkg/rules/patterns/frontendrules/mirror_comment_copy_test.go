@@ -22,6 +22,15 @@ export function sourceName() { return 'alpha' }
 export const PROTECTION_MODES = []`
 	assert.Equal(t, []string{"src/names.ts:2", "src/names.ts:5", "src/names.ts:8"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/names.ts", source))
 }
+
+func TestMirrorCommentCopyLiteralPrefilterKeepsCaseFoldedAlternatives(t *testing.T) {
+	code := `// PORTED from projectA.values.
+export const values = []
+// This comment describes a mirrored interface without a source.
+export const label = 'value'
+`
+	assert.Equal(t, []string{"src/values.ts:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/values.ts", code))
+}
 func TestMirrorCommentCopyVerbInBlock(t *testing.T) {
 	source := `/* This helper follows the routing policy.
  * Зеркалит backend models.IsInTransitRoute.
@@ -401,4 +410,11 @@ func retryFetch(ctx context.Context, url string) error {
 `,
 	}
 	assert.Empty(t, rulestest.RunRuleOnFiles(t, NewMirrorCommentCopyRule(), files))
+}
+
+// (?i) folds ſ with s and the round Cyrillic letters (ᲁ U+1C81 with д) that
+// strings.ToLower leaves as they are: the literal prefilter must not drop them.
+func TestMirrorCommentCopyLiteralPrefilterKeepsUnicodeFolds(t *testing.T) {
+	code := "// Muſt match the backend list.\nexport const B = ['alpha']\n// ᲁублирует backend список.\nexport const C = ['alpha']\n"
+	assert.Equal(t, []string{"src/folds.ts:2", "src/folds.ts:4"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/folds.ts", code))
 }

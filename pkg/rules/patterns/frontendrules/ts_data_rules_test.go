@@ -269,7 +269,7 @@ func TestMetricFallbackZero(t *testing.T) {
   const usd = response.amount.usd ?? '0'
   return { prevCount, total, conversion, rate, usd }
 }
-`))
+	`))
 	assert.Equal(t, []string{"src/components/Metric.tsx:2"}, patterntest.LinesOf(t, rule, "src/components/Metric.tsx", `export function Metric({ previous }: Props) {
   return <DeltaBadge previous={previous?.depositsCount ?? 0} />
 }
@@ -279,6 +279,14 @@ func TestMetricFallbackZero(t *testing.T) {
 	customRule := NewMissingAmountCoercedToZeroRule()
 	assert.NoError(t, customRule.Configure(map[string]any{"metric_words": "Count"}))
 	assert.Empty(t, patterntest.LinesOf(t, customRule, "src/lib/metrics.ts", "const users = response.totalUsers ?? 0\n"))
+}
+
+func TestMetricFallbackLiteralPrefiltersKeepOperatorAlternatives(t *testing.T) {
+	rule := NewMissingAmountCoercedToZeroRule()
+	assert.Equal(t, []string{"src/lib/metrics.ts:1", "src/lib/metrics.ts:2"}, patterntest.LinesOf(t, rule, "src/lib/metrics.ts", `const visits = stats?.visitCount || '0'
+const total = report ? report.totalAmount : 0
+const nearby = report.totalAmount + 1
+`))
 }
 
 func TestMetricFallbackZeroTernary(t *testing.T) {

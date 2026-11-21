@@ -634,7 +634,10 @@ func roundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f p
 }
 
 func roundingFindingsWithIndex(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, index *patternkit.JsFunctions, parsed []moneySpan, vars map[string][]int, found map[int]bool, duplicateRounding financialFPRoundingDuplicateIndex, formatting formattingIndex) {
-	matches := moneyMathCall.FindAllStringIndex(f.Code, -1)
+	var matches [][]int
+	if strings.Contains(f.Code, "Math") {
+		matches = moneyMathCall.FindAllStringIndex(f.Code, -1)
+	}
 	positions := make([]int, 0, len(matches))
 	for _, m := range matches {
 		if !formatting.inFunction(m[0]) && !duplicateRounding.contains(m[0]) {
@@ -678,6 +681,9 @@ func roundingFindingsWithIndex(r *FrontendMoneyArithmeticRule, ctx *core.FileCon
 }
 
 func centRoundingFindings(r *FrontendMoneyArithmeticRule, ctx *core.FileContext, f patternkit.JsFlat, found map[int]bool) {
+	if !strings.Contains(f.Code, "Math") {
+		return
+	}
 	for _, m := range moneyMathCallName.FindAllStringSubmatchIndex(f.Code, -1) {
 		open := strings.LastIndex(f.Code[m[0]:m[1]], "(") + m[0]
 		close, ok := f.Closing(open)
@@ -725,6 +731,9 @@ type financialFPRoundingDuplicateIndex struct {
 
 func newFinancialFPRoundingDuplicateIndex(f patternkit.JsFlat) financialFPRoundingDuplicateIndex {
 	var index financialFPRoundingDuplicateIndex
+	if !strings.Contains(f.Code, "Math") {
+		return index
+	}
 	for _, m := range moneyMathCallName.FindAllStringSubmatchIndex(f.Code, -1) {
 		open := strings.LastIndex(f.Code[m[0]:m[1]], "(") + m[0]
 		close, ok := f.Closing(open)
@@ -806,6 +815,34 @@ type formattingIndex struct {
 
 var formattingFunctionName = regexp.MustCompile(`(?i)\b(?:format|money)[A-Za-z0-9_$]*`)
 
+func hasFormattingName(code string) bool {
+	lower := strings.ToLower(code)
+	return strings.Contains(lower, "format") || strings.Contains(lower, "money")
+}
+
+func formattingFunctionNames(code string) [][]int {
+	if !hasFormattingName(code) {
+		return nil
+	}
+	return formattingFunctionName.FindAllStringIndex(code, -1)
+}
+
+func formattingCallRanges(code string, closing map[int]int) []formattingRange {
+	if !hasFormattingName(code) {
+		return nil
+	}
+	var ranges []formattingRange
+	for _, loc := range formattingCall.FindAllStringIndex(code, -1) {
+		if loc[1] == 0 {
+			continue
+		}
+		if close, ok := closing[loc[1]-1]; ok {
+			ranges = append(ranges, formattingRange{start: loc[1], end: close})
+		}
+	}
+	return ranges
+}
+
 func newFormattingIndex(f patternkit.JsFlat, functions *patternkit.JsFunctions) formattingIndex {
 	var index formattingIndex
 	closing := make(map[int]int)
@@ -813,7 +850,7 @@ func newFormattingIndex(f patternkit.JsFlat, functions *patternkit.JsFunctions) 
 	parenStack := make([]int, 0)
 	braceClosing := make(map[int]int)
 	braceStack := make([]int, 0)
-	functionNames := formattingFunctionName.FindAllStringIndex(f.Code, -1)
+	functionNames := formattingFunctionNames(f.Code)
 	functionBraces := make([]int, 0)
 	lastHeaderBoundary := -1
 	functionNameIndex := 0
@@ -882,14 +919,7 @@ func newFormattingIndex(f patternkit.JsFlat, functions *patternkit.JsFunctions) 
 		}
 		index.functions = append(index.functions, formattingRange{start: pos, end: close})
 	}
-	for _, loc := range formattingCall.FindAllStringIndex(f.Code, -1) {
-		if loc[1] == 0 {
-			continue
-		}
-		if close, ok := closing[loc[1]-1]; ok {
-			index.calls = append(index.calls, formattingRange{start: loc[1], end: close})
-		}
-	}
+	index.calls = formattingCallRanges(f.Code, closing)
 	index.functionMaxEnds = rangePrefixMaxEnds(index.functions)
 	index.callMaxEnds = rangePrefixMaxEnds(index.calls)
 	return index

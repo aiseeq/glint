@@ -256,3 +256,12 @@ for (const row of await loadRows()) {
 		t.Fatalf("want findings on lines 14 (optional field) and 17 (rows from a call) only, got %v", lines)
 	}
 }
+
+func TestNullableObjectCallLiteralPrefilterKeepsHasOwnAlternative(t *testing.T) {
+	code := `const found = Object.hasOwn(response.payload, key)
+const label = object.hasOwn(response.payload, key)
+`
+	if got := NewNullableObjectCallRule().AnalyzeFile(core.NewFileContext("src/report.ts", ".", []byte(code), nil)); len(got) != 1 || got[0].Line != 1 {
+		t.Fatalf("Object.hasOwn should be found while lower-case object is ignored, got %#v", got)
+	}
+}

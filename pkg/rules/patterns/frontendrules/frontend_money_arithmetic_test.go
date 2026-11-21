@@ -19,6 +19,13 @@ func TestFrontendMoneyArithmeticLargeFileCompletes(t *testing.T) {
 	checkGrowth(t, ruleGrowthAtScale(t, NewFrontendMoneyArithmeticRule(), "frontend/src/perf.ts", source, 256, scale), scale, limit)
 }
 
+func TestFrontendMoneyArithmeticLiteralPrefilterKeepsMathCall(t *testing.T) {
+	code := `export function calc(row: Row) { return Math.floor(row.amount) }
+export function plain(value: number) { return Math.floor(value) }
+`
+	assert.Equal(t, []int{1}, rulestest.TextFileRuleLines(t, NewFrontendMoneyArithmeticRule(), "src/calc.ts", code))
+}
+
 func TestFrontendMoneyArithmeticUnmatchedModifiersGrowLinearly(t *testing.T) {
 	source := func(n int) string {
 		return strings.Repeat("static ", n) + "a" + strings.Repeat(") {}", n)
