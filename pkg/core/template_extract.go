@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -246,95 +247,398 @@ func templateExpression(b []byte, start, at, end int) string {
 	if inQuote {
 		return "x"
 	}
+	line := lastTemplateCodeLine(code)
+	before := lastWord(line)
+	previous := lastNonSpaceByte(line)
+	next := nextNonSpaceByte(b, end)
+	after := nextWord(b, end)
+	if replacement, ok := templateLexicalReplacement(b, at, end, code, line, before, next); ok {
+		return replacement
+	}
+	if replacement, ok := templateStructuralReplacement(b, at, end, code, line, before, previous, next, after); ok {
+		return replacement
+	}
+	return templateOperatorReplacement(b, end, code, before, after, previous, next)
+}
+
+func templateLexicalReplacement(b []byte, at, end int, code, line []byte, before string, next byte) (string, bool) {
 	prefix := strings.TrimSpace(string(code))
 	if strings.HasSuffix(prefix, ".") {
-		return "_"
+		if len(prefix) > 1 && prefix[len(prefix)-2] >= '0' && prefix[len(prefix)-2] <= '9' {
+			return "0", true
+		}
+		return "_", true
 	}
-	if strings.HasSuffix(prefix, "from") && (len(prefix) == len("from") || isTemplateWordBoundary(prefix[len(prefix)-len("from")-1])) {
-		return `"x"`
+	if templateEmptyAction(b[at+2 : end-2]) {
+		return "", true
 	}
-	for _, keyword := range []string{"return", "throw", "yield", "await", "typeof", "void", "delete", "new", "=>"} {
-		if strings.HasSuffix(prefix, keyword) {
-			return "null"
+	if before == "import" {
+		return `"x"`, true
+	}
+	if templateBindingPosition(line, next) || (before == "class" || before == "function") && (next == '{' || next == '(') {
+		return "_", true
+	}
+	trimmed := strings.TrimSpace(string(line))
+	if before == "from" && (len(trimmed) == len("from") || isTemplateWordBoundary(trimmed[len(trimmed)-len("from")-1])) {
+		return `"x"`, true
+	}
+	// html/template pads values adjacent to keywords with spaces. Preserve
+	// that lexical boundary in the virtual source as well.
+	if (before == "yield" || before == "await") && templateValueStart(next) {
+		return "+", true
+	}
+	if slices.Contains([]string{"return", "throw", "yield", "await", "typeof", "void", "delete", "new"}, before) {
+		return " null", true
+	}
+	return "", false
+}
+
+func templateStructuralReplacement(b []byte, at, end int, code, line []byte, before string, previous, next byte, after string) (string, bool) {
+	if before == "try" || before == "finally" || templateIsCatchClause(line) {
+		// try, catch (e) and finally take a block, not a statement.
+		return "{}", true
+	}
+	if previous == 0 && templateActionIsTemplate(b[at+2:end-2]) {
+		if templateObjectLiteralContext(code) {
+			return "", true
+		}
+		if templateSwitchBlock(code) {
+			return "default:;", true
 		}
 	}
-	lineStart := bytes.LastIndexAny(code, "\r\n") + 1
-	previous := lastNonSpaceByte(code[lineStart:])
-	next := nextNonSpaceByte(b, end)
-	before, after := lastWord(code[lineStart:]), nextWord(b, end)
-	if before == "try" || before == "finally" || templateCatchClause.Match(code[lineStart:]) {
-		// try, catch (e) and finally take a block, not a statement.
-		return "{}"
+	if replacement, ok := templateStructuralKeyword(before, line, code, next); ok {
+		return replacement, true
 	}
-	if isTemplateOperandEnd(previous) && isTemplateOperandStart(next) && !templateControlHeaderEnd(code) &&
+	if replacement, ok := templateStructuralColonOrBody(b, at, end, code, line, previous); ok {
+		return replacement, true
+	}
+	if before == "else" || after == "else" {
+		if templateActionIsTemplate(b[at+2 : end-2]) {
+			return ";", true
+		}
+		return "null", true
+	}
+	return "", false
+}
+
+func templateStructuralKeyword(before string, line, code []byte, next byte) (string, bool) {
+	if templateForHeaderValue(code) || templateOperatorWord(before, line) || before == "extends" || before == "case" || before == "instanceof" {
+		return "null", true
+	}
+	if (before == "yield" || before == "await") && (isTemplateOperandStart(next) || next == '{') {
+		return "+", true
+	}
+	if before == "in" {
+		trimmed := strings.TrimSpace(string(line))
+		operand := strings.TrimSpace(strings.TrimSuffix(trimmed, "in"))
+		if len(operand) > 0 && isTemplateOperandEnd(operand[len(operand)-1]) {
+			return " null", true
+		}
+	}
+	if before == "default" && strings.Contains(string(line), "export") {
+		return "null", true
+	}
+	return "", false
+}
+
+func templateStructuralColonOrBody(b []byte, at, end int, code, line []byte, previous byte) (string, bool) {
+	if previous == ':' {
+		if templateCaseOrLabelColon(line) {
+			return ";", true
+		}
+		return "null", true
+	}
+	if templateActionIsTemplate(b[at+2:end-2]) && (previous == '{' || previous == ',') {
+		if templateObjectLiteralContext(code) {
+			return "", true
+		}
+		if previous == '{' {
+			if templateSwitchBlock(code) {
+				return "default:;", true
+			}
+			return ";", true
+		}
+	}
+	return "", false
+}
+
+func templateOperatorReplacement(b []byte, end int, code []byte, before, after string, previous, next byte) string {
+	if isTemplateOperandEnd(previous) && (isTemplateOperandStart(next) || templateUnaryStart(next) || templateNextActionIsValue(b, end)) && !templateControlHeaderEnd(code) &&
 		!templateKeyword(before) && (!templateKeyword(after) || templateValueKeywords[after]) {
 		return "+"
 	}
-	for i := at - 1; i >= start; i-- {
-		if b[i] == '\n' || b[i] == '\r' {
-			continue
-		}
-		if strings.ContainsRune("=([{,:+-*/%!&|^<>?.", rune(b[i])) {
-			return "null"
-		}
-		if b[i] == ' ' || b[i] == '\t' {
-			continue
-		}
-		break
+	if previous == ';' && templateForHeaderValue(code) {
+		return "null"
+	}
+	if previous == 0 &&
+		(strings.ContainsRune(".([=", rune(next)) || templateBinaryStart(next)) {
+		return "null"
+	}
+	if strings.ContainsRune("=([{,:+-*/%!&|^<>?", rune(previous)) || templateUnaryStart(next) {
+		return "null"
 	}
 	return ";"
 }
 
-func templateCodePrefix(b []byte, start, at int) ([]byte, bool) {
-	quote := byte(0)
-	escaped := false
-	lineComment := false
-	blockComment := false
-	code := make([]byte, 0, at-start)
-	for i := start; i < at; i++ {
-		c := b[i]
-		if lineComment {
-			if c == '\n' || c == '\r' {
-				lineComment = false
-				code = append(code, c)
+func lastTemplateCodeLine(code []byte) []byte {
+	line := code[bytes.LastIndexAny(code, "\r\n")+1:]
+	if len(bytes.TrimSpace(line)) == 0 {
+		for end := bytes.LastIndexAny(code, "\r\n"); end >= 0; end = bytes.LastIndexAny(code[:end], "\r\n") {
+			start := bytes.LastIndexAny(code[:end], "\r\n") + 1
+			if len(bytes.TrimSpace(code[start:end])) != 0 {
+				last := lastNonSpaceByte(code[start:end])
+				if last == ';' || last == '}' || last == '{' {
+					return line
+				}
+				return code[start:end]
 			}
-			continue
-		}
-		if blockComment {
-			if c == '\n' || c == '\r' {
-				code = append(code, c)
-			} else if c == '*' && i+1 < at && b[i+1] == '/' {
-				blockComment = false
-				i++
-				code = append(code, ' ')
-			}
-			continue
-		}
-		if quote != 0 {
-			code = append(code, c)
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == quote {
-				quote = 0
-			}
-		} else if c == '/' && i+1 < at && b[i+1] == '/' {
-			lineComment = true
-			code = append(code, ' ')
-			i++
-		} else if c == '/' && i+1 < at && b[i+1] == '*' {
-			blockComment = true
-			code = append(code, ' ')
-			i++
-		} else if c == '\'' || c == '"' || c == '`' {
-			quote = c
-			code = append(code, c)
-		} else {
-			code = append(code, c)
 		}
 	}
-	return code, quote != 0
+	return line
+}
+
+func templateEmptyAction(action []byte) bool {
+	body := strings.TrimSpace(string(action))
+	return strings.HasPrefix(body, "/*") || strings.Contains(body, ":=")
+}
+
+func templateBindingPosition(line []byte, next byte) bool {
+	trimmed := strings.TrimSpace(string(line))
+	switch trimmed {
+	case "const", "let", "var", "function", "class", "export":
+		return true
+	}
+	return next == '=' && strings.TrimSpace(string(line)) == ""
+}
+
+func templateActionIsTemplate(action []byte) bool {
+	return strings.HasPrefix(strings.TrimSpace(string(action)), "template ")
+}
+
+func templateOperatorWord(word string, line []byte) bool {
+	switch word {
+	case "case", "instanceof":
+		return true
+	case "in":
+		return templateForEachHeader(line)
+	case "of":
+		return templateForEachHeader(line)
+	}
+	return false
+}
+
+func templateUnaryStart(c byte) bool {
+	return strings.ContainsRune("-+!~.", rune(c))
+}
+
+func templateValueStart(c byte) bool {
+	return isTemplateOperandStart(c) || c == '{'
+}
+
+func templateBinaryStart(c byte) bool {
+	return strings.ContainsRune("+-*/%&|^<>", rune(c))
+}
+
+func templateNextActionIsValue(b []byte, end int) bool {
+	for end < len(b) && (b[end] == ' ' || b[end] == '\t') {
+		end++
+	}
+	if !bytes.HasPrefix(b[end:], []byte("{{")) {
+		return false
+	}
+	close := bytes.Index(b[end+2:], []byte("}}"))
+	if close < 0 {
+		return false
+	}
+	return !templateEmptyAction(b[end+2:end+2+close]) && !templateActionIsTemplate(b[end+2:end+2+close])
+}
+
+func templateSwitchBlock(code []byte) bool {
+	open := bytes.LastIndexByte(code, '{')
+	if open < 0 {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimSpace(string(code[:open])), ")") && strings.Contains(string(code[:open]), "switch")
+}
+
+func templateForHeaderValue(code []byte) bool {
+	close := len(code)
+	for close > 0 && (code[close-1] == ' ' || code[close-1] == '\t' || code[close-1] == '\r' || code[close-1] == '\n') {
+		close--
+	}
+	if close == 0 || code[close-1] != ';' {
+		return false
+	}
+	open := bytes.LastIndexByte(code[:close], '(')
+	if open < 0 || lastWord(code[:open]) != "for" {
+		return false
+	}
+	return true
+}
+
+func templateForEachHeader(line []byte) bool {
+	trimmed := strings.TrimSpace(string(line))
+	return strings.HasPrefix(trimmed, "for ") || strings.HasPrefix(trimmed, "for(")
+}
+
+func templateCaseOrLabelColon(line []byte) bool {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 || trimmed[len(trimmed)-1] != ':' {
+		return false
+	}
+	text := string(trimmed)
+	if strings.Contains(text, "case ") {
+		return true
+	}
+	if strings.ContainsAny(text, "=([{,?+*/") {
+		return false
+	}
+	return lastWord(trimmed[:len(trimmed)-1]) != ""
+}
+
+func templateObjectLiteralContext(code []byte) bool {
+	depth := 0
+	open := -1
+	for i := len(code) - 1; i >= 0; i-- {
+		switch code[i] {
+		case '}':
+			depth++
+		case '{':
+			if depth == 0 {
+				open = i
+				i = -1
+			} else {
+				depth--
+			}
+		}
+	}
+	if open < 0 {
+		return false
+	}
+	before := strings.TrimSpace(string(code[:open]))
+	if strings.HasSuffix(before, ")") {
+		return false
+	}
+	return strings.Contains(before, "=") || strings.HasSuffix(before, "return") || strings.HasSuffix(before, "(") || strings.HasSuffix(before, ":")
+}
+
+type templatePrefixScanner struct {
+	code         []byte
+	quote        byte
+	escaped      bool
+	lineComment  bool
+	blockComment bool
+}
+
+func templateCodePrefix(b []byte, start, at int) ([]byte, bool) {
+	scanner := templatePrefixScanner{code: make([]byte, 0, at-start)}
+	for i := start; i < at; {
+		i = scanner.consume(b, i, at)
+	}
+	return scanner.code, scanner.quote != 0
+}
+
+func (s *templatePrefixScanner) consume(b []byte, i, end int) int {
+	c := b[i]
+	if s.lineComment {
+		return s.consumeLineComment(c, i)
+	}
+	if s.blockComment {
+		return s.consumeBlockComment(b, c, i, end)
+	}
+	if s.quote != 0 {
+		return s.consumeQuoted(c, i)
+	}
+	if c == '/' && i+1 < end && (b[i+1] == '/' || b[i+1] == '*') {
+		s.code = append(s.code, ' ')
+		if b[i+1] == '/' {
+			s.lineComment = true
+		} else {
+			s.blockComment = true
+		}
+		return i + 2
+	}
+	if c == '/' && templateRegexCanStart(s.code) {
+		return s.consumeRegex(b, i, end)
+	}
+	if c == '\'' || c == '"' || c == '`' {
+		s.quote = c
+	}
+	s.code = append(s.code, c)
+	return i + 1
+}
+
+func (s *templatePrefixScanner) consumeLineComment(c byte, i int) int {
+	if c == '\n' || c == '\r' {
+		s.lineComment = false
+		s.code = append(s.code, c)
+	}
+	return i + 1
+}
+
+func (s *templatePrefixScanner) consumeBlockComment(b []byte, c byte, i, end int) int {
+	if c == '\n' || c == '\r' {
+		s.code = append(s.code, c)
+		return i + 1
+	}
+	if c == '*' && i+1 < end && b[i+1] == '/' {
+		s.blockComment = false
+		s.code = append(s.code, ' ')
+		return i + 2
+	}
+	return i + 1
+}
+
+func (s *templatePrefixScanner) consumeQuoted(c byte, i int) int {
+	s.code = append(s.code, c)
+	if s.escaped {
+		s.escaped = false
+	} else if c == '\\' {
+		s.escaped = true
+	} else if c == s.quote {
+		s.quote = 0
+	}
+	return i + 1
+}
+
+func (s *templatePrefixScanner) consumeRegex(b []byte, i, end int) int {
+	inClass, escaped := false, false
+	for i++; i < end; i++ {
+		c := b[i]
+		if escaped {
+			escaped = false
+		} else if c == '\\' {
+			escaped = true
+		} else if c == '[' {
+			inClass = true
+		} else if c == ']' {
+			inClass = false
+		} else if c == '/' && !inClass {
+			i = templateRegexFlagsEnd(b, i+1, end) - 1
+			break
+		}
+	}
+	s.code = append(s.code, 'r')
+	return i + 1
+}
+
+func templateRegexFlagsEnd(b []byte, i, end int) int {
+	for i < end && ((b[i] >= 'a' && b[i] <= 'z') || (b[i] >= 'A' && b[i] <= 'Z')) {
+		i++
+	}
+	return i
+}
+
+func templateRegexCanStart(code []byte) bool {
+	previous := lastNonSpaceByte(code)
+	if previous == 0 || strings.ContainsRune("=(:,[!&|?{};+-*%^~<>", rune(previous)) {
+		return true
+	}
+	switch lastWord(code) {
+	case "return", "throw", "case", "delete", "void", "typeof", "instanceof", "in", "of", "yield", "await":
+		return true
+	}
+	return false
 }
 
 func lastNonSpaceByte(b []byte) byte {
@@ -387,8 +691,42 @@ var templateValueKeywords = map[string]bool{
 	"new": true, "typeof": true, "void": true, "delete": true, "function": true, "class": true, "await": true,
 }
 
-// templateCatchClause is a catch clause, not a .catch method or property.
-var templateCatchClause = regexp.MustCompile(`(?:^|[^.\s])\s*\bcatch\s*(\([^()]*\))?\s*$`)
+// templateCatchPrefix is a catch clause, not a .catch method or property.
+var templateCatchPrefix = regexp.MustCompile(`(?:^|[^.\s])\s*\bcatch\b`)
+
+func templateIsCatchClause(line []byte) bool {
+	match := templateCatchPrefix.FindIndex(line)
+	if match == nil {
+		return false
+	}
+	i := match[1]
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	if i == len(line) {
+		return true
+	}
+	if line[i] != '(' {
+		return false
+	}
+	depth := 0
+	for ; i < len(line); i++ {
+		switch line[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				i++
+				for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+					i++
+				}
+				return i == len(line)
+			}
+		}
+	}
+	return false
+}
 
 func templateKeyword(word string) bool {
 	return templateKeywords[word]

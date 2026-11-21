@@ -288,3 +288,92 @@ func TestExtractTemplateJavaScriptActionNextToKeywordIsNotBinaryOperator(t *test
 		}
 	}
 }
+
+func TestExtractTemplateJavaScriptMaskingResidueClasses(t *testing.T) {
+	action := `{{.X}}`
+	call := `{{template "stmt" .}}`
+	for _, tc := range []struct {
+		name, line, action, replacement string
+	}{
+		{"regex single quote", `const re = /'/; x = 1 {{.Op}} 2;`, `{{.Op}}`, "+"},
+		{"regex double quote", `const re = /"/g; f({{.X}});`, action, "null"},
+		{"regex escaped slash", `const re = /\/\//g; x = 1 {{.Op}} 2;`, `{{.Op}}`, "+"},
+		{"case value", `switch (k) { case {{.X}}: break; }`, action, "null"},
+		{"for of value", `for (const v of {{.X}}) { f(v); }`, action, "null"},
+		{"for in value", `for (const k in {{.X}}) { f(k); }`, action, "null"},
+		{"instanceof value", `x = e instanceof {{.X}};`, action, "null"},
+		{"extends value", `class A extends {{.X}} {}`, action, "null"},
+		{"import binding", `import {{.X}};`, action, `"x"`},
+		{"export default value", `export default {{.X}};`, action, "null"},
+		{"const binding", `const {{.X}} = 1;`, action, "_"},
+		{"function binding", `function {{.X}}() {}`, action, "_"},
+		{"class binding", `class {{.X}} {}`, action, "_"},
+		{"comment between equals", "x = // note\n  {{.X}};", action, "null"},
+		{"operator after word suffix", `x = renew {{.Op}} b;`, `{{.Op}}`, "+"},
+		{"operator after property", `x = opts.new {{.Op}} 1;`, `{{.Op}}`, "+"},
+		{"case template statement", `switch (k) { case 1: ` + call + ` break; }`, call, ";"},
+		{"label template statement", `lbl: ` + call + ` x();`, call, ";"},
+		{"object body template", `const o = { a: 1, ` + call + ` };`, call, ""},
+		{"switch body template", `switch (k) { ` + call + ` }`, call, "default:;"},
+		{"switch body template on next line", "switch (k) {\n  " + call + "\n}", call, "default:;"},
+		{"object body template on next line", "const o = {\n  " + call + "\n};", call, ""},
+		{"for test value", `for (let i = 0; {{.X}} > i; i++) {}`, action, "null"},
+		{"statement member value", `{{.X}}.init();`, action, "null"},
+		{"statement call value", `{{.X}}(1);`, action, "null"},
+		{"statement assignment binding", `{{.X}} = 1;`, action, "_"},
+		{"else call value", `if (a) {} else {{.X}}(1);`, action, "null"},
+		{"unary minus rhs", `f(a {{.Op}} -1);`, `{{.Op}}`, "+"},
+		{"unary not rhs", `f(a {{.Op}} !b);`, `{{.Op}}`, "+"},
+		{"unary decimal rhs", `f(a {{.Op}} .5);`, `{{.Op}}`, "+"},
+		{"action comment emits nothing", `x = 1 {{/* c */}} + 2;`, `{{/* c */}}`, ""},
+		{"action declaration emits nothing", `x = 1 {{$v := 2}} + 2;`, `{{$v := 2}}`, ""},
+		{"Allman try block", "try\n" + call + "\ncatch (e) {}", call, "{}"},
+		{"Allman catch block", "try {} catch (e)\n" + call, call, "{}"},
+		{"nested catch binding", `try {} catch ({ a = f() }) ` + call, call, "{}"},
+		{"empty switch body", `switch (k) { ` + call + ` }`, call, "default:;"},
+		{"ternary value", `x = c ? null : {{.X}};`, action, "null"},
+		{"object default key value", `x = { default: {{.X}} };`, action, "null"},
+		{"object property value after return", `function f() { return {a: {{.X}}, b: {{.Y}}}; }`, action, "null"},
+		{"statement start assignment", "x();\n{{.X}} = 1;", action, "_"},
+		{"statement start call", "x();\n{{.X}}(1);", action, "null"},
+		{"in operator without whitespace", `x = 'k' in{{.X}};`, action, " null"},
+		{"class expression name", `x = class {{.X}} {};`, action, "_"},
+		{"bare import string", `import {{.X}};`, action, `"x"`},
+		{"decimal fraction after dot", `x = 0.{{.X}};`, action, "0"},
+		{"yield operator to value", `function* g() { x = yield {{.Op}} x; }`, `{{.Op}}`, "+"},
+		{"await operator to value", `async function f() { x = await {{.Op}} 2; }`, `{{.Op}}`, "+"},
+		{"operator before empty action", `x = a {{.Op}}{{.X}};`, `{{.Op}}`, "+"},
+		{"operator before spaced action", `x = a {{.Op}} {{.X}};`, `{{.Op}}`, "+"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := "<script>\n" + tc.line + "\n</script>\n"
+			ctx := NewFileContext("/project/templates/residue.html", "/project", []byte(source), DefaultConfig())
+			got := ExtractTemplateJavaScript(ctx)
+			if len(got) != 1 {
+				t.Fatalf("got %d scripts, want 1", len(got))
+			}
+			if tc.action == "" {
+				t.Fatal("empty action in test case")
+			}
+			lineStart := strings.Index(source, tc.line)
+			actionStart := strings.Index(tc.line, tc.action)
+			if lineStart < 0 || actionStart < 0 {
+				t.Fatalf("action %q not found in input %q", tc.action, tc.line)
+			}
+			at := lineStart + actionStart
+			line := string(got[0].Content)
+			if tc.replacement == "" {
+				for _, c := range line[at : at+len(tc.action)] {
+					if c != ' ' {
+						t.Errorf("action should emit only whitespace, line = %q", line)
+						break
+					}
+				}
+				return
+			}
+			if !strings.HasPrefix(line[at:], tc.replacement) {
+				t.Errorf("replacement at byte %d = %q, want prefix %q (line %q)", at, line[at:], tc.replacement, line)
+			}
+		})
+	}
+}
