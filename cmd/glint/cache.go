@@ -180,8 +180,7 @@ func newRootCache(root, seed string, cfg *core.Config, goTreesFromLoader bool) (
 	if err == nil {
 		cache.ruleFingerprints = key.packages
 		cache.keyDescription = key.description
-		analysis := cacheAnalysisConfig(cfg)
-		config, marshalErr := yaml.Marshal(&analysis)
+		config, marshalErr := cacheConfigBytes(cfg)
 		if marshalErr != nil {
 			return nil, fmt.Errorf("serialize configuration for project results: %w", marshalErr)
 		}
@@ -1210,12 +1209,26 @@ func cacheAnalysisConfig(cfg *core.Config) core.Config {
 	return analysis
 }
 
+// Cached suppression entries identify exceptions by their declaration sites.
+// Those sites are not part of the YAML encoding of Config, so include their
+// worktree-relative keys alongside the analysis settings.
+func cacheConfigBytes(cfg *core.Config) ([]byte, error) {
+	exceptions := cfg.Exceptions()
+	keys := make([]string, 0, len(exceptions))
+	for i := range exceptions {
+		keys = append(keys, cfg.ExceptionKey(exceptions[i].Exception))
+	}
+	return yaml.Marshal(struct {
+		Analysis      core.Config `yaml:"analysis"`
+		ExceptionKeys []string    `yaml:"exception_keys"`
+	}{Analysis: cacheAnalysisConfig(cfg), ExceptionKeys: keys})
+}
+
 // cacheStamp identifies everything besides the file that a file-local finding
 // depends on. Go trees parsed by the project loader skip object resolution,
 // trees parsed by the walker do not, so their origin is part of it.
 func cacheStamp(cfg *core.Config, goTreesFromLoader, tolerant bool, coreFingerprint string) (string, error) {
-	analysis := cacheAnalysisConfig(cfg)
-	config, err := yaml.Marshal(&analysis)
+	config, err := cacheConfigBytes(cfg)
 	if err != nil {
 		return "", fmt.Errorf("serialize configuration for the result cache: %w", err)
 	}

@@ -184,6 +184,55 @@ func TestStaleSuppressionSeesMarkersThroughTheResultCache(t *testing.T) {
 	assert.Positive(t, second.reused)
 }
 
+// Moving configuration changes exception locations even when its analysis
+// settings remain equivalent. Cached suppression entries must identify the
+// current exception, while an exception that silences nothing stays stale.
+func TestStaleSuppressionAfterConfigMovesWithResultCache(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
+	writeModuleFile(t, root, "go.mod", "module example.com/projectA\n\ngo 1.24\n")
+	writeModuleFile(t, root, "logic.go", "package projectA\nfunc Complex(x int) int { if x > 0 { return 1 }; return 0 }\nfunc Simple() int { return 0 }\n")
+	config := `version: 1
+categories:
+  architecture:
+    rules:
+      cyclomatic-complexity:
+        settings:
+          max_complexity: 1
+        exceptions:
+          - file: logic.go
+            function: Complex
+            reason: known finding
+          - file: logic.go
+            function: Simple
+            reason: no finding remains
+`
+	settings := "settings:\n  fail_on: low\n\n"
+	for _, tc := range []struct{ name, config, stale string }{
+		{"initial", config, ".glint.yaml:12"},
+		{"settings first", settings + config, ".glint.yaml:15"},
+		{"settings last", config + "\n" + settings, ".glint.yaml:12"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeModuleFile(t, root, ".glint.yaml", tc.config)
+			cfg, _, err := loadConfig(root)
+			require.NoError(t, err)
+			cache, err := newRootCache(root, "", cfg, false)
+			require.NoError(t, err)
+			_, uncached := analyzeWithRules(t, root, nil, "cyclomatic-complexity", "stale-suppression")
+			_, cached := analyzeWithRules(t, root, cache, "cyclomatic-complexity", "stale-suppression")
+			assert.Equal(t, []string{tc.stale}, foundAt(uncached))
+			assert.Equal(t, foundAt(uncached), foundAt(cached))
+			require.NoError(t, cache.save())
+			warm, err := newRootCache(root, "", cfg, false)
+			require.NoError(t, err)
+			_, cachedAgain := analyzeWithRules(t, root, warm, "cyclomatic-complexity", "stale-suppression")
+			assert.Equal(t, foundAt(uncached), foundAt(cachedAgain))
+			assert.Positive(t, warm.reused)
+		})
+	}
+}
+
 const atoiSource = `package check
 
 import "strconv"
