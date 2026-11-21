@@ -423,3 +423,35 @@ func TestExtractTemplateJavaScriptFreshRegressions(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractTemplateJavaScriptRegressionClasses(t *testing.T) {
+	call := `{{template "part" .}}`
+	for _, tc := range []struct{ name, source, action, want string }{
+		{"array object", `init([{id: {{.ID}}}]);`, `{{.ID}}`, "null"},
+		{"export object", `export default {id: {{.ID}}};`, `{{.ID}}`, "null"},
+		{"object string brace", "const o = { close: \"}\", id: {{.ID}} };", `{{.ID}}`, "null"},
+		{"object template brace", "const o = { close: `}`, id: {{.ID}} };", `{{.ID}}`, "null"},
+		{"case string brace", "switch (x) { case \"{\": break; }\n" + call + " done();", call, ";"},
+		{"later default", "switch (x) { case 1: " + call + " default: break; }", call, ";"},
+		{"argument", `f(a, ` + call + `, b);`, call, "null"},
+		{"array element", `[1, ` + call + `, 3];`, call, "null"},
+		{"interpolation", "const s = `${ " + call + " }`;", call, "null"},
+		{"asi", "let total = 0\n{{.Counter}}(total)", `{{.Counter}}`, ";"},
+		{"completed for", "for (let i = 0; i < n; i++) sum += i;\n" + call + " done();", call, ";"},
+		{"question in string", "const s = \"?\";\nlabel: " + call + " done();", call, ";"},
+		{"question in regex", "const r = /[?}]/;\nlabel: " + call + " done();", call, ";"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := "<script>\n" + tc.source + "\n</script>"
+			ctx := NewFileContext("/project/page.html", "/project", []byte(source), DefaultConfig())
+			got := ExtractTemplateJavaScript(ctx)
+			if len(got) != 1 {
+				t.Fatalf("got %d scripts", len(got))
+			}
+			at := strings.Index(source, tc.action)
+			if at < 0 || !strings.HasPrefix(string(got[0].Content[at:]), tc.want) {
+				t.Errorf("want %q at action, got %q", tc.want, got[0].Content)
+			}
+		})
+	}
+}

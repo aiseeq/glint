@@ -248,6 +248,11 @@ func templateExpression(b []byte, start, at, end int) string {
 		return "x"
 	}
 	line := lastTemplateCodeLine(code)
+	if len(bytes.TrimSpace(code[bytes.LastIndexAny(code, "\r\n")+1:])) == 0 && isTemplateOperandEnd(lastNonSpaceByte(line)) {
+		if next := nextNonSpaceByte(b, end); next == '(' || next == '[' {
+			return ";"
+		}
+	}
 	before := lastWord(line)
 	previous := lastNonSpaceByte(line)
 	next := nextNonSpaceByte(b, end)
@@ -298,11 +303,12 @@ func templateStructuralReplacement(b []byte, at, end int, code, line []byte, bef
 		// try, catch (e) and finally take a block, not a statement.
 		return "{}", true
 	}
-	if previous == 0 && templateActionIsTemplate(b[at+2:end-2]) {
-		if templateObjectLiteralContext(code) {
+	if templateActionIsTemplate(b[at+2:end-2]) && nextTemplateNonSpace(b, end) == '}' {
+		last := lastNonSpaceByte(code)
+		if (last == '{' || last == ',') && templateObjectLiteralContext(code) && templateNearestDelimiter(code) == '{' {
 			return "", true
 		}
-		if templateSwitchBlock(code) {
+		if last == '{' && templateSwitchBlock(code) {
 			return "default:;", true
 		}
 	}
@@ -351,14 +357,8 @@ func templateStructuralColonOrBody(b []byte, at, end int, code, line []byte, pre
 		}
 		return "null", true
 	}
-	if templateActionIsTemplate(b[at+2:end-2]) && (previous == '{' || previous == ',') {
-		if templateObjectLiteralContext(code) {
-			return "", true
-		}
-		if previous == '{' {
-			if templateSwitchBlock(code) {
-				return "default:;", true
-			}
+	if templateActionIsTemplate(b[at+2:end-2]) && previous == '{' {
+		if !bytes.HasSuffix(bytes.TrimSpace(code), []byte("${")) {
 			return ";", true
 		}
 	}
@@ -504,7 +504,20 @@ func templateTernaryColon(code []byte) bool {
 	if end > 0 && code[end-1] == ':' {
 		end--
 	}
-	return bytes.LastIndexByte(code[:end], '?') > bytes.LastIndexByte(code[:end], ':')
+	for i := end - 1; i >= 0; i-- {
+		switch code[i] {
+		case ';', '{', '}':
+			return false
+		case ':':
+			return false
+		case '?':
+			if i+1 < end && (code[i+1] == '?' || code[i+1] == '.') || i > 0 && code[i-1] == '?' {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 func templateDecimalPoint(code []byte) bool {
@@ -531,7 +544,7 @@ func templateForHeaderValue(code []byte) bool {
 		return false
 	}
 	open := bytes.LastIndexByte(code[:close], '(')
-	if open < 0 || lastWord(code[:open]) != "for" {
+	if open < 0 || lastWord(code[:open]) != "for" || bytes.Contains(code[open:close], []byte(")")) {
 		return false
 	}
 	return true
@@ -561,44 +574,46 @@ func templateCaseOrLabelColon(line, code []byte) bool {
 }
 
 func templateObjectLiteralContext(code []byte) bool {
-	depth := 0
-	open := -1
-	for i := len(code) - 1; i >= 0; i-- {
-		switch code[i] {
-		case '}':
-			depth++
-		case '{':
-			if depth == 0 {
-				open = i
-				i = -1
-			} else {
-				depth--
-			}
-		}
-	}
+	open := templateUnmatchedOpenBrace(code)
 	if open < 0 {
 		return false
 	}
 	before := strings.TrimSpace(string(code[:open]))
-	if strings.HasSuffix(before, ")") {
+	if before == "" {
 		return false
 	}
-	if strings.HasSuffix(before, ",") {
-		call := bytes.LastIndexByte(code[:open], '(')
-		if call >= 0 && templateCallHead(code[:call]) {
-			return true
-		}
+	if strings.ContainsRune("(,[:=?+-*/%!&|^<>", rune(before[len(before)-1])) {
+		return true
 	}
-	return strings.Contains(before, "=") || strings.HasSuffix(before, "return") || strings.HasSuffix(before, "(") || strings.HasSuffix(before, ":")
+	word := lastWord([]byte(before))
+	return word == "return" || word == "default" && lastWord([]byte(strings.TrimSuffix(before, "default"))) == "export"
 }
 
-func templateCallHead(code []byte) bool {
-	code = bytes.TrimSpace(code)
-	if len(code) == 0 {
-		return false
+func templateNearestDelimiter(code []byte) byte {
+	var stack []byte
+	for _, c := range code {
+		switch c {
+		case '(', '[', '{':
+			stack = append(stack, c)
+		case ')', ']', '}':
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		}
 	}
-	last := code[len(code)-1]
-	return isTemplateOperandEnd(last) || last == '>'
+	if len(stack) == 0 {
+		return 0
+	}
+	return stack[len(stack)-1]
+}
+
+func nextTemplateNonSpace(b []byte, at int) byte {
+	for ; at < len(b); at++ {
+		if !strings.ContainsRune(" \t\r\n", rune(b[at])) {
+			return b[at]
+		}
+	}
+	return 0
 }
 
 type templatePrefixScanner struct {
@@ -673,7 +688,9 @@ func (s *templatePrefixScanner) inTemplateRaw() bool {
 func (s *templatePrefixScanner) consumeTemplateRaw(b []byte, i, end int) int {
 	frame := &s.templates[len(s.templates)-1]
 	c := b[i]
-	s.code = append(s.code, c)
+	if c == '`' || c == '\n' || c == '\r' {
+		s.code = append(s.code, c)
+	}
 	if frame.escaped {
 		frame.escaped = false
 		return i + 1
@@ -689,7 +706,7 @@ func (s *templatePrefixScanner) consumeTemplateRaw(b []byte, i, end int) int {
 	if c == '$' && i+1 < end && b[i+1] == '{' {
 		frame.inExpression = true
 		frame.braceDepth = 1
-		s.code = append(s.code, '{')
+		s.code = append(s.code, '$', '{')
 		return i + 2
 	}
 	return i + 1
@@ -731,12 +748,12 @@ func (s *templatePrefixScanner) consumeBlockComment(b []byte, c byte, i, end int
 }
 
 func (s *templatePrefixScanner) consumeQuoted(c byte, i int) int {
-	s.code = append(s.code, c)
 	if s.escaped {
 		s.escaped = false
 	} else if c == '\\' {
 		s.escaped = true
 	} else if c == s.quote {
+		s.code = append(s.code, c)
 		s.quote = 0
 	}
 	return i + 1
