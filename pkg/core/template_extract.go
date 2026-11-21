@@ -264,7 +264,7 @@ func templateExpression(b []byte, start, at, end int) string {
 func templateLexicalReplacement(b []byte, at, end int, code, line []byte, before string, next byte) (string, bool) {
 	prefix := strings.TrimSpace(string(code))
 	if strings.HasSuffix(prefix, ".") {
-		if len(prefix) > 1 && prefix[len(prefix)-2] >= '0' && prefix[len(prefix)-2] <= '9' {
+		if templateDecimalPoint(code) {
 			return "0", true
 		}
 		return "_", true
@@ -306,10 +306,13 @@ func templateStructuralReplacement(b []byte, at, end int, code, line []byte, bef
 			return "default:;", true
 		}
 	}
+	if previous == 0 && next == ':' && templateObjectLiteralContext(code) {
+		return "null", true
+	}
 	if replacement, ok := templateStructuralKeyword(before, line, code, next); ok {
 		return replacement, true
 	}
-	if replacement, ok := templateStructuralColonOrBody(b, at, end, code, line, previous); ok {
+	if replacement, ok := templateStructuralColonOrBody(b, at, end, code, line, previous, next); ok {
 		return replacement, true
 	}
 	if before == "else" || after == "else" {
@@ -341,9 +344,9 @@ func templateStructuralKeyword(before string, line, code []byte, next byte) (str
 	return "", false
 }
 
-func templateStructuralColonOrBody(b []byte, at, end int, code, line []byte, previous byte) (string, bool) {
+func templateStructuralColonOrBody(b []byte, at, end int, code, line []byte, previous, next byte) (string, bool) {
 	if previous == ':' {
-		if templateCaseOrLabelColon(line) {
+		if templateCaseOrLabelColon(line, code) && next != '.' && next != '(' {
 			return ";", true
 		}
 		return "null", true
@@ -458,7 +461,38 @@ func templateSwitchBlock(code []byte) bool {
 	if open < 0 {
 		return false
 	}
-	return strings.HasSuffix(strings.TrimSpace(string(code[:open])), ")") && strings.Contains(string(code[:open]), "switch")
+	head := bytes.TrimSpace(code[:open])
+	if len(head) == 0 || head[len(head)-1] != ')' {
+		return false
+	}
+	depth := 0
+	for i := len(head) - 1; i >= 0; i-- {
+		switch head[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+			if depth == 0 {
+				return lastWord(head[:i]) == "switch"
+			}
+		}
+	}
+	return false
+}
+
+func templateDecimalPoint(code []byte) bool {
+	end := len(code)
+	for end > 0 && (code[end-1] == ' ' || code[end-1] == '\t') {
+		end--
+	}
+	if end < 2 || code[end-1] != '.' || code[end-2] < '0' || code[end-2] > '9' {
+		return false
+	}
+	start := end - 2
+	for start > 0 && code[start-1] >= '0' && code[start-1] <= '9' {
+		start--
+	}
+	return start == 0 || isTemplateWordBoundary(code[start-1])
 }
 
 func templateForHeaderValue(code []byte) bool {
@@ -481,7 +515,10 @@ func templateForEachHeader(line []byte) bool {
 	return strings.HasPrefix(trimmed, "for ") || strings.HasPrefix(trimmed, "for(")
 }
 
-func templateCaseOrLabelColon(line []byte) bool {
+func templateCaseOrLabelColon(line, code []byte) bool {
+	if templateObjectLiteralContext(code) {
+		return false
+	}
 	trimmed := bytes.TrimSpace(line)
 	if len(trimmed) == 0 || trimmed[len(trimmed)-1] != ':' {
 		return false
@@ -519,6 +556,12 @@ func templateObjectLiteralContext(code []byte) bool {
 	if strings.HasSuffix(before, ")") {
 		return false
 	}
+	if strings.HasSuffix(before, ",") {
+		call := bytes.LastIndexByte(code[:open], '(')
+		if call >= 0 && lastWord(code[:call]) != "" {
+			return true
+		}
+	}
 	return strings.Contains(before, "=") || strings.HasSuffix(before, "return") || strings.HasSuffix(before, "(") || strings.HasSuffix(before, ":")
 }
 
@@ -528,6 +571,7 @@ type templatePrefixScanner struct {
 	escaped      bool
 	lineComment  bool
 	blockComment bool
+	inRegex      bool
 }
 
 func templateCodePrefix(b []byte, start, at int) ([]byte, bool) {
@@ -535,7 +579,7 @@ func templateCodePrefix(b []byte, start, at int) ([]byte, bool) {
 	for i := start; i < at; {
 		i = scanner.consume(b, i, at)
 	}
-	return scanner.code, scanner.quote != 0
+	return scanner.code, scanner.quote != 0 || scanner.inRegex
 }
 
 func (s *templatePrefixScanner) consume(b []byte, i, end int) int {
@@ -603,6 +647,7 @@ func (s *templatePrefixScanner) consumeQuoted(c byte, i int) int {
 
 func (s *templatePrefixScanner) consumeRegex(b []byte, i, end int) int {
 	inClass, escaped := false, false
+	s.inRegex = true
 	for i++; i < end; i++ {
 		c := b[i]
 		if escaped {
@@ -614,6 +659,7 @@ func (s *templatePrefixScanner) consumeRegex(b []byte, i, end int) int {
 		} else if c == ']' {
 			inClass = false
 		} else if c == '/' && !inClass {
+			s.inRegex = false
 			i = templateRegexFlagsEnd(b, i+1, end) - 1
 			break
 		}
@@ -630,6 +676,10 @@ func templateRegexFlagsEnd(b []byte, i, end int) int {
 }
 
 func templateRegexCanStart(code []byte) bool {
+	trimmed := bytes.TrimSpace(code)
+	if bytes.HasSuffix(trimmed, []byte("++")) || bytes.HasSuffix(trimmed, []byte("--")) {
+		return false
+	}
 	previous := lastNonSpaceByte(code)
 	if previous == 0 || strings.ContainsRune("=(:,[!&|?{};+-*%^~<>", rune(previous)) {
 		return true

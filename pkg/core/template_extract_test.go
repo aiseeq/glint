@@ -377,3 +377,42 @@ func TestExtractTemplateJavaScriptMaskingResidueClasses(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractTemplateJavaScriptFreshRegressions(t *testing.T) {
+	for _, tc := range []struct {
+		name, source, action, replacement string
+	}{
+		{"multiline object value", "const o = {\n  a: {{.A}},\n};", `{{.A}}`, "null"},
+		{"multiline object value in call argument", "render(App, {\n  user: {{.User}},\n});", `{{.User}}`, "null"},
+		{"multiline object value with crlf", "const o = {\r\n  a: {{.A}},\r\n};", `{{.A}}`, "null"},
+		{"multiline object key", "const o = {\n  {{.K}}: 1,\n};", `{{.K}}`, "null"},
+		{"regex action prefix", `const re = /^{{.Prefix}}-\d+$/;`, `{{.Prefix}}`, "x"},
+		{"regex action word", `const re = /{{.Word}}s/i;`, `{{.Word}}`, "x"},
+		{"template inside function after switch", "switch (a) {}\nfunction f() {\n  {{template \"b\" .}}\n}", `{{template "b" .}}`, ";"},
+		{"digit ending identifier before dot", `v = row1.{{.K}};`, `{{.K}}`, "_"},
+		{"number before dot", `v = 1.{{.F}};`, `{{.F}}`, "0"},
+		{"case value member continuation", `switch (k) { case 1: {{.O}}.r(); break; }`, `{{.O}}`, "null"},
+		{"label value member continuation", `lbl: {{.O}}.go();`, `{{.O}}`, "null"},
+		{"division after increment", `x = i++ / 2 / {{.N}};`, `{{.N}}`, "null"},
+		{"default newline call", "switch (k) {\n  default:\n    {{.Fn}}(1);\n}", `{{.Fn}}`, "null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := "<script>\n" + tc.source + "\n</script>\n"
+			ctx := NewFileContext("/project/templates/fresh.html", "/project", []byte(source), DefaultConfig())
+			got := ExtractTemplateJavaScript(ctx)
+			if len(got) != 1 {
+				t.Fatalf("got %d scripts, want 1", len(got))
+			}
+			start := strings.Index(source, tc.source)
+			action := strings.Index(tc.source, tc.action)
+			if start < 0 || action < 0 {
+				t.Fatalf("action %q not found in source %q", tc.action, tc.source)
+			}
+			at := start + action
+			virtual := string(got[0].Content)
+			if !strings.HasPrefix(virtual[at:], tc.replacement) {
+				t.Errorf("replacement at byte %d = %q, want prefix %q", at, virtual[at:], tc.replacement)
+			}
+		})
+	}
+}
