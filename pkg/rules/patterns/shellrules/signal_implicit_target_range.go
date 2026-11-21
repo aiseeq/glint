@@ -209,7 +209,7 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 		markRangeUses(call.Args[i], tracked, info, handled)
 	}
 	if isSubtest(call, info) {
-		body, receiverFields, resolved := resolveRangeSubtestBody(call, tracked, info, pkg)
+		body, receiverFields, receiverBodies, resolved := resolveRangeSubtestBody(call, tracked, info, pkg)
 		if resolved {
 			bodyTracked := make(map[types.Object]bool, len(tracked)+len(receiverFields))
 			for object := range tracked {
@@ -222,6 +222,15 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 			nested := analyzeRangeObject(body, bodyTracked, info, pkg, depth+1, stack)
 			result.executes = result.executes || nested.executes
 			result.unknown = result.unknown || nested.unknown
+			for _, receiverBody := range receiverBodies {
+				if receiverBody == body {
+					continue
+				}
+				markRangeUses(receiverBody, tracked, info, handled)
+				nested = analyzeRangeObject(receiverBody, bodyTracked, info, pkg, depth+1, stack)
+				result.executes = result.executes || nested.executes
+				result.unknown = result.unknown || nested.unknown
+			}
 			return
 		}
 	}
@@ -252,47 +261,51 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 // resolveRangeSubtestBody follows only bodies whose source is unambiguous:
 // a function literal assigned once in this function, or a method value for a
 // method declared in this package. Other function values remain unknown.
-func resolveRangeSubtestBody(call *ast.CallExpr, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage) (ast.Node, map[types.Object]bool, bool) {
+func resolveRangeSubtestBody(call *ast.CallExpr, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage) (ast.Node, map[types.Object]bool, []ast.Node, bool) {
 	if len(call.Args) < 2 {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	bodyExpr := ast.Unparen(call.Args[1])
 	switch body := bodyExpr.(type) {
 	case *ast.FuncLit:
-		return body.Body, nil, true
+		return body.Body, nil, nil, true
 	case *ast.Ident:
 		if body.Name == "_" {
-			return nil, nil, false
+			return nil, nil, nil, false
 		}
 		object := info.Uses[body]
 		if object == nil {
-			return nil, nil, false
+			return nil, nil, nil, false
 		}
 		function, unique := uniqueRangeFuncValue(call, object, info, pkg)
 		if !unique || function == nil {
-			return nil, nil, false
+			return nil, nil, nil, false
 		}
-		return function.Body, nil, true
+		return function.Body, nil, nil, true
 	case *ast.SelectorExpr:
 		selection := info.Selections[body]
 		if selection == nil || selection.Kind() != types.MethodVal {
-			return nil, nil, false
+			return nil, nil, nil, false
 		}
 		method, _ := selection.Obj().(*types.Func)
 		if method == nil || method.Pkg() == nil || method.Pkg().Path() != pkg.path {
-			return nil, nil, false
+			return nil, nil, nil, false
 		}
 		decl := rangeFunctionDecl(method, pkg, info)
 		if decl == nil || decl.Body == nil || decl.Recv == nil || len(decl.Recv.List) == 0 || len(decl.Recv.List[0].Names) == 0 {
-			return nil, nil, false
+			return nil, nil, nil, false
 		}
 		fields := rangeMethodValueFields(body.X, tracked, info, pkg)
-		if len(fields) == 0 || !receiverOnlyReadsFields(decl, info) {
-			return nil, nil, false
+		if len(fields) == 0 {
+			return nil, nil, nil, false
 		}
-		return decl.Body, fields, true
+		receiverBodies, safe := receiverOnlyReadsFields(decl, info, pkg, fields)
+		if !safe {
+			return nil, nil, nil, false
+		}
+		return decl.Body, fields, receiverBodies, true
 	default:
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 }
 
@@ -825,14 +838,43 @@ func rangeIdentInEquality(id *ast.Ident, scope ast.Node, tracked map[types.Objec
 	return found
 }
 
-// receiverOnlyReadsFields reports a method that uses its receiver only to read
-// fields. A receiver handed to a function or a method called on it may carry
-// the table string where the walk of this body does not follow.
-func receiverOnlyReadsFields(decl *ast.FuncDecl, info *types.Info) bool {
-	receiver := info.Defs[decl.Recv.List[0].Names[0]]
-	if receiver == nil {
+// receiverOnlyReadsFields reports whether a method and methods it directly
+// calls on the same receiver type use that receiver only to read fields. It
+// also returns their bodies so the range analysis can inspect each one.
+func receiverOnlyReadsFields(decl *ast.FuncDecl, info *types.Info, pkg *signalPackage, fields map[types.Object]bool) ([]ast.Node, bool) {
+	var bodies []ast.Node
+	ok := receiverMethodOnlyReadsFields(decl, info, pkg, fields, make(map[*types.Func]bool), &bodies)
+	return bodies, ok
+}
+
+func receiverMethodOnlyReadsFields(decl *ast.FuncDecl, info *types.Info, pkg *signalPackage, fields map[types.Object]bool, visited map[*types.Func]bool, bodies *[]ast.Node) bool {
+	if decl == nil || decl.Body == nil || decl.Recv == nil || len(decl.Recv.List) == 0 || len(decl.Recv.List[0].Names) == 0 {
 		return false
 	}
+	fn, _ := info.Defs[decl.Name].(*types.Func)
+	if fn == nil || visited[fn] {
+		return fn != nil
+	}
+	visited[fn] = true
+	*bodies = append(*bodies, decl.Body)
+	receiver := info.Defs[decl.Recv.List[0].Names[0]]
+	receiverType := info.TypeOf(decl.Recv.List[0].Type)
+	if receiver == nil || receiverType == nil {
+		return false
+	}
+
+	called := make(map[*ast.SelectorExpr]bool)
+	ast.Inspect(decl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok {
+			called[selector] = true
+		}
+		return true
+	})
+
 	only := true
 	ast.Inspect(decl.Body, func(n ast.Node) bool {
 		if !only {
@@ -840,13 +882,9 @@ func receiverOnlyReadsFields(decl *ast.FuncDecl, info *types.Info) bool {
 		}
 		switch n := n.(type) {
 		case *ast.SelectorExpr:
-			id, ok := ast.Unparen(n.X).(*ast.Ident)
-			if !ok || info.Uses[id] != receiver {
-				return true
-			}
-			selection := info.Selections[n]
-			only = selection != nil && selection.Kind() == types.FieldVal
-			return false
+			var handled bool
+			only, handled = receiverSelectorOnlyReadsFields(n, receiver, receiverType, called[n], info, pkg, fields, visited, bodies)
+			return !handled
 		case *ast.Ident:
 			if info.Uses[n] == receiver {
 				only = false
@@ -855,4 +893,28 @@ func receiverOnlyReadsFields(decl *ast.FuncDecl, info *types.Info) bool {
 		return only
 	})
 	return only
+}
+
+func receiverSelectorOnlyReadsFields(selector *ast.SelectorExpr, receiver types.Object, receiverType types.Type, called bool, info *types.Info, pkg *signalPackage, fields map[types.Object]bool, visited map[*types.Func]bool, bodies *[]ast.Node) (bool, bool) {
+	id, ok := ast.Unparen(selector.X).(*ast.Ident)
+	if !ok || info.Uses[id] != receiver {
+		return true, false
+	}
+	selection := info.Selections[selector]
+	if selection == nil {
+		return false, true
+	}
+	if selection.Kind() == types.FieldVal {
+		return true, true
+	}
+	method, ok := selection.Obj().(*types.Func)
+	if !ok || selection.Kind() != types.MethodVal || !called || method.Pkg() == nil || method.Pkg().Path() != pkg.path {
+		return false, true
+	}
+	signature, ok := method.Type().(*types.Signature)
+	if !ok || signature.Recv() == nil || !types.Identical(signature.Recv().Type(), receiverType) {
+		return false, true
+	}
+	callee := rangeFunctionDecl(method, pkg, info)
+	return callee != nil && receiverMethodOnlyReadsFields(callee, info, pkg, fields, visited, bodies), true
 }

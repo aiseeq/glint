@@ -1366,3 +1366,46 @@ func TestTable(t *testing.T) {
 	}
 	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
 }
+
+func TestSignalImplicitTargetMethodValueThroughReceiverMethods(t *testing.T) {
+	source := `package sample
+import (
+	"os/exec"
+	"testing"
+)
+type taskE struct{ cmd string }
+func (k taskE) describe(t *testing.T) { t.Log("cmd", k.cmd) }
+func (k taskE) logged(t *testing.T) { t.Log(k.cmd); k.describe(t) }
+func (k taskE) twice(t *testing.T) { k.logged(t); k.describe(t) }
+func (k taskE) ping(t *testing.T) { t.Log(k.cmd); if t.Failed() { k.pong(t) } }
+func (k taskE) pong(t *testing.T) { t.Log(k.cmd); if !t.Failed() { k.ping(t) } }
+func (k taskE) shellIt(t *testing.T) { _ = exec.Command("sh", "-c", k.cmd).Run() }
+func (k taskE) mid(t *testing.T) { t.Log(k.cmd); k.shellIt(t) }
+func (k taskE) viaMid(t *testing.T) { k.mid(t) }
+func (k taskE) hands(t *testing.T) { runTaskE(k) }
+func (k taskE) viaHands(t *testing.T) { k.describe(t); k.hands(t) }
+func (k taskE) helper(t *testing.T) { t.Log(k.cmd); shellStr(k.cmd) }
+func (k taskE) viaHelper(t *testing.T) { k.helper(t) }
+func shellStr(s string) { _ = exec.Command("sh", "-c", s).Run() }
+func runTaskE(k taskE) { _ = exec.Command("sh", "-c", k.cmd).Run() }
+func TestTable(t *testing.T) {
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("a", taskE{cmd: s}.logged) }
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("b", taskE{cmd: s}.twice) }
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("c", taskE{cmd: s}.ping) }
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { e := taskE{cmd: s}; t.Run("d", e.logged) }
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("e", taskE{cmd: s}.mid) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("f", taskE{cmd: s}.viaMid) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("g", taskE{cmd: s}.viaHands) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { e := taskE{cmd: s}; t.Run("h", e.viaMid) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("i", taskE{cmd: s}.viaHelper) } // WANT
+}
+`
+	file, pkg := signalSourceTyped(t, "receiver_methods_test.go", source)
+	var want []int
+	for i, line := range strings.Split(source, "\n") {
+		if strings.Contains(line, "// WANT") {
+			want = append(want, i+1)
+		}
+	}
+	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+}
