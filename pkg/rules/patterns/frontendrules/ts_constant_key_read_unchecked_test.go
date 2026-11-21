@@ -501,6 +501,7 @@ export function inferred() {
   const values = load()
   return values['K'].name // POS
 }
+
 export const arrow = (m: Record<string, Item>) => ('K' in m ? m['K'].name : '')
 export function keys(m: Record<string, Item>) {
   return Object.keys(m).includes('K') && m['K'].name
@@ -513,4 +514,32 @@ export function jsx(m: Record<string, Item>) {
 }
 `
 	assert.Equal(t, []string{"src/fourth-expressions.ts:5"}, patterntest.LinesOf(t, rule, "src/fourth-expressions.ts", source))
+}
+
+func TestTSConstantKeyReadUncheckedTypeofKeyGuard(t *testing.T) {
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `interface Entry { kind: string; details: unknown }
+export function heading(details: Record<string, unknown>, kind: string) {
+  const verb = typeof details['verb'] === 'string'
+    ? (details['verb'] as string).toUpperCase()
+    : kind.toUpperCase()
+  return verb
+}
+export function pathSize(details: Record<string, unknown>) {
+  if (typeof details['path'] === 'string' && (details['path'] as string).length > 0) {
+    return (details['path'] as string).length
+  }
+  return 0
+}
+export function numericCode(details: Record<string, unknown>) {
+  return typeof details['status'] === 'number' ? (details['status'] as number).toFixed(0) : '-'
+}
+export function otherKey(details: Record<string, { name: string }>) {
+  return typeof details['verb'] === 'object' ? details['noun'].name : '' // POS
+}
+`
+	assert.Equal(t, []string{"src/typeof-guard.ts:18"}, patterntest.LinesOf(t, rule, "src/typeof-guard.ts", source))
 }
