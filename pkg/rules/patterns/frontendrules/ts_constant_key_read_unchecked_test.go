@@ -207,3 +207,167 @@ function guarded() { if (ctx.banks['THA']) { return ctx.banks['THA'].name; } }
 	}
 	assert.Equal(t, []string{"templates/second.html:5", "templates/second.html:8"}, rulestest.ViolationPlaces(rule.AnalyzeFile(virtual[0])))
 }
+
+func TestTSConstantKeyReadUncheckedThirdPass(t *testing.T) {
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `type Item = { x: number }
+export function bracedReturn(m: Record<string, Item>) {
+  if (!('K' in m)) { return 0; }
+  return m['K'].x
+}
+export function bracedThrow(m: Record<string, Item>) {
+  if (m['K'] === undefined) {
+    console.warn('no K')
+    throw new Error('no K')
+  }
+  return m['K'].x
+}
+export function bracedFalsy(m: Record<string, Item>) {
+  if (!m['K']) { return 0 }
+  return m['K'].x
+}
+export function bracedOwn(m: Record<string, Item>) {
+  if (!Object.hasOwn(m, 'K')) { return 0 }
+  return m['K'].x
+}
+export function sameConditionIn(m: Record<string, Item>) {
+  if ('K' in m && m['K'].x > 0) return true
+  return false
+}
+export function sameConditionDefined(m: Record<string, Item>) {
+  if (m['K'] !== undefined && m['K'].x > 0) return true
+  return false
+}
+export function orExit(m: Record<string, Item>, off: boolean) {
+  if (off || !('K' in m)) return 0
+  return m['K'].x
+}
+export function defaultedKey(m: Record<string, Item>) {
+  m['K'] = m['K'] || { x: 0 }
+  return m['K'].x
+}
+export function nullishAssigned(m: Record<string, Item>) {
+  m['K'] ??= { x: 0 }
+  return m['K'].x
+}
+export function typeofUndefined(m: Record<string, Item>) {
+  if (typeof m['K'] === 'undefined') return 0
+  return m['K'].x
+}
+interface Cfg { banks: Record<string, Item> }
+export function savedTypedPath(cfg: Cfg) {
+  const b = cfg.banks['KBANK']
+  return b.x
+}
+export function directTypedPath(cfg: Cfg) {
+  return cfg.banks['KBANK'].x
+}
+export function inlineTypedPath(cfg: { banks: Record<string, Item> }) {
+  return cfg.banks['KBANK'].x
+}
+class Registry {
+  banks: Record<string, Item> = {}
+  name() { return this.banks['KBANK'].x }
+}
+export function destructured(m: Record<string, Item>) {
+  const { x } = m['K']
+  return x
+}
+`
+	assert.Equal(t, []string{
+		"src/third.ts:47", "src/third.ts:51", "src/third.ts:54", "src/third.ts:58", "src/third.ts:61",
+	}, patterntest.LinesOf(t, rule, "src/third.ts", source))
+	negative := `type Item = { x: number }
+export function bracedReturn(m: Record<string, Item>) {
+  if (!('K' in m)) { return 0; }
+  return m['K'].x
+}
+export function bracedThrow(m: Record<string, Item>) {
+  if (m['K'] === undefined) {
+    console.warn('no K')
+    throw new Error('no K')
+  }
+  return m['K'].x
+}
+export function bracedFalsy(m: Record<string, Item>) {
+  if (!m['K']) {
+    return 0
+  }
+  return m['K'].x
+}
+export function bracedOwn(m: Record<string, Item>) {
+  if (!Object.hasOwn(m, 'K')) { return 0 }
+  return m['K'].x
+}
+export function sameConditionIn(m: Record<string, Item>) {
+  if ('K' in m && m['K'].x > 0) return true
+  return false
+}
+export function sameConditionDefined(m: Record<string, Item>) {
+  if (m['K'] !== undefined && m['K'].x > 0) return true
+  return false
+}
+export function orExit(m: Record<string, Item>, off: boolean) {
+  if (off || !('K' in m)) return 0
+  return m['K'].x
+}
+export function defaultedKey(m: Record<string, Item>) {
+  m['K'] = m['K'] || { x: 0 }
+  return m['K'].x
+}
+export function nullishAssigned(m: Record<string, Item>) {
+  m['K'] ??= { x: 0 }
+  return m['K'].x
+}
+export function typeofUndefined(m: Record<string, Item>) {
+  if (typeof m['K'] === 'undefined') return 0
+  return m['K'].x
+}
+`
+	assert.Empty(t, patterntest.LinesOf(t, rule, "src/third-neg.ts", negative))
+}
+
+func TestTSConstantKeyReadUncheckedDestructuringGuards(t *testing.T) {
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `type Item = { x: number }
+export function guardedDestructure(m: Record<string, Item>): number {
+  if ('K' in m) {
+    const { x } = m['K']
+    return x
+  }
+  return 0
+}
+export function exitDestructure(m: Record<string, Item>): number {
+  if (!('K' in m)) return 0
+  const { x } = m['K']
+  return x
+}
+export function orFallbackDestructure(m: Record<string, Item>): number {
+  const { x } = m['K'] || { x: 0 }
+  return x
+}
+export function nullishFallbackDestructure(m: Record<string, Item>): number {
+  const { x } = m['K'] ?? { x: 0 }
+  return x
+}
+export function emptyNullishFallbackDestructure(m: Record<string, Item>): number {
+  const { x } = m['K'] ?? {}
+  return x ?? 0
+}
+export function fallthroughAfterPartialExit(m: Record<string, Item>, a: boolean): number {
+  if (!m['K']) {
+    if (a) return 1
+    log()
+  }
+  return m['K'].x // POS
+}
+function log(): void {}
+`
+	assert.Equal(t, []string{"src/destructure.ts:31"}, patterntest.LinesOf(t, rule, "src/destructure.ts", source))
+}
