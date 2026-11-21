@@ -519,22 +519,21 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 		}
 	}
 	localMajor := lookup.localMajor
+	localVersion := lookup.localVersion
 	localReuse := lookup.reuseBuildInfo
-	if !toolcache.Disabled {
-		if localMajor == 0 {
-			localVersion, versionErr := toolVersion(program.tsc)
-			if versionErr != nil {
-				return tscAnswer{}, versionErr
-			}
-			if match := tscVersion.FindStringSubmatch(localVersion); match != nil {
-				if major, parseErr := strconv.Atoi(match[1]); parseErr == nil {
-					localMajor = major
-				}
-			}
+	if localVersion == "" {
+		localVersion, err = toolVersion(program.tsc)
+		if err != nil {
+			return tscAnswer{}, err
 		}
-		if localMajor > 0 && localMajor < 7 {
-			localReuse = true
+	}
+	if match := tscVersion.FindStringSubmatch(localVersion); match != nil {
+		if major, parseErr := strconv.Atoi(match[1]); parseErr == nil {
+			localMajor = major
 		}
+	}
+	if !toolcache.Disabled && localMajor > 0 && localMajor < 7 {
+		localReuse = true
 	}
 	answer := tscAnswer{NotStrict: notStrict}
 	var listed []byte
@@ -542,24 +541,26 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 	if err != nil {
 		return tscAnswer{}, err
 	}
-	newer, newerListed, err := incrementalTscDiagnostics(global.path, dir, program.config, lookup.reuseBuildInfo, run...)
-	if err != nil {
-		return tscAnswer{}, fmt.Errorf("tsc 7: %w", err)
-	}
-	// tsc 7 words some messages differently: the same error is the same
-	// code at the same place.
-	known := map[tscPlace]bool{}
-	for _, d := range answer.Errors {
-		known[d.place()] = true
-	}
-	for _, d := range newer {
-		if !known[d.place()] {
-			answer.TSC7 = append(answer.TSC7, d)
+	if strings.TrimSpace(localVersion) != strings.TrimSpace(global.version) {
+		newer, newerListed, runErr := incrementalTscDiagnostics(global.path, dir, program.config, lookup.reuseBuildInfo, run...)
+		if runErr != nil {
+			return tscAnswer{}, fmt.Errorf("tsc 7: %w", runErr)
 		}
+		// tsc 7 words some messages differently: the same error is the same
+		// code at the same place.
+		known := map[tscPlace]bool{}
+		for _, d := range answer.Errors {
+			known[d.place()] = true
+		}
+		for _, d := range newer {
+			if !known[d.place()] {
+				answer.TSC7 = append(answer.TSC7, d)
+			}
+		}
+		listed = append(listed, newerListed...)
 	}
 	if !toolcache.Disabled {
-		listed = append(listed, newerListed...)
-		stored, err := storeProjectStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, answer, slowStarted, lookup.inputs, localMajor, global.version)
+		stored, err := storeProjectStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, answer, slowStarted, lookup.inputs, localMajor, localVersion, global.version)
 		if err != nil {
 			return tscAnswer{}, err
 		}
@@ -757,6 +758,7 @@ type tscStatFingerprint struct {
 	AnswerKey     string        `json:"answerKey"`
 	Answer        *tscAnswer    `json:"answer,omitempty"`
 	LocalMajor    int           `json:"localMajor,omitempty"`
+	LocalVersion  string        `json:"localVersion,omitempty"`
 	GlobalVersion string        `json:"globalVersion,omitempty"`
 	ConfigFiles   []string      `json:"configFiles,omitempty"`
 	Files         []tscFileStat `json:"files"`
@@ -1097,6 +1099,7 @@ type tscStatLookup struct {
 	reuseBuildInfo bool
 	inputs         *tscStatFingerprint
 	localMajor     int
+	localVersion   string
 	globalVersion  string
 	configKnown    bool
 	notStrict      []string
@@ -1135,6 +1138,7 @@ func statCachedAnswer(identity, tscPaths []string) (tscStatLookup, error) {
 		lookup := tscStatLookup{status: tscStatStale, reuseBuildInfo: reuse, inputs: refreshTscInputs(fingerprint)}
 		if !compilerChanged {
 			lookup.localMajor = fingerprint.LocalMajor
+			lookup.localVersion = fingerprint.LocalVersion
 			lookup.globalVersion = fingerprint.GlobalVersion
 		}
 		if !configChanged && len(fingerprint.ConfigFiles) > 0 && fingerprint.Answer != nil {
@@ -1343,7 +1347,7 @@ func storeStatFingerprintIfStable(identity, tscPaths []string, config string, li
 	return tscCache.Store(statFingerprintKey(identity), after)
 }
 
-func storeProjectStatFingerprintIfStable(identity, tscPaths []string, config string, listed []byte, answer tscAnswer, slowStarted time.Time, before *tscStatFingerprint, localMajor int, globalVersion string) (bool, error) {
+func storeProjectStatFingerprintIfStable(identity, tscPaths []string, config string, listed []byte, answer tscAnswer, slowStarted time.Time, before *tscStatFingerprint, localMajor int, localVersion, globalVersion string) (bool, error) {
 	after, err := makeStatFingerprint(tscPaths, config, listed, "")
 	if err != nil {
 		slog.Debug("cannot save a tsc input fingerprint", "error", err)
@@ -1363,6 +1367,7 @@ func storeProjectStatFingerprintIfStable(identity, tscPaths []string, config str
 	}
 	after.Answer = &answer
 	after.LocalMajor = localMajor
+	after.LocalVersion = localVersion
 	after.GlobalVersion = globalVersion
 	if err := tscCache.Store(statFingerprintKey(identity), after); err != nil {
 		return false, err
