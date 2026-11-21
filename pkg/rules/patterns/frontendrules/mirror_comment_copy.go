@@ -26,6 +26,9 @@ func NewMirrorCommentCopyRule() *MirrorCommentCopyRule {
 }
 
 var mirrorPhrase = regexp.MustCompile(`(?i:\bcop(?:y|ied)\s+from\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bported\s+from\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bduplicated\s+from\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bmirrors?\s+(?:the\s+(?:table|list)\s+in|the\s+values\s+of)\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bmirrors?\s+(?:of\s+)?(?:(?:the|a|an)\s+)?(?:backend|back-end|server)\b|\bmirrors?\s+(?:of\s+)?[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bkeep\s+in\s+sync\s+with\s+(?:(?:the|a|an)\s+)?(?:backend|back-end|server)\b|\bkeep\s+in\s+sync\s+with\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bmust\s+match\s+(?:(?:the|a|an)\s+)?(?:backend|back-end|server)\b|\bmust\s+match\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bsame\s+as\s+(?:(?:the|a|an)\s+)?(?:backend|back-end|server)\b|\bsame\s+as\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bcopy\s+of\s+(?:(?:the|a|an)\s+)?(?:backend|back-end|server)\b|\bcopy\s+of\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|\bcopy\s+of\s+Go\s+(?:code|function|constant|type|value)\b|держать\s+в\s+синхроне\s+(?:backend|server|бэкенд|сервер)|зеркал[\pL]*\s+(?:backend|back-end|server|Go|бэкенд|сервер)|зеркал[\pL]*\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|копи[яиюей]\s+(?:backend|server|бэкенд|сервер)|копи[яиюей]\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*|дублиру[\pL]*\s+(?:backend|back-end|server|Go|бэкенд|сервер)|дублиру[\pL]*\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)`)
+
+// Every mirrorPhrase alternative contains one of these case-folded stems.
+var mirrorPhraseNeedles = []string{"cop", "ported", "duplicated", "mirror", "keep", "must", "same", "держать", "зеркал", "копи", "дублиру"}
 var mirrorCodeSource = regexp.MustCompile(`(?i:\b(?:backend|back-end|server|сервер|бэкенд|бэкэнд|go)\b|\b[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\b|\b(?:src|pkg|internal|models|constants)/[\w./-]+)`)
 var mirrorLiteralInitializer = regexp.MustCompile(`(?s)^\s*(?:['"\x60][^'"\x60]*['"\x60]|-?\d+(?:\.\d+)?|true|false|null|\[[\s\w$:'"\x60,.-]*\]|\{[\s\w$:'"\x60,.-]*\})\s*;?\s*$`)
 
@@ -40,6 +43,14 @@ var mirrorExplanatory = regexp.MustCompile(`(?i)returns?\s+(?:a\s+)?copy\s+of\b|
 
 var mirrorVariableDecl = regexp.MustCompile(`^(?:(?:export|default|declare)\s+)*(?:const|let|var)\b|^(?:var|const)\s+[A-Za-z_][A-Za-z0-9_]*\b`)
 var mirrorDecl = regexp.MustCompile(`^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:const|let|var|function|type|interface|class)\b|^(?:func\s+(?:\([^)]*\)\s*)?[A-Za-z_][A-Za-z0-9_]*\s*\(|(?:var|const|type)\s+[A-Za-z_][A-Za-z0-9_]*\b)`)
+
+func mirrorDeclaration(line string) bool {
+	return helpers.ContainsAny(line, []string{"const", "let", "var", "function", "type", "interface", "class", "func"}) && mirrorDecl.MatchString(strings.TrimSpace(line))
+}
+
+func mirrorCommentMatchesPhrase(comment string) bool {
+	return helpers.ContainsAny(helpers.FoldLower(comment), mirrorPhraseNeedles) && !mirrorExplanatory.MatchString(comment) && mirrorPhrase.MatchString(comment)
+}
 
 func mirrorInitializer(line string) string {
 	if i := strings.IndexByte(line, '='); i >= 0 && !strings.Contains(line, "==") {
@@ -84,7 +95,7 @@ func (r *MirrorCommentCopyRule) AnalyzeFile(c *core.FileContext) []*core.Violati
 	}
 	var out []*core.Violation
 	for i, line := range lines {
-		if !mirrorDecl.MatchString(strings.TrimSpace(line)) {
+		if !mirrorDeclaration(line) {
 			continue
 		}
 		if i == 0 {
@@ -99,7 +110,7 @@ func (r *MirrorCommentCopyRule) AnalyzeFile(c *core.FileContext) []*core.Violati
 			start--
 		}
 		comment := mirrorDataFile.ReplaceAllString(mirrorGitFileCopy.ReplaceAllString(strings.Join(c.Lines[start:i], " "), "file version"), "file")
-		if mirrorExplanatory.MatchString(comment) || !mirrorPhrase.MatchString(comment) {
+		if !mirrorCommentMatchesPhrase(comment) {
 			continue
 		}
 		if !mirrorCodeSource.MatchString(comment) {

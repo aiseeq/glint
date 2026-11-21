@@ -73,6 +73,16 @@ func TestJSTestExternalServiceHTTP(t *testing.T) {
 	assert.Empty(t, jsLiveFindings(t, "src/rates.ts", code, ""), "not a test file")
 }
 
+func TestJSTestExternalServiceLiteralPrefilterKeepsCallAlternatives(t *testing.T) {
+	code := `test('service', async () => {
+  await request('https://api.vendor.io/check')
+  spawn('git clone https://code.vendor.io/repo')
+  await query('/local/path')
+})
+`
+	assert.Equal(t, []int{2, 3}, jsLiveFindings(t, "src/service.test.ts", code, ""))
+}
+
 // A test that skips at once unless a dedicated env flag is set is an explicit
 // opt-in, as in Go: the calls the gate covers are not reported. A flag the
 // project's .env sets is open in every run and covers nothing.

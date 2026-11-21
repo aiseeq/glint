@@ -715,19 +715,25 @@ func (r *MissingAmountCoercedToZeroRule) metricFallbackViolations(ctx *core.File
 			"Missing metric "+last+" shown as 0 — the result presents an unknown value as a measured zero",
 			"Keep the metric missing, or show an explicit unavailable value")
 	}
-	for _, match := range jsMetricFallback.FindAllStringSubmatchIndex(f.Text, -1) {
-		addMetric(match[0], match[1], f.Code[match[2]:match[3]])
-	}
-	for _, match := range jsMetricTernary.FindAllStringSubmatchIndex(f.Text, -1) {
-		condition := strings.ReplaceAll(strings.TrimSpace(f.Code[match[2]:match[3]]), "?.", ".")
-		value := strings.ReplaceAll(strings.TrimSpace(f.Code[match[4]:match[5]]), "?.", ".")
-		if value != condition && !strings.HasPrefix(value, condition+".") {
-			continue
+	if strings.Contains(f.Text, "??") || strings.Contains(f.Text, "||") {
+		for _, match := range jsMetricFallback.FindAllStringSubmatchIndex(f.Text, -1) {
+			addMetric(match[0], match[1], f.Code[match[2]:match[3]])
 		}
-		addMetric(match[0], match[1], f.Code[match[4]:match[5]])
 	}
-	for _, match := range jsMetricParserFallback.FindAllStringSubmatchIndex(f.Text, -1) {
-		addMetric(match[0], match[1], f.Code[match[2]:match[3]])
+	if strings.Contains(f.Text, "?") && strings.Contains(f.Text, ":") {
+		for _, match := range jsMetricTernary.FindAllStringSubmatchIndex(f.Text, -1) {
+			condition := strings.ReplaceAll(strings.TrimSpace(f.Code[match[2]:match[3]]), "?.", ".")
+			value := strings.ReplaceAll(strings.TrimSpace(f.Code[match[4]:match[5]]), "?.", ".")
+			if value != condition && !strings.HasPrefix(value, condition+".") {
+				continue
+			}
+			addMetric(match[0], match[1], f.Code[match[4]:match[5]])
+		}
+	}
+	if strings.Contains(f.Text, "??") || strings.Contains(f.Text, "||") {
+		for _, match := range jsMetricParserFallback.FindAllStringSubmatchIndex(f.Text, -1) {
+			addMetric(match[0], match[1], f.Code[match[2]:match[3]])
+		}
 	}
 	return violations
 }
