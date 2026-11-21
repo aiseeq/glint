@@ -36,6 +36,10 @@ var (
 	tsObjectDecl   = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b[^=]*=\s*\{`)
 	tsObjectKey    = regexp.MustCompile(`(?:^|[,\n])\s*(?:['"]([A-Za-z_$][\w$]*)['"]|([A-Za-z_$][\w$]*))\s*:`)
 	tsTemplateNull = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*null\b`)
+	tsTypeBody     = regexp.MustCompile(`(?s)\b(?:interface|type)\s+([A-Za-z_$][\w$]*)\s*(?:=\s*)?\{([^}]*)\}`)
+	tsRecordField  = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*:\s*Record\s*<\s*string\s*,`)
+	tsInlineObject = regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*:\s*\{([^}]*)\}`)
+	tsDestructure  = regexp.MustCompile(`(?:const|let|var)\s+\{[^}]*\}\s*=\s*$`)
 )
 
 // AnalyzeFile reports unchecked constant-key reads in production TS/JS. The
@@ -111,6 +115,12 @@ func (a *tsConstantReadAnalyzer) analyzeMatch(match []int) []*core.Violation {
 	if tsDerefAfter(a.file.Code, match[1]) {
 		return a.analyzeDirectRead(match[0], scope, base, key)
 	}
+	if tsDestructuredRead(scope.body, scope.localStart) {
+		if tsGuardedRead(scope.text, scope.localStart, base, key) || tsDestructuredFallback(scope.body, scope.localEnd) {
+			return nil
+		}
+		return a.report(match[0], "Dictionary key "+key+" may be absent, so destructuring reads an undefined value")
+	}
 	return a.analyzeAliasRead(scope, base, key)
 }
 
@@ -142,12 +152,13 @@ func (a *tsConstantReadAnalyzer) readScope(match []int) (tsReadScope, bool) {
 func (a *tsConstantReadAnalyzer) isDictionary(scope tsReadScope, base string) bool {
 	names := a.namesForScope(scope.cacheKey, scope.dictCode, a.ctx.VirtualJavaScript && scope.cacheKey[0] == 0)
 	root := strings.Split(base, ".")[0]
-	if names[root] {
+	if names[root] || names[base] {
 		return true
 	}
 	if a.ctx.VirtualJavaScript && scope.inFunction {
 		topKey := [2]int{0, a.topLevelEnd}
-		return a.namesForScope(topKey, a.file.Code[:a.topLevelEnd], true)[root]
+		topNames := a.namesForScope(topKey, a.file.Code[:a.topLevelEnd], true)
+		return topNames[root] || topNames[base]
 	}
 	return false
 }
@@ -214,6 +225,14 @@ func tsDictionaryTypes(code string) map[string]bool {
 	for _, match := range tsInterface.FindAllStringSubmatch(code, -1) {
 		types[match[1]] = true
 	}
+	for _, match := range tsTypeBody.FindAllStringSubmatch(code, -1) {
+		for _, field := range tsRecordField.FindAllStringSubmatch(match[2], -1) {
+			types[match[1]+"."+field[1]] = true
+		}
+	}
+	for _, field := range tsRecordField.FindAllStringSubmatch(code, -1) {
+		types["this."+field[1]] = true
+	}
 	return types
 }
 
@@ -228,6 +247,22 @@ func tsDictionaryNames(code string, templateScript bool, dictTypes map[string]bo
 	for _, match := range tsParamNamed.FindAllStringSubmatch(code, -1) {
 		if dictTypes[match[2]] {
 			names[match[1]] = true
+		}
+		prefix := match[2] + "."
+		for path := range dictTypes {
+			if after, ok := strings.CutPrefix(path, prefix); ok {
+				names[match[1]+"."+after] = true
+			}
+		}
+	}
+	for _, match := range tsInlineObject.FindAllStringSubmatch(code, -1) {
+		for _, field := range tsRecordField.FindAllStringSubmatch(match[2], -1) {
+			names[match[1]+"."+field[1]] = true
+		}
+	}
+	for path := range dictTypes {
+		if strings.HasPrefix(path, "this.") {
+			names[path] = true
 		}
 	}
 	for _, match := range tsJsonDecl.FindAllStringSubmatch(code, -1) {
@@ -284,18 +319,34 @@ func tsDerefAfter(code string, end int) bool {
 }
 
 func tsWrittenBefore(body string, pos int, base, key string) bool {
-	needle := base + "['" + key + "']"
 	prior := body[:pos]
-	idx := strings.LastIndex(prior, needle)
-	if idx < 0 {
-		needle = base + `["` + key + `"]`
-		idx = strings.LastIndex(prior, needle)
+	for _, quote := range []string{"'", `"`} {
+		needle := base + "[" + quote + key + quote + "]"
+		for from := 0; from < len(prior); {
+			rel := strings.Index(prior[from:], needle)
+			if rel < 0 {
+				break
+			}
+			idx := from + rel
+			after := strings.TrimSpace(prior[idx+len(needle):])
+			if strings.HasPrefix(after, "??=") || (strings.HasPrefix(after, "=") && !strings.HasPrefix(after, "==") && !strings.HasPrefix(after, ">")) {
+				return true
+			}
+			from = idx + len(needle)
+		}
 	}
-	if idx < 0 {
-		return false
-	}
-	after := strings.TrimSpace(prior[idx+len(needle):])
-	return strings.HasPrefix(after, "=") && !strings.HasPrefix(after, "==")
+	return false
+}
+
+func tsDestructuredRead(body string, pos int) bool {
+	lineStart := strings.LastIndexAny(body[:pos], ";\n") + 1
+	return tsDestructure.MatchString(body[lineStart:pos])
+}
+
+func tsDestructuredFallback(body string, end int) bool {
+	statementEnd := tsStatementEnd(body, end)
+	operator := compactJS(body[end:statementEnd])
+	return strings.HasPrefix(operator, "||") || strings.HasPrefix(operator, "??")
 }
 
 // tsGuardedRead accepts a guard only when the read is in the branch where the
@@ -320,10 +371,20 @@ func tsGuardedByIf(body string, pos int, base, key string, ifStart int) bool {
 	if pos >= branches.then.start && pos < branches.then.end && positive {
 		return true
 	}
-	if pos >= branches.then.end && negative && tsTerminates(body[branches.then.start:branches.then.end]) {
+	if pos >= branches.then.end && (negative || tsHasNegativeOrGuard(cond, base, key)) && tsTerminates(body[branches.then.start:branches.then.end]) {
 		return true
 	}
 	return branches.hasElse && pos >= branches.otherwise.start && pos < branches.otherwise.end && negative
+}
+
+func tsHasNegativeOrGuard(cond, base, key string) bool {
+	for term := range strings.SplitSeq(cond, "||") {
+		_, negative := tsGuardPolarity(term, base, key)
+		if negative {
+			return true
+		}
+	}
+	return false
 }
 
 type tsIfBranch struct{ start, end int }
@@ -383,6 +444,11 @@ func tsGuardedByShortCircuit(body string, pos int, base, key string) bool {
 	if strings.Contains(prefix, lookup+"&&") || strings.Contains(prefix, lookup+"?") || strings.Contains(prefix, lookup+"||") {
 		return true
 	}
+	baseExpr := compactJS(base)
+	if strings.Contains(prefix, "'"+key+"'in"+baseExpr+"&&") || strings.Contains(prefix, `"`+key+`"in`+baseExpr+"&&") ||
+		strings.Contains(prefix, lookup+"!==undefined&&") || strings.Contains(prefix, lookup+"!=undefined&&") {
+		return true
+	}
 	if strings.Contains(prefix, "typeof"+lookup) && strings.Contains(prefix, "&&") {
 		return true
 	}
@@ -395,35 +461,57 @@ func tsGuardPolarity(cond, base, key string) (bool, bool) {
 	b := compactJS(base)
 	forms := []string{b + "['" + key + "']", b + `["` + key + `"]`}
 	for _, lookup := range forms {
-		if cond == lookup {
-			return true, false
-		}
-		if strings.HasPrefix(cond, "!") && cond[1:] == lookup {
-			return false, true
-		}
-		if strings.HasPrefix(cond, "!(") && strings.HasSuffix(cond, ")") && cond[2:len(cond)-1] == lookup {
-			return false, true
-		}
-		if cond == lookup+"!==undefined" || cond == lookup+"!=undefined" || cond == lookup+"!==null" || cond == lookup+"!=null" {
-			return true, false
-		}
-		if cond == lookup+"===undefined" || cond == lookup+"==undefined" || cond == lookup+"===null" || cond == lookup+"==null" {
-			return false, true
+		if positive, negative, ok := tsLookupGuardPolarity(cond, lookup); ok {
+			return positive, negative
 		}
 	}
-	keyIn := "'" + key + "'in" + b
-	if cond == keyIn || cond == `"`+key+`"in`+b {
-		return true, false
+	if positive, negative, ok := tsKeyInGuardPolarity(cond, b, key); ok {
+		return positive, negative
+	}
+	return tsOwnGuardPolarity(cond, b, key)
+}
+
+func tsLookupGuardPolarity(cond, lookup string) (bool, bool, bool) {
+	if cond == lookup {
+		return true, false, true
+	}
+	if strings.HasPrefix(cond, "!") && cond[1:] == lookup {
+		return false, true, true
+	}
+	if strings.HasPrefix(cond, "!(") && strings.HasSuffix(cond, ")") && cond[2:len(cond)-1] == lookup {
+		return false, true, true
+	}
+	if cond == lookup+"!==undefined" || cond == lookup+"!=undefined" || cond == lookup+"!==null" || cond == lookup+"!=null" {
+		return true, false, true
+	}
+	if cond == lookup+"===undefined" || cond == lookup+"==undefined" || cond == lookup+"===null" || cond == lookup+"==null" {
+		return false, true, true
+	}
+	if cond == "typeof"+lookup+"===\"undefined\"" || cond == "typeof"+lookup+"==='undefined'" ||
+		cond == "typeof"+lookup+"==\"undefined\"" || cond == "typeof"+lookup+"=='undefined'" {
+		return false, true, true
+	}
+	return false, false, false
+}
+
+func tsKeyInGuardPolarity(cond, base, key string) (bool, bool, bool) {
+	keyIn := "'" + key + "'in" + base
+	if cond == keyIn || cond == `"`+key+`"in`+base {
+		return true, false, true
 	}
 	if strings.HasPrefix(cond, "!(") && strings.HasSuffix(cond, ")") {
 		inner := cond[2 : len(cond)-1]
-		if inner == keyIn || inner == `"`+key+`"in`+b {
-			return false, true
+		if inner == keyIn || inner == `"`+key+`"in`+base {
+			return false, true, true
 		}
 	}
-	objectHas := "Object.hasOwn(" + b + ",'" + key + "')"
-	keysHas := "Object.keys(" + b + ").includes('" + key + "')"
-	legacyHas := b + ".hasOwnProperty('" + key + "')"
+	return false, false, false
+}
+
+func tsOwnGuardPolarity(cond, base, key string) (bool, bool) {
+	objectHas := "Object.hasOwn(" + base + ",'" + key + "')"
+	keysHas := "Object.keys(" + base + ").includes('" + key + "')"
+	legacyHas := base + ".hasOwnProperty('" + key + "')"
 	if cond == objectHas || cond == keysHas || cond == legacyHas {
 		return true, false
 	}
@@ -447,6 +535,11 @@ func tsStatementEnd(body string, start int) int {
 
 func tsTerminates(stmt string) bool {
 	trimmed := strings.TrimSpace(stmt)
+	trimmed = strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(trimmed, "}"), "{"))
+	trimmed = strings.TrimSpace(strings.TrimSuffix(trimmed, ";"))
+	if end := strings.LastIndexAny(trimmed, ";\n"); end >= 0 {
+		trimmed = strings.TrimSpace(trimmed[end+1:])
+	}
 	return strings.HasPrefix(trimmed, "return") || strings.HasPrefix(trimmed, "throw")
 }
 
