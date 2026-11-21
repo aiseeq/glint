@@ -393,3 +393,124 @@ if ('BETA' in banks) { show(banks['BETA'].name) }
 	}
 	assert.Equal(t, []string{"templates/after.html:5"}, rulestest.ViolationPlaces(rule.AnalyzeFile(virtual[0])))
 }
+
+func TestTSConstantKeyReadUncheckedFourthPass(t *testing.T) {
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `type Item = { name: string }
+type Dict = { [key: string]: Item }
+interface Props { items: Readonly<Record<string, Item>> }
+const moduleDict: Dict = getDict()
+export function missing(m: Dict) {
+  return m['K']!.name // POS
+}
+
+export function nested(m: Dict) {
+  return (m['K'] as Item).name // POS
+}
+export function nestedKey(m: Dict) {
+  return m['K']['EU'].name // POS
+}
+export function templateKey(m: Dict) {
+	return m['K'].name // POS
+}
+export function optionalBase(m: Dict | undefined) {
+  return m?.['K'].name // POS
+}
+export function moduleRead() {
+  return moduleDict['K'].name // POS
+}
+export function callback(m: Dict) {
+  return ['K'].map(() => m['K'].name) // POS
+}
+export function savedDestructure(m: Dict) {
+  const p = m['K']
+  const { name } = p // POS
+  return name
+}
+export function protectedDouble(m: Dict) {
+  if (m["K"] && enabled) return m['K'].name
+  return ''
+}
+export function protectedInAnd(m: Dict) {
+  if ('K' in m && enabled) return m['K'].name
+  return ''
+}
+export function protectedTernary(m: Dict) {
+  return 'K' in m ? m['K'].name : ''
+}
+export function protectedContinue(m: Dict) {
+  while (!('K' in m)) continue
+  return m['K'].name
+}
+export function protectedElse(m: Dict) {
+  if (!('K' in m)) { log() } else { return m['K'].name }
+  return ''
+}
+export function protectedAlias(m: Dict) {
+  const p = m['K']
+  if (p !== undefined && enabled) return p.name
+  return ''
+}
+export function unprotectedAfterCheck(m: Dict) {
+  if ('K' in m) log()
+  return m['K'].name // POS
+}
+function enabled() { return true }
+function log() {}
+`
+	assert.Equal(t, []string{
+		"src/fourth.ts:10", "src/fourth.ts:13", "src/fourth.ts:16", "src/fourth.ts:19",
+		"src/fourth.ts:22", "src/fourth.ts:25", "src/fourth.ts:28", "src/fourth.ts:58", "src/fourth.ts:6",
+	}, patterntest.LinesOf(t, rule, "src/fourth.ts", source))
+}
+
+func TestTSConstantKeyReadUncheckedTemplateOuterGuardCallback(t *testing.T) {
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `<script>
+var banks = {{.Banks}};
+function guarded(xs) {
+  if (!('K' in banks)) return [];
+  return xs.map(function (x) { return banks['K'].fee * x; });
+}
+
+function unguarded(xs) {
+  return xs.map(function (x) { return banks['K'].fee * x; });
+}
+</script>`
+	virtual := core.ExtractTemplateJavaScript(rulestest.TextFile(t, "templates/callback.html", source))
+	if !assert.Len(t, virtual, 1) {
+		return
+	}
+	assert.Equal(t, []string{"templates/callback.html:9"}, rulestest.ViolationPlaces(rule.AnalyzeFile(virtual[0])))
+}
+
+func TestTSConstantKeyReadUncheckedFourthPassExpressionGuards(t *testing.T) {
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `interface Item { name: string }
+declare function load(): Record<string, Item>
+export function inferred() {
+  const values = load()
+  return values['K'].name // POS
+}
+export const arrow = (m: Record<string, Item>) => ('K' in m ? m['K'].name : '')
+export function keys(m: Record<string, Item>) {
+  return Object.keys(m).includes('K') && m['K'].name
+}
+export function own(m: Record<string, Item>) {
+  return Object.prototype.hasOwnProperty.call(m, 'K') && m['K'].name
+}
+export function jsx(m: Record<string, Item>) {
+  return <div>{'K' in m ? <b>{m['K'].name}</b> : null}</div>
+}
+`
+	assert.Equal(t, []string{"src/fourth-expressions.ts:5"}, patterntest.LinesOf(t, rule, "src/fourth-expressions.ts", source))
+}
