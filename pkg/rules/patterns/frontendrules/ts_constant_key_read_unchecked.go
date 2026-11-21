@@ -63,6 +63,10 @@ func (r *TSConstantKeyReadUncheckedRule) AnalyzeFile(ctx *core.FileContext) []*c
 		return nil
 	}
 	f := patternkit.NewJSFlat(ctx)
+	reads := tsConstKeyRead.FindAllStringSubmatchIndex(f.Code, -1)
+	if len(reads) == 0 {
+		return nil
+	}
 	globalCode := f.Code
 	if !ctx.VirtualJavaScript {
 		if first := tsFunctionDecl.FindStringIndex(f.Code); first != nil {
@@ -79,6 +83,7 @@ func (r *TSConstantKeyReadUncheckedRule) AnalyzeFile(ctx *core.FileContext) []*c
 		dictTypes:   dictTypes,
 		globalNames: globalNames,
 		dictNames:   make(map[[2]int]map[string]bool),
+		reads:       reads,
 	}
 	return analyzer.analyze()
 }
@@ -90,6 +95,7 @@ type tsConstantReadAnalyzer struct {
 	dictTypes   map[string]bool
 	globalNames map[string]bool
 	dictNames   map[[2]int]map[string]bool
+	reads       [][]int
 }
 
 type tsReadScope struct {
@@ -105,7 +111,7 @@ type tsReadScope struct {
 
 func (a *tsConstantReadAnalyzer) analyze() []*core.Violation {
 	var out []*core.Violation
-	for _, match := range tsConstKeyRead.FindAllStringSubmatchIndex(a.file.Code, -1) {
+	for _, match := range a.reads {
 		if violation := a.analyzeMatch(match); violation != nil {
 			out = append(out, violation...)
 		}
@@ -695,11 +701,13 @@ func tsGuardedByShortCircuit(body string, pos int, base, key string) bool {
 	// Short-circuit expressions protect their right operand, and || supplies a
 	// concrete fallback value for a saved lookup.
 	lineStart := strings.LastIndexAny(body[:pos], ";\n") + 1
-	if lineStart > 0 {
+	for lineStart > 0 {
 		prevLine := strings.TrimSpace(body[:lineStart-1])
-		if strings.HasSuffix(prevLine, "&&") {
-			lineStart = strings.LastIndexByte(body[:lineStart-1], '\n') + 1
+		currentPrefix := strings.TrimSpace(body[lineStart:pos])
+		if !strings.HasSuffix(prevLine, "&&") && !strings.HasPrefix(currentPrefix, "?") && !strings.HasPrefix(currentPrefix, ":") {
+			break
 		}
+		lineStart = strings.LastIndexByte(body[:lineStart-1], '\n') + 1
 	}
 	prefix := compactJS(body[lineStart:pos])
 	lookup := compactJS(base) + "['" + key + "']"
@@ -728,6 +736,9 @@ func tsGuardedByShortCircuit(body string, pos int, base, key string) bool {
 		cond := strings.TrimRight(prefix[:q], "( ")
 		if at := strings.LastIndex(cond, "return"); at >= 0 {
 			cond = cond[at+len("return"):]
+		}
+		if at := strings.LastIndex(cond, "typeof"); at >= 0 {
+			cond = cond[at:]
 		}
 		cond = strings.TrimLeft(cond, "{(<")
 		if positive, _ := tsConditionGuard(cond, base, key); positive {
@@ -784,11 +795,25 @@ func tsLookupGuardPolarity(cond, lookup string) (bool, bool, bool) {
 	if cond == lookup+"||=" || cond == lookup+"??=" {
 		return true, false, true
 	}
-	if cond == "typeof"+lookup+"==='undefined'" || cond == "typeof"+lookup+"=='undefined'" {
-		return false, true, true
-	}
-	if cond == "typeof"+lookup+"!=='undefined'" || cond == "typeof"+lookup+"!='undefined'" {
-		return true, false, true
+	typeofPrefix := "typeof" + lookup
+	if rest, ok := strings.CutPrefix(cond, typeofPrefix); ok {
+		for _, comparison := range []string{"===", "==", "!==", "!="} {
+			if !strings.HasPrefix(rest, comparison) {
+				continue
+			}
+			value := strings.TrimPrefix(rest, comparison)
+			if len(value) < 2 || value[0] != '\'' || value[len(value)-1] != '\'' {
+				break
+			}
+			isEqual := comparison == "===" || comparison == "=="
+			if value == "'undefined'" {
+				return !isEqual, isEqual, true
+			}
+			if value != "''" {
+				return isEqual, false, true
+			}
+			break
+		}
 	}
 	return false, false, false
 }
