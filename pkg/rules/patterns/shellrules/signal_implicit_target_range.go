@@ -112,13 +112,13 @@ func analyzeRangeObject(scope ast.Node, tracked map[types.Object]bool, info *typ
 	if depth >= 8 {
 		return rangeFlowResult{unknown: true}
 	}
-	propagated := propagateRangeObjects(scope, tracked, info)
+	propagated := propagateRangeObjects(scope, tracked, info, pkg)
 	result, handled := analyzeRangeCalls(scope, tracked, info, pkg, depth, stack)
 	markUnknownRangeUses(scope, tracked, propagated, handled, info, &result)
 	return result
 }
 
-func propagateRangeObjects(scope ast.Node, tracked map[types.Object]bool, info *types.Info) map[*ast.Ident]bool {
+func propagateRangeObjects(scope ast.Node, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage) map[*ast.Ident]bool {
 	propagated := make(map[*ast.Ident]bool)
 	for changed := true; changed; {
 		changed = false
@@ -126,10 +126,15 @@ func propagateRangeObjects(scope ast.Node, tracked map[types.Object]bool, info *
 			switch n := n.(type) {
 			case *ast.AssignStmt:
 				for _, rhs := range n.Rhs {
-					if !rangeExprDepends(rhs, tracked, info) {
-						continue
-					}
+					depends := rangeExprDepends(rhs, tracked, info)
 					for _, lhs := range n.Lhs {
+						if handled, updated := propagateRangeValueReceiverWrite(scope, lhs, rhs, depends, tracked, info, pkg, propagated); handled {
+							changed = changed || updated
+							continue
+						}
+						if !depends {
+							continue
+						}
 						var obj types.Object
 						switch lhs := ast.Unparen(lhs).(type) {
 						case *ast.Ident:
@@ -185,6 +190,90 @@ func propagateRangeObjects(scope ast.Node, tracked map[types.Object]bool, info *
 	return propagated
 }
 
+func propagateRangeValueReceiverWrite(scope ast.Node, lhs, rhs ast.Expr, depends bool, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, propagated map[*ast.Ident]bool) (bool, bool) {
+	field, ok := rangeValueReceiverFieldWrite(scope, lhs, info, pkg)
+	if !ok {
+		return false, false
+	}
+	updated := depends && !tracked[field]
+	if depends {
+		tracked[field] = true
+	}
+	ast.Inspect(rhs, func(child ast.Node) bool {
+		if use, ok := child.(*ast.Ident); ok && tracked[info.Uses[use]] {
+			propagated[use] = true
+		}
+		return true
+	})
+	return true, updated
+}
+
+func rangeValueReceiverFieldWrite(scope ast.Node, lhs ast.Expr, info *types.Info, pkg *signalPackage) (types.Object, bool) {
+	selector, ok := ast.Unparen(lhs).(*ast.SelectorExpr)
+	if !ok {
+		return nil, false
+	}
+	receiver, ok := ast.Unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return nil, false
+	}
+	for _, file := range pkg.files {
+		for _, decl := range file.Decls {
+			function, ok := decl.(*ast.FuncDecl)
+			if !ok || function.Body != scope || function.Recv == nil || len(function.Recv.List) == 0 || len(function.Recv.List[0].Names) == 0 {
+				continue
+			}
+			if info.Defs[function.Recv.List[0].Names[0]] != info.Uses[receiver] || rangePointerReceiver(function) {
+				return nil, false
+			}
+			field := info.Uses[selector.Sel]
+			return field, field != nil
+		}
+	}
+	return nil, false
+}
+
+func rangeValueReceiverWrittenFields(body ast.Node, info *types.Info, pkg *signalPackage) map[types.Object]bool {
+	var method *ast.FuncDecl
+	for _, file := range pkg.files {
+		for _, decl := range file.Decls {
+			function, ok := decl.(*ast.FuncDecl)
+			if ok && function.Body == body {
+				method = function
+				break
+			}
+		}
+	}
+	if method == nil || method.Recv == nil || rangePointerReceiver(method) || len(method.Recv.List) == 0 || len(method.Recv.List[0].Names) == 0 {
+		return nil
+	}
+	receiver := info.Defs[method.Recv.List[0].Names[0]]
+	written := make(map[types.Object]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		var lhs []ast.Expr
+		switch statement := n.(type) {
+		case *ast.AssignStmt:
+			lhs = statement.Lhs
+		case *ast.IncDecStmt:
+			lhs = []ast.Expr{statement.X}
+		}
+		for _, expression := range lhs {
+			selector, ok := ast.Unparen(expression).(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			base, ok := ast.Unparen(selector.X).(*ast.Ident)
+			if ok && info.Uses[base] == receiver {
+				if field := info.Uses[selector.Sel]; field != nil {
+					written[field] = true
+				}
+			}
+		}
+		return true
+	})
+	return written
+}
+
 func analyzeRangeCalls(scope ast.Node, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool) (rangeFlowResult, map[*ast.Ident]bool) {
 	result := rangeFlowResult{}
 	handled := make(map[*ast.Ident]bool)
@@ -218,19 +307,13 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 			for object := range receiverFields {
 				bodyTracked[object] = true
 			}
-			markRangeUses(body, tracked, info, handled)
-			nested := analyzeRangeObject(body, bodyTracked, info, pkg, depth+1, stack)
-			result.executes = result.executes || nested.executes
-			result.unknown = result.unknown || nested.unknown
+			bodies := []ast.Node{body}
 			for _, receiverBody := range receiverBodies {
-				if receiverBody == body {
-					continue
+				if receiverBody != body {
+					bodies = append(bodies, receiverBody)
 				}
-				markRangeUses(receiverBody, tracked, info, handled)
-				nested = analyzeRangeObject(receiverBody, bodyTracked, info, pkg, depth+1, stack)
-				result.executes = result.executes || nested.executes
-				result.unknown = result.unknown || nested.unknown
 			}
+			analyzeRangeReceiverBodies(bodies, bodyTracked, tracked, info, pkg, depth, stack, handled, result)
 			return
 		}
 	}
@@ -255,6 +338,35 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 		analyzeProjectRangeCall(call, dependent, fn, info, pkg, depth, stack, result)
 		return
 	}
+	result.unknown = true
+}
+
+func analyzeRangeReceiverBodies(bodies []ast.Node, bodyTracked, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool, handled map[*ast.Ident]bool, result *rangeFlowResult) {
+	anyExecutes := false
+	for range 8 {
+		before := len(bodyTracked)
+		pass := rangeFlowResult{}
+		for index, body := range bodies {
+			markRangeUses(body, tracked, info, handled)
+			receiverTracked := bodyTracked
+			if index > 0 && len(rangeValueReceiverWrittenFields(body, info, pkg)) != 0 {
+				receiverTracked = make(map[types.Object]bool, len(bodyTracked))
+				for object := range bodyTracked {
+					receiverTracked[object] = true
+				}
+			}
+			nested := analyzeRangeObject(body, receiverTracked, info, pkg, depth+1, stack)
+			pass.executes = pass.executes || nested.executes
+			pass.unknown = pass.unknown || nested.unknown
+		}
+		anyExecutes = anyExecutes || pass.executes
+		if len(bodyTracked) == before {
+			result.executes = result.executes || anyExecutes
+			result.unknown = result.unknown || pass.unknown
+			return
+		}
+	}
+	result.executes = result.executes || anyExecutes
 	result.unknown = true
 }
 
@@ -499,12 +611,41 @@ func markUnknownRangeUses(scope ast.Node, tracked map[types.Object]bool, propaga
 		if !ok || !tracked[info.Uses[id]] || propagated[id] || handled[id] {
 			return true
 		}
+		if rangeIdentIsAssignmentTarget(id, scope) {
+			return true
+		}
 		if rangeIdentInEquality(id, scope, tracked, info) {
 			return true
 		}
 		result.unknown = true
 		return true
 	})
+}
+
+func rangeIdentIsAssignmentTarget(target *ast.Ident, scope ast.Node) bool {
+	isTarget := false
+	ast.Inspect(scope, func(n ast.Node) bool {
+		if isTarget {
+			return false
+		}
+		assignment, ok := n.(*ast.AssignStmt)
+		if !ok || assignment.Tok != token.ASSIGN && assignment.Tok != token.DEFINE {
+			return true
+		}
+		for _, expression := range assignment.Lhs {
+			switch lhs := ast.Unparen(expression).(type) {
+			case *ast.Ident:
+				isTarget = lhs == target
+			case *ast.SelectorExpr:
+				isTarget = lhs.Sel == target
+			}
+			if isTarget {
+				break
+			}
+		}
+		return !isTarget
+	})
+	return isTarget
 }
 
 func rangeEnclosingScope(file *ast.File, target *ast.RangeStmt) ast.Node {
@@ -862,7 +1003,6 @@ func receiverMethodOnlyReadsFields(decl *ast.FuncDecl, info *types.Info, pkg *si
 	if receiver == nil || receiverType == nil {
 		return false
 	}
-
 	called := make(map[*ast.SelectorExpr]bool)
 	ast.Inspect(decl.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -893,6 +1033,14 @@ func receiverMethodOnlyReadsFields(decl *ast.FuncDecl, info *types.Info, pkg *si
 		return only
 	})
 	return only
+}
+
+func rangePointerReceiver(decl *ast.FuncDecl) bool {
+	if decl == nil || decl.Recv == nil || len(decl.Recv.List) == 0 {
+		return false
+	}
+	_, pointer := ast.Unparen(decl.Recv.List[0].Type).(*ast.StarExpr)
+	return pointer
 }
 
 func receiverSelectorOnlyReadsFields(selector *ast.SelectorExpr, receiver types.Object, receiverType types.Type, called bool, info *types.Info, pkg *signalPackage, fields map[types.Object]bool, visited map[*types.Func]bool, bodies *[]ast.Node) (bool, bool) {

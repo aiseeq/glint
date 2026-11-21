@@ -1409,3 +1409,63 @@ func TestTable(t *testing.T) {
 	}
 	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
 }
+
+func TestSignalImplicitTargetMethodValueReceiverFixedPointAndCopies(t *testing.T) {
+	source := `package sample
+import (
+	"os/exec"
+	"strings"
+	"testing"
+)
+type rec struct{ cmd, script string; ptr *string }
+func (k *rec) prep(t *testing.T) { k.script = k.cmd }
+func (k *rec) runScript(t *testing.T) { _ = exec.Command("sh", "-c", k.script).Run() }
+func (k *rec) deferRun(t *testing.T) { defer k.runScript(t); k.prep(t) }
+func (k rec) vprep(t *testing.T) { k.script = k.cmd }
+func (k rec) vrun(t *testing.T) { _ = exec.Command("sh", "-c", k.script).Run() }
+func (k rec) vboth(t *testing.T) { k.vprep(t); k.vrun(t) }
+func (k rec) shellIt(t *testing.T) { _ = exec.Command("sh", "-c", k.cmd).Run() }
+func (k rec) overwrite(t *testing.T) { k.cmd = "echo safe"; k.shellIt(t) }
+func (k rec) selfCopy(t *testing.T) { k.script = k.cmd; _ = exec.Command("sh", "-c", k.script).Run() }
+func (k rec) trimmed(t *testing.T) { k.cmd = strings.TrimSpace(k.cmd); _ = exec.Command("sh", "-c", k.cmd).Run() }
+func (k rec) trimCall(t *testing.T) { k.cmd = strings.TrimSpace(k.cmd); k.shellIt(t) }
+func (k rec) runCopy(t *testing.T) { _ = exec.Command("sh", "-c", k.script).Run() }
+func (k rec) copyCall(t *testing.T) { k.script = k.cmd; k.runCopy(t) }
+func (k rec) mapWrite(t *testing.T) { m := map[string]int{}; m[k.cmd] = 1 }
+func (k rec) pointerWrite(t *testing.T) { *k.ptr = "echo safe" }
+type wr struct{ cmd, script string }
+func (k wr) runThenReset(t *testing.T) { _ = exec.Command("sh", "-c", k.cmd).Run(); k.cmd = "echo done" }
+func (k wr) shell(t *testing.T) { _ = exec.Command("sh", "-c", k.cmd).Run() }
+func (k wr) callThenReset(t *testing.T) { k.shell(t); k.cmd = "echo done" }
+func (k *wr) pRunThenReset(t *testing.T) { _ = exec.Command("sh", "-c", k.cmd).Run(); k.cmd = "echo done" }
+func TestTable(t *testing.T) {
+	for _, s := range []string{"kill -9 $PPID"} { k := rec{cmd: s}; t.Run("pointer", k.deferRun) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("value-copy", rec{cmd: s}.vboth) }
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("value-overwrite", rec{cmd: s}.overwrite) } // WANT
+	for _, s := range []string{"kill -9 $PPID"} { t.Run("value-self-copy-L", rec{cmd: s}.selfCopy) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("value-self-copy-N", rec{cmd: s}.selfCopy) } // WANT
+	for _, s := range []string{"kill -9 $PPID"} { t.Run("value-trim-L", rec{cmd: s}.trimmed) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("value-trim-N", rec{cmd: s}.trimmed) } // WANT
+	for _, s := range []string{"kill -9 $PPID"} { t.Run("value-trim-call-L", rec{cmd: s}.trimCall) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("value-trim-call-N", rec{cmd: s}.trimCall) } // WANT
+	for _, s := range []string{"kill -9 $PPID"} { t.Run("value-copy-call-L", rec{cmd: s}.copyCall) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("value-copy-call-N", rec{cmd: s}.copyCall) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("map-key-read", rec{cmd: s}.mapWrite) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("deref-target-read", rec{ptr: &s}.pointerWrite) } // WANT
+	for _, s := range []string{"kill -9 $PPID"} { t.Run("reset-L-value", wr{cmd: s}.runThenReset) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("reset-N-value", wr{cmd: s}.runThenReset) } // WANT
+	for _, s := range []string{"kill -9 $PPID"} { t.Run("reset-L-call", wr{cmd: s}.callThenReset) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("reset-N-call", wr{cmd: s}.callThenReset) } // WANT
+	for _, s := range []string{"kill -9 $PPID"} { e := wr{cmd: s}; t.Run("reset-L-pointer", e.pRunThenReset) } // WANT
+	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { e := wr{cmd: s}; t.Run("reset-N-pointer", e.pRunThenReset) } // WANT
+}
+`
+	file, pkg := signalSourceTyped(t, "method_value_fixed_point_test.go", source)
+	var want []int
+	for i, line := range strings.Split(source, "\n") {
+		if strings.Contains(line, "// WANT") {
+			want = append(want, i+1)
+		}
+	}
+	assert.Equal(t, want, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+}
