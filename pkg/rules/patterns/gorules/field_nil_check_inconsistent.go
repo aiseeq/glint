@@ -105,6 +105,11 @@ func collectFieldNilMethods(file *core.FileContext, info *types.Info) []fieldNil
 
 func (r *FieldNilCheckInconsistentRule) analyzeMethods(methods []fieldNilMethod) []*core.Violation {
 	optional, softMethods := fieldNilOptionalFields(methods)
+	byReceiver := make(map[*types.TypeName][]fieldNilMethod)
+	for _, method := range methods {
+		byReceiver[method.recv.Obj()] = append(byReceiver[method.recv.Obj()], method)
+	}
+	nilSafeMethods := fieldNilNilSafeMethods(methods)
 	var violations []*core.Violation
 	fields := make([]*types.Var, 0, len(optional))
 	for field := range optional {
@@ -112,7 +117,8 @@ func (r *FieldNilCheckInconsistentRule) analyzeMethods(methods []fieldNilMethod)
 	}
 	sort.Slice(fields, func(i, j int) bool { return fields[i].Pos() < fields[j].Pos() })
 	for _, field := range fields {
-		violations = append(violations, r.analyzeField(methods, field, optional[field], softMethods[field])...)
+		receiverMethods := byReceiver[optional[field].recv.Obj()]
+		violations = append(violations, r.analyzeField(methods, receiverMethods, field, optional[field], softMethods[field], nilSafeMethods)...)
 	}
 	sort.SliceStable(violations, func(i, j int) bool {
 		if violations[i].File != violations[j].File {
@@ -166,18 +172,15 @@ func fieldNilOptionalFields(methods []fieldNilMethod) (map[*types.Var]fieldNilMe
 	return optional, softMethods
 }
 
-func (r *FieldNilCheckInconsistentRule) analyzeField(methods []fieldNilMethod, field *types.Var, checkedIn fieldNilMethod, softMethods map[*ast.FuncDecl]bool) []*core.Violation {
+func (r *FieldNilCheckInconsistentRule) analyzeField(methods, receiverMethods []fieldNilMethod, field *types.Var, checkedIn fieldNilMethod, softMethods map[*ast.FuncDecl]bool, nilSafeMethods map[*types.Func]bool) []*core.Violation {
 	unguarded := make(map[*ast.FuncDecl]ast.Node)
 	methodCalls := make(map[*ast.FuncDecl][]fieldNilCall)
 	boolGuards := fieldNilBoolGuardMethods(methods, field)
-	nilSafeMethods := fieldNilNilSafeMethods(methods)
-	for _, method := range methods {
-		if method.recv.Obj() != checkedIn.recv.Obj() {
-			continue
-		}
+	guardCandidates := fieldNilHardGuardCandidates(receiverMethods, field)
+	for _, method := range receiverMethods {
 		flow := &fieldNilFlow{
 			fieldNilMethod: method, field: field,
-			guardErrors:    fieldNilGuardErrors(method, methods, field),
+			guardErrors:    fieldNilGuardErrors(method, guardCandidates),
 			boolGuards:     boolGuards,
 			nilSafeMethods: nilSafeMethods,
 		}
@@ -1039,67 +1042,76 @@ func fieldNilBranchReturnsError(method fieldNilMethod, stmt ast.Stmt) bool {
 	return false
 }
 
-func fieldNilGuardErrors(method fieldNilMethod, methods []fieldNilMethod, field *types.Var) map[types.Object]bool {
-	guards := make(map[types.Object]bool)
-	recvName := fieldNilReceiverName(method.decl)
-	if recvName == "" {
-		return guards
-	}
+func fieldNilHardGuardCandidates(methods []fieldNilMethod, field *types.Var) map[types.Object]int {
+	candidates := make(map[types.Object]int)
+	errType := types.Universe.Lookup("error").Type()
 	for _, candidate := range methods {
-		if candidate.recv.Obj() != method.recv.Obj() || !fieldNilHasHardCheck(candidate, field) {
+		if !fieldNilHasHardCheck(candidate, field) {
 			continue
 		}
-		sigObj := candidate.info.Defs[candidate.decl.Name]
-		if sigObj == nil {
+		obj := candidate.info.Defs[candidate.decl.Name]
+		if obj == nil {
 			continue
 		}
-		sig, ok := sigObj.Type().(*types.Signature)
+		sig, ok := obj.Type().(*types.Signature)
 		if !ok || sig.Results() == nil {
 			continue
 		}
-		errType := types.Universe.Lookup("error").Type()
 		errIndex := -1
 		for i := 0; i < sig.Results().Len(); i++ {
 			if types.AssignableTo(sig.Results().At(i).Type(), errType) {
 				errIndex = i
 			}
 		}
-		if errIndex < 0 {
-			continue
+		if errIndex >= 0 {
+			candidates[obj] = errIndex
 		}
-		ast.Inspect(method.decl.Body, func(node ast.Node) bool {
-			assign, ok := node.(*ast.AssignStmt)
-			if !ok || errIndex >= len(assign.Lhs) {
-				return true
-			}
-			for _, rhs := range assign.Rhs {
-				call, ok := rhs.(*ast.CallExpr)
-				if !ok {
-					continue
-				}
-				selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-				if !ok || selector.Sel.Name != candidate.decl.Name.Name {
-					continue
-				}
-				id, ok := selector.X.(*ast.Ident)
-				if !ok || id.Name != recvName {
-					continue
-				}
-				selection := method.info.Selections[selector]
-				if selection == nil || selection.Obj() != sigObj {
-					continue
-				}
-				lhs, ok := assign.Lhs[errIndex].(*ast.Ident)
-				if !ok {
-					continue
-				}
-				if obj := method.info.ObjectOf(lhs); obj != nil {
-					guards[obj] = true
-				}
-			}
-			return true
-		})
 	}
+	return candidates
+}
+
+func fieldNilGuardErrors(method fieldNilMethod, candidates map[types.Object]int) map[types.Object]bool {
+	guards := make(map[types.Object]bool)
+	recvName := fieldNilReceiverName(method.decl)
+	if recvName == "" || len(candidates) == 0 {
+		return guards
+	}
+	ast.Inspect(method.decl.Body, func(node ast.Node) bool {
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, rhs := range assign.Rhs {
+			call, ok := rhs.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			id, ok := selector.X.(*ast.Ident)
+			if !ok || id.Name != recvName {
+				continue
+			}
+			selection := method.info.Selections[selector]
+			if selection == nil {
+				continue
+			}
+			errIndex, ok := candidates[selection.Obj()]
+			if !ok || errIndex >= len(assign.Lhs) {
+				continue
+			}
+			lhs, ok := assign.Lhs[errIndex].(*ast.Ident)
+			if !ok {
+				continue
+			}
+			if obj := method.info.ObjectOf(lhs); obj != nil {
+				guards[obj] = true
+			}
+		}
+		return true
+	})
 	return guards
 }
 
