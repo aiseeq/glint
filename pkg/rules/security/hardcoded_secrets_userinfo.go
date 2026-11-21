@@ -8,6 +8,10 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
+// envSecretKeyNeedles hold one of the words envTemplateSecret requires in
+// a key, lowered the way its (?i) folds them.
+var envSecretKeyNeedles = []string{"pass", "secret", "token", "api", "private"}
+
 // urlUserinfoPassword finds the password of scheme://user:password@host.
 var urlUserinfoPassword = regexp.MustCompile(`\b[A-Za-z][A-Za-z0-9+.-]*://[^\s:/@"'\x60]*:([^\s@/"'\x60]+)@[^\s"'\x60]`)
 
@@ -35,7 +39,7 @@ func credentialInLine(line string, envTemplate bool) string {
 		return ""
 	}
 	lowerLine := helpers.FoldLower(line)
-	if !strings.Contains(line, "=") || !(strings.Contains(lowerLine, "pass") || strings.Contains(lowerLine, "secret") || strings.Contains(lowerLine, "token") || strings.Contains(lowerLine, "api") || strings.Contains(lowerLine, "private")) {
+	if !strings.Contains(line, "=") || !helpers.ContainsAny(lowerLine, envSecretKeyNeedles) {
 		return ""
 	}
 	m := envTemplateSecret.FindStringSubmatch(strings.TrimSpace(line))
