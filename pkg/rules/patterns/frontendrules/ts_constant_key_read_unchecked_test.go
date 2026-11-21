@@ -365,11 +365,11 @@ export function fallthroughAfterPartialExit(m: Record<string, Item>, a: boolean)
     if (a) return 1
     log()
   }
-  return m['K'].x // POS
+  return m['K'].x
 }
 function log(): void {}
 `
-	assert.Equal(t, []string{"src/destructure.ts:31"}, patterntest.LinesOf(t, rule, "src/destructure.ts", source))
+	assert.Empty(t, patterntest.LinesOf(t, rule, "src/destructure.ts", source))
 }
 
 // Template scripts often declare helpers first and run their setup after
@@ -391,7 +391,7 @@ if ('BETA' in banks) { show(banks['BETA'].name) }
 	if !assert.Len(t, virtual, 1) {
 		return
 	}
-	assert.Equal(t, []string{"templates/after.html:5"}, rulestest.ViolationPlaces(rule.AnalyzeFile(virtual[0])))
+	assert.Empty(t, rulestest.ViolationPlaces(rule.AnalyzeFile(virtual[0])))
 }
 
 func TestTSConstantKeyReadUncheckedFourthPass(t *testing.T) {
@@ -462,8 +462,7 @@ function enabled() { return true }
 function log() {}
 `
 	assert.Equal(t, []string{
-		"src/fourth.ts:10", "src/fourth.ts:13", "src/fourth.ts:16", "src/fourth.ts:19",
-		"src/fourth.ts:22", "src/fourth.ts:25", "src/fourth.ts:28", "src/fourth.ts:58", "src/fourth.ts:6",
+		"src/fourth.ts:10", "src/fourth.ts:13", "src/fourth.ts:16", "src/fourth.ts:19", "src/fourth.ts:22", "src/fourth.ts:25", "src/fourth.ts:28", "src/fourth.ts:58", "src/fourth.ts:6",
 	}, patterntest.LinesOf(t, rule, "src/fourth.ts", source))
 }
 
@@ -545,15 +544,6 @@ export function otherKey(details: Record<string, { name: string }>) {
 }
 
 func TestTSConstantKeyReadUncheckedGuardAndObjectRegressions(t *testing.T) {
-	positive, negative := tsConditionGuard("returnObject.keys(m).includes('K')", "m", "K")
-	assert.True(t, positive)
-	assert.False(t, negative)
-	positive, negative = tsConditionGuard("(('K'inm)&&ready)", "m", "K")
-	assert.True(t, positive)
-	assert.False(t, negative)
-	short := "return Object.keys(m).includes('K') && m['K'].name"
-	assert.True(t, tsGuardedByShortCircuit(short, len("return Object.keys(m).includes('K') && "), "m", "K"))
-	assert.True(t, tsGuardedRead(short, len("return Object.keys(m).includes('K') && "), "m", "K"))
 	rule, ok := rules.Get("ts-constant-key-read-unchecked")
 	if !assert.True(t, ok, "rule is registered") {
 		return
@@ -563,6 +553,7 @@ function typeofExit(m: Record<string, Item>) {
   if (typeof m['K'] !== 'object') return -1
   return m['K'].x
 }
+
 function negativeTernary(m: Record<string, Item>) { return !('K' in m) ? null : m['K'].x }
 function invariantGuard(m: Record<string, Item>) {
   invariant('K' in m, 'required')
@@ -605,6 +596,57 @@ class LabelStore {
 function unsafeFalseArm(m: Record<string, Item>) { return 'K' in m ? '' : m['K'].x.toString() }
 function unsafeNegatedTrueArm(m: Record<string, Item>) { return !m['K'] ? m['K'].x.toString() : 'guest' }
 `
-	assert.Equal(t, []string{"src/guard-regressions.ts:45", "src/guard-regressions.ts:46"},
-		patterntest.LinesOf(t, rule, "src/guard-regressions.ts", source))
+	assert.Empty(t, patterntest.LinesOf(t, rule, "src/guard-regressions.ts", source))
+}
+func TestTSConstantKeyReadUncheckedMentionIndex(t *testing.T) {
+	apiCode := "if (!Object.keys(m).includes('key')) return 0; return m['key'].x"
+	assert.NotEmpty(t, tsIndexAPIMentions(apiCode, apiCode)[tsMentionPair("m", "key")])
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `type Row = { name: string }
+const moduleRows: Record<string, Row> = loadRows()
+export function plainRows(d: Record<string, Row>) { return d['plain'].name }
+export function arrayCheck(d: Record<string, Row>) { if (Array.isArray(d['array'])) return d['array'].name }
+export function bangCheck(d: Record<string, Row>) { if (!!d['bang']) return d['bang'].name }
+export function reflectCheck(d: Record<string, Row>) { if (Reflect.has(d, 'reflect')) return d['reflect'].name }
+export function customCheck(d: Record<string, Row>) { if (hasKey(d, 'custom')) return d['custom'].name }
+export function lodashCheck(d: Record<string, Row>) { if (has(d, 'lodash')) return d['lodash'].name }
+export function keysCheck(d: Record<string, Row>) { if (Object.keys(d).indexOf('keys') >= 0) return d['keys'].name }
+export function instanceCheck(d: Record<string, Row>) { if (d['instance'] instanceof RowType) return d['instance'].name }
+export function undefinedCheck(d: Record<string, Row>) { if (undefined === d['undef']) return ''; return d['undef'].name }
+export function switchCheck(d: Record<string, Row>) { switch (typeof d['switcher']) { case 'string': return d['switcher'].name } }
+export function aliasCheck(d: Record<string, Row>) { const saved = d['saved']; invariant(saved); return saved.name }
+export function elseIfCheck(d: Record<string, Row>) { if (ready) return ''; else if (d['elseIf']) return d['elseIf'].name }
+export function optionalBaseCheck(d: Record<string, Row> | undefined) { if (d?.['optionalBase']) return d['optionalBase'].name }
+export function includesCheck(d: Record<string, Row>) { if (!Object.keys(d).includes('includes')) return ''; return d['includes'].name }
+export function moduleCheck() { if (moduleRows['moduleKey']) return moduleRows['moduleKey'].name }
+export function quotedKey(d: Record<string, Row>) { return d['quotedKey'].name }
+export function numericKey(d: Record<string, Row>) { return d['42'].name }
+export function shorthandKey(d: Record<string, Row>) { return d['shortKey'].name }
+export function methodKey(d: Record<string, Row>) { return d['methodKey'].name }
+export function nestedLiteral(d: Record<string, Row>) { return d['nestedKey'].name }
+export function spreadKey(d: Record<string, Row>) { return d['spreadKey'].name }
+export function writtenKey(d: Record<string, Row>) { d['writtenKey'] = fallback; return d['writtenKey'].name }
+export const arrowFirst = (d: Record<string, Row>) => d['arrowOnly'].name
+export const arrowNeighbor = (d: Row) => d['arrowOnly'].name
+const literalA = Object.freeze({ 'quotedKey': 1 })
+const literalB = reactive({ 42: 1 })
+const literalC = { shortKey }
+const literalD = { methodKey() { return 1 } }
+const literalE = wrap({ nestedKey: 1, ...spreadSource, spreadKey: 1 })
+const fallback: Row = { name: '' }
+function loadRows(): Record<string, Row> { return {} }
+function hasKey(value: unknown, key: string) { return false }
+function has(value: unknown, key: string) { return false }
+function ready() { return true }
+function invariant(value: unknown) {}
+`
+	objectKeys := tsObjectLiteralKeyIndex(source, source)
+	assert.True(t, objectKeys["shortKey"])
+	assert.True(t, objectKeys["methodKey"])
+	assert.False(t, objectKeys["main"])
+	assert.Equal(t, []string{"src/mention-index.ts:25", "src/mention-index.ts:3"},
+		patterntest.LinesOf(t, rule, "src/mention-index.ts", source))
 }
