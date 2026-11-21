@@ -800,12 +800,13 @@ func (a *tsConstantReadAnalyzer) readScope(match []int) (tsReadScope, bool) {
 	}
 	if !inFunction {
 		if arrow := strings.LastIndex(a.file.Code[:match[0]], "=>"); arrow >= 0 {
-			boundary := strings.LastIndexAny(a.file.Code[:arrow], ";{}\n")
-			if arrow > boundary {
-				end := len(a.file.Code)
-				if rel := strings.IndexAny(a.file.Code[arrow+tsArrowTokenWidth:], ";\n"); rel >= 0 {
-					end = arrow + tsArrowTokenWidth + rel
-				}
+			end := len(a.file.Code)
+			if rel := strings.IndexAny(a.file.Code[arrow+tsArrowTokenWidth:], ";\n"); rel >= 0 {
+				end = arrow + tsArrowTokenWidth + rel
+			}
+			// An arrow body that ended before the read leaves the read at
+			// the top level.
+			if match[1] <= end {
 				start := arrow + tsArrowTokenWidth
 				headStart := strings.LastIndexAny(a.file.Code[:arrow], "\n;") + 1
 				scope.start, scope.end = start, end

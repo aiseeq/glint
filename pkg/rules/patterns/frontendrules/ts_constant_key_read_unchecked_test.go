@@ -650,3 +650,21 @@ function invariant(value: unknown) {}
 	assert.Equal(t, []string{"src/mention-index.ts:25", "src/mention-index.ts:3"},
 		patterntest.LinesOf(t, rule, "src/mention-index.ts", source))
 }
+
+// A module-level read on a line after an arrow function is not inside the
+// arrow's body: the rule once took that body as the read's scope and sliced
+// past its end.
+func TestTSConstantKeyReadUncheckedModuleReadAfterArrowLine(t *testing.T) {
+	rule, ok := rules.Get("ts-constant-key-read-unchecked")
+	if !assert.True(t, ok, "rule is registered") {
+		return
+	}
+	source := `export const pick = (x: number) => x
+const labels: Record<string, { title: string }> = load()
+const { title } = labels['save']
+export const shown = title
+export const twice = (x: number) => x * 2; const { other } = labels['other']
+`
+	assert.Equal(t, []string{"src/after-arrow.ts:3", "src/after-arrow.ts:5"},
+		patterntest.LinesOf(t, rule, "src/after-arrow.ts", source))
+}
