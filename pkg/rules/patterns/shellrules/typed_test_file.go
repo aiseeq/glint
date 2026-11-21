@@ -234,6 +234,9 @@ func loadedSignalImports(loaded []*core.GoPackageContext) map[string]*types.Pack
 	return result
 }
 
+// signalWarningOutput receives the warnings of the signal rules' typing.
+var signalWarningOutput io.Writer = os.Stderr
+
 var signalImporterOnce sync.Once
 var signalImporterValue types.Importer
 var signalStdPackages = struct {
@@ -257,8 +260,14 @@ func newSignalStdImporter() types.Importer {
 	if goroot == "" {
 		goroot, gorootErr = goEnvGOROOT()
 	}
+	var warnOnce sync.Once
 	return importer.ForCompiler(token.NewFileSet(), "gc", func(path string) (io.ReadCloser, error) {
 		if gorootErr != nil {
+			// The importer of signalImporter falls back to an empty package,
+			// so this is the only place the lost standard library shows.
+			warnOnce.Do(func() {
+				_, _ = fmt.Fprintf(signalWarningOutput, "warning: signal-implicit-target cannot import the standard library, so kill and signal calls are untyped: %v\n", gorootErr)
+			})
 			return nil, fmt.Errorf("go list -export %s: %w", path, gorootErr)
 		}
 		return goListExport(goroot, path)
