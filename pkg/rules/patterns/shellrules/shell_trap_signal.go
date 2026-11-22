@@ -94,6 +94,8 @@ func checkTrapSignalWithoutExit(r *shellRule, src *patternkit.ShellSource) []*co
 	}
 	file, err := syntax.NewParser().Parse(strings.NewReader(text), src.Ctx.Path)
 	if err != nil {
+		// Expected for a script outside the bash grammar (zsh, a template):
+		// without its syntax tree no trap handler can be followed.
 		return nil
 	}
 	funcs := make(map[string]*syntax.Stmt)
@@ -193,80 +195,96 @@ func trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool {
 // trapHandlerEffects finds flags and reset-then-reraise actions, following
 // locally defined functions with their statically known positional arguments.
 func trapHandlerEffects(action syntax.Node, funcs map[string]*syntax.Stmt) (uint8, map[string]bool, map[*syntax.Stmt]bool) {
-	flags := make(map[string]bool)
-	bodies := make(map[*syntax.Stmt]bool)
-	visiting := make(map[string]bool)
-	var reset, raised uint8
-	var visit func(syntax.Node, []string, map[string]bool)
-	visit = func(node syntax.Node, params []string, locals map[string]bool) {
-		syntax.Walk(node, func(n syntax.Node) bool {
-			switch x := n.(type) {
-			case *syntax.Subshell, *syntax.FuncDecl:
-				return false
-			case *syntax.UnaryArithm:
-				if x.Op == syntax.Inc || x.Op == syntax.Dec {
-					addArithmFlag(x.X, flags, locals)
-				}
-			case *syntax.BinaryArithm:
-				if x.Op >= syntax.Assgn && x.Op <= syntax.OrBoolAssgn {
-					addArithmFlag(x.X, flags, locals)
-				}
-			case *syntax.DeclClause:
-				for _, a := range x.Args {
-					if a.Name != nil && a.Value != nil && !locals[a.Name.Value] && (x.Variant.Value != "local") {
-						flags[a.Name.Value] = true
-					}
-				}
-			case *syntax.CallExpr:
-				if len(x.Args) == 0 {
-					for _, a := range x.Assigns {
-						if a.Name != nil && !locals[a.Name.Value] {
-							flags[a.Name.Value] = true
-						}
-					}
-					return true
-				}
-				args := x.Args
-				for len(args) > 0 && (wordLit(args[0]) == "builtin" || wordLit(args[0]) == "command") {
-					args = args[1:]
-				}
-				if len(args) == 0 {
-					return true
-				}
-				name := wordLit(args[0])
-				if name == "trap" && len(args) >= 3 {
-					operands := args[1:]
-					if wordLit(operands[0]) == "--" {
-						operands = operands[1:]
-					}
-					if len(operands) >= 2 && wordLit(operands[0]) == "-" {
-						for _, signal := range operands[1:] {
-							reset |= trapSignalMask(resolveHandlerWord(signal, params))
-						}
-					}
-				}
-				if name == "kill" {
-					if signal, target := handlerKill(args[1:], params); target {
-						raised |= reset & signal
-					}
-				}
-				if body, ok := funcs[name]; ok && !visiting[name] {
-					bodies[body] = true
-					nested := make([]string, len(args)-1)
-					for i, arg := range args[1:] {
-						nested[i] = resolveHandlerWord(arg, params)
-					}
-					visiting[name] = true
-					childLocals := handlerLocals(body, locals)
-					visit(body, nested, childLocals)
-					delete(visiting, name)
+	scan := &handlerScan{
+		funcs:    funcs,
+		flags:    make(map[string]bool),
+		bodies:   make(map[*syntax.Stmt]bool),
+		visiting: make(map[string]bool),
+	}
+	scan.visit(action, nil, nil)
+	return scan.raised, scan.flags, scan.bodies
+}
+
+// handlerScan holds what the walk of a trap handler has found so far.
+type handlerScan struct {
+	funcs         map[string]*syntax.Stmt
+	flags         map[string]bool
+	bodies        map[*syntax.Stmt]bool
+	visiting      map[string]bool
+	reset, raised uint8
+}
+
+func (s *handlerScan) visit(node syntax.Node, params []string, locals map[string]bool) {
+	syntax.Walk(node, func(n syntax.Node) bool {
+		switch x := n.(type) {
+		case *syntax.Subshell, *syntax.FuncDecl:
+			return false
+		case *syntax.UnaryArithm:
+			if x.Op == syntax.Inc || x.Op == syntax.Dec {
+				addArithmFlag(x.X, s.flags, locals)
+			}
+		case *syntax.BinaryArithm:
+			if x.Op >= syntax.Assgn && x.Op <= syntax.OrBoolAssgn {
+				addArithmFlag(x.X, s.flags, locals)
+			}
+		case *syntax.DeclClause:
+			for _, a := range x.Args {
+				if a.Name != nil && a.Value != nil && !locals[a.Name.Value] && (x.Variant.Value != "local") {
+					s.flags[a.Name.Value] = true
 				}
 			}
-			return true
-		})
+		case *syntax.CallExpr:
+			s.call(x, params, locals)
+		}
+		return true
+	})
+}
+
+// call records an assignment-only command as flags, a trap reset and a kill
+// that re-raises a reset signal, and follows a call of a local function.
+func (s *handlerScan) call(x *syntax.CallExpr, params []string, locals map[string]bool) {
+	if len(x.Args) == 0 {
+		for _, a := range x.Assigns {
+			if a.Name != nil && !locals[a.Name.Value] {
+				s.flags[a.Name.Value] = true
+			}
+		}
+		return
 	}
-	visit(action, nil, nil)
-	return raised, flags, bodies
+	args := x.Args
+	for len(args) > 0 && (wordLit(args[0]) == "builtin" || wordLit(args[0]) == "command") {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		return
+	}
+	name := wordLit(args[0])
+	if name == "trap" && len(args) >= 3 {
+		operands := args[1:]
+		if wordLit(operands[0]) == "--" {
+			operands = operands[1:]
+		}
+		if len(operands) >= 2 && wordLit(operands[0]) == "-" {
+			for _, signal := range operands[1:] {
+				s.reset |= trapSignalMask(resolveHandlerWord(signal, params))
+			}
+		}
+	}
+	if name == "kill" {
+		if signal, target := handlerKill(args[1:], params); target {
+			s.raised |= s.reset & signal
+		}
+	}
+	if body, ok := s.funcs[name]; ok && !s.visiting[name] {
+		s.bodies[body] = true
+		nested := make([]string, len(args)-1)
+		for i, arg := range args[1:] {
+			nested[i] = resolveHandlerWord(arg, params)
+		}
+		s.visiting[name] = true
+		s.visit(body, nested, handlerLocals(body, locals))
+		delete(s.visiting, name)
+	}
 }
 
 // Bash function locals are dynamically scoped: a called helper can see and
