@@ -49,6 +49,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	jobs := fs.String("j", "", "glint parallelism")
 	only := fs.String("only", "", "comma-separated project names")
 	remindOnly := fs.Bool("remind", false, "remind whether consumers were compared for this commit")
+	forceNoCache := fs.Bool("no-cache", false, "always run the new glint with --no-cache")
+	toolCaches := fs.String("tool-caches", "auto", "tool-cache policy: auto, on, or off")
+	toolCacheReason := fs.String("tool-cache-reason", "", "reason for a resolved tool-cache policy (internal for -via)")
 	hostPathsFile := fs.String("host-paths", "", "write the paths the comparison reads outside this tree to FILE, for worker pc (WORKER_PC_TREES), and compare nothing")
 	noMark := fs.Bool("no-mark", false, "write no run marker; print the result line a -via run marks by")
 	selfPathsFile := fs.String("self-paths", "", "write the paths glint on this tree reads outside it (the tree with its .git, the user config, tickets_dir) to FILE, for worker pc (WORKER_PC_TREES), and compare nothing")
@@ -63,6 +66,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if fs.NArg() != 0 {
 		_, _ = fmt.Fprintln(stderr, "consumers: unexpected arguments")
+		return 2
+	}
+	if *toolCaches != "auto" && *toolCaches != "on" && *toolCaches != "off" {
+		_, _ = fmt.Fprintf(stderr, "consumers: -tool-caches must be auto, on, or off; got %q\n", *toolCaches)
 		return 2
 	}
 	if *remindOnly {
@@ -115,9 +122,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		markerState = "partial"
 	}
 	if *via != "" {
-		return runVia(*via, passedFlags(fs), newAbs, stdout, stderr)
+		noCache, reason := chooseNewGlintPolicy(oldAbs, *forceNoCache, *toolCaches, *toolCacheReason)
+		mode := "on"
+		if noCache {
+			mode = "off"
+		}
+		viaFlags := passedFlags(fs)
+		viaFlags = append(viaFlags, "-tool-caches="+mode, "-tool-cache-reason="+reason)
+		return runVia(*via, viaFlags, newAbs, stdout, stderr)
 	}
-	return compareAll(cfg, targets, oldAbs, newAbs, *rules, *jobs, markerState, *noMark, stdout, stderr)
+	noCache, reason := chooseNewGlintPolicy(oldAbs, *forceNoCache, *toolCaches, *toolCacheReason)
+	return compareAll(cfg, targets, oldAbs, newAbs, *rules, *jobs, markerState, *noMark, noCache, reason, stdout, stderr)
 }
 
 // writeConsumerHostPaths writes the host paths of a comparison of targets with
@@ -180,7 +195,7 @@ func selectTargets(cfg config, only string) ([]string, error) {
 // compareAll compares the old and the new glint on every target and either
 // marks the commit (when HEAD, the tree and the new glint did not move) or,
 // with noMark, ends with the result line a -via run marks by.
-func compareAll(cfg config, targets []string, oldAbs, newAbs, rules, jobs, markerState string, noMark bool, stdout, stderr io.Writer) int {
+func compareAll(cfg config, targets []string, oldAbs, newAbs, rules, jobs, markerState string, noMark, noCache bool, reason string, stdout, stderr io.Writer) int {
 	newSum, err := fileSHA256(newAbs)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "consumers: new binary: %v\n", err)
@@ -191,6 +206,7 @@ func compareAll(cfg config, targets []string, oldAbs, newAbs, rules, jobs, marke
 		sent = snapshotHere(newAbs)
 	}
 	oldRuleNames, oldRulesErr := listRuleNames(oldAbs)
+	_, _ = fmt.Fprintf(stdout, "new glint: %s\n", reason)
 
 	userCache, err := os.UserCacheDir()
 	if err != nil {
@@ -203,7 +219,7 @@ func compareAll(cfg config, targets []string, oldAbs, newAbs, rules, jobs, marke
 	cacheBase := filepath.Join(userCache, "glint")
 	newCache := filepath.Join(cacheBase, "consumers-new")
 
-	diffs, errs, slowerByProject, newestRule := compareTargets(targets, oldAbs, newAbs, rules, jobs, newCache, cacheBase, oldRuleNames, stdout, stderr)
+	diffs, errs, slowerByProject, newestRule := compareTargets(targets, oldAbs, newAbs, rules, jobs, newCache, cacheBase, oldRuleNames, noCache, stdout, stderr)
 	printTimingComparison(stdout, slowerByProject, newestRule, oldRulesErr)
 	skipped := slices.Sorted(maps.Keys(cfg.skips))
 	_, _ = fmt.Fprintf(stdout, "%d projects, %d with differences, %d errors, skipped: %s\n", len(targets), diffs, errs, strings.Join(skipped, ", "))
@@ -221,13 +237,161 @@ func compareAll(cfg config, targets []string, oldAbs, newAbs, rules, jobs, marke
 	return 0
 }
 
-func compareTargets(targets []string, oldAbs, newAbs, rules, jobs, newCache, cacheBase string, oldRuleNames map[string]bool, stdout, stderr io.Writer) (int, int, []projectTimings, slowRule) {
+func chooseNewGlintPolicy(oldBin string, forceNoCache bool, mode, reason string) (bool, string) {
+	if forceNoCache {
+		return true, "--no-cache (-no-cache forced)"
+	}
+	switch mode {
+	case "on":
+		if reason == "" {
+			reason = "tool caches on (selected by -tool-caches=on)"
+		}
+		return false, reason
+	case "off":
+		if reason == "" {
+			reason = "--no-cache (-tool-caches=off)"
+		}
+		return true, reason
+	default:
+		return newGlintNoCache(oldBin, false)
+	}
+}
+
+// newGlintNoCache decides whether the new build must bypass tool caches. An
+// unknown old version falls back to the full uncached check.
+func newGlintNoCache(oldBin string, force bool) (bool, string) {
+	if force {
+		return true, "--no-cache (-no-cache forced)"
+	}
+	versionCmd := exec.Command(oldBin, "--version")
+	versionOut, err := versionCmd.Output()
+	if err != nil {
+		return true, fmt.Sprintf("--no-cache (old version unknown: %v)", err)
+	}
+	version := strings.TrimSpace(string(versionOut))
+	if version == "" {
+		return true, "--no-cache (old version unknown: empty --version output)"
+	}
+	fields := strings.Fields(version)
+	version = strings.TrimPrefix(fields[len(fields)-1], "version")
+	version = strings.TrimSpace(version)
+	repo, err := consumerGitValue(".", "--show-toplevel")
+	if err != nil || repo == "" {
+		if err == nil {
+			err = errors.New("git returned an empty repository root")
+		}
+		return true, fmt.Sprintf("--no-cache (old version unknown: find glint repository: %v)", err)
+	}
+	rev, err := glintRevision(repo, version)
+	if err != nil {
+		return true, fmt.Sprintf("--no-cache (old version unknown: %v)", err)
+	}
+	oldPackages, err := toolcachePackages(repo, rev)
+	if err != nil {
+		return true, fmt.Sprintf("--no-cache (old version unknown: %v)", err)
+	}
+	headPackages, err := toolcachePackages(repo, "HEAD")
+	if err != nil {
+		return true, fmt.Sprintf("--no-cache (old version unknown: %v)", err)
+	}
+	packageSet := make(map[string]bool, len(oldPackages)+len(headPackages))
+	for _, pkg := range append(oldPackages, headPackages...) {
+		packageSet[pkg] = true
+	}
+	packages := slices.Sorted(maps.Keys(packageSet))
+	args := []string{"diff", "--quiet", rev, "--"}
+	args = append(args, packages...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repo
+	err = cmd.Run()
+	if err == nil {
+		return false, fmt.Sprintf("tool caches on (%s..HEAD leaves %s untouched)", version, strings.Join(packages, ", "))
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		changed, listErr := changedToolcachePackages(repo, rev, packages)
+		if listErr != nil {
+			return true, fmt.Sprintf("--no-cache (old version unknown: %v)", listErr)
+		}
+		return true, fmt.Sprintf("--no-cache (%s..HEAD changes %s)", version, strings.Join(changed, ", "))
+	}
+	return true, fmt.Sprintf("--no-cache (old version unknown: git diff %s..HEAD: %v)", version, err)
+}
+
+func glintRevision(repo, version string) (string, error) {
+	version = strings.TrimSuffix(version, "-dirty")
+	try := func(ref string) (string, error) {
+		cmd := exec.Command("git", "rev-parse", "--verify", ref+"^{commit}")
+		cmd.Dir = repo
+		out, err := cmd.Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	if rev, err := try(version); err == nil && rev != "" {
+		return rev, nil
+	}
+	if i := strings.LastIndex(version, "-g"); i > 0 {
+		describe := version[:i]
+		if n := strings.LastIndex(describe, "-"); n > 0 {
+			count := describe[n+1:]
+			if _, err := strconv.Atoi(count); err == nil {
+				if rev, err := try(version[i+2:]); err == nil && rev != "" {
+					return rev, nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("cannot resolve old glint version %q to a commit in %s", version, repo)
+}
+
+func toolcachePackages(repo, rev string) ([]string, error) {
+	set := map[string]bool{"pkg/toolcache": true}
+	cmd := exec.Command("git", "grep", "-l", "-E", `toolcache\.New\(`, rev, "--", "pkg")
+	cmd.Dir = repo
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return nil, fmt.Errorf("find toolcache.New packages at %s: %w", rev, err)
+		}
+	}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		if _, path, ok := strings.Cut(line, ":"); ok && path != "" {
+			set[filepath.ToSlash(filepath.Dir(path))] = true
+		}
+	}
+	packages := slices.Sorted(maps.Keys(set))
+	return packages, nil
+}
+
+func changedToolcachePackages(repo, rev string, packages []string) ([]string, error) {
+	args := append([]string{"diff", "--name-only", rev, "--"}, packages...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repo
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list changed toolcache packages: %w", err)
+	}
+	changedSet := map[string]bool{}
+	for file := range strings.SplitSeq(string(out), "\n") {
+		if file == "" {
+			continue
+		}
+		for _, pkg := range packages {
+			if file == pkg || strings.HasPrefix(file, pkg+"/") {
+				changedSet[pkg] = true
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(changedSet)), nil
+}
+
+func compareTargets(targets []string, oldAbs, newAbs, rules, jobs, newCache, cacheBase string, oldRuleNames map[string]bool, noCache bool, stdout, stderr io.Writer) (int, int, []projectTimings, slowRule) {
 	diffs, errs := 0, 0
 	var slowerByProject []projectTimings
 	var newestRule slowRule
 	for _, p := range targets {
 		name := filepath.Base(p)
-		oldIssues, oldTimes, newIssues, newTimes, cacheErrs, err := compareProject(p, oldAbs, newAbs, rules, jobs, newCache, cacheBase, stdout, stderr)
+		oldIssues, oldTimes, newIssues, newTimes, cacheErrs, err := compareProject(p, oldAbs, newAbs, rules, jobs, newCache, cacheBase, noCache, stdout, stderr)
 		errs += cacheErrs
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, err)
@@ -242,8 +406,8 @@ func compareTargets(targets []string, oldAbs, newAbs, rules, jobs, newCache, cac
 			}
 			sort.Strings(ruleNames)
 			confirmationRules := strings.Join(ruleNames, ",")
-			_, confirmationNewTimes, confirmationNewErr := check(newAbs, p, confirmationRules, jobs, newCache)
-			_, confirmationOldTimes, confirmationOldErr := check(oldAbs, p, confirmationRules, jobs, "")
+			_, confirmationNewTimes, confirmationNewErr := checkWithFreshCache(newAbs, p, confirmationRules, jobs, cacheBase, "consumers-confirm-new-", noCache)
+			_, confirmationOldTimes, confirmationOldErr := checkWithFreshCache(oldAbs, p, confirmationRules, jobs, cacheBase, "consumers-confirm-old-", noCache)
 			if confirmationNewErr != nil {
 				_, _ = fmt.Fprintf(stderr, "%s (confirmation new): %s\n", name, confirmationNewErr)
 				errs++
@@ -290,13 +454,13 @@ func compareTargets(targets []string, oldAbs, newAbs, rules, jobs, newCache, cac
 }
 
 // compareProject runs the old glint on the project with a fresh result cache
-// of its own, the new one without a cache, and the new one again on the old
-// one's cache: the cache a release finds is the old version's, and a key that
-// misses an input shows as findings that differ from the run without it. The
-// old run fills an empty cache, so its findings are those of a run without
-// one; the cache is made here, so the cached run never depends on what this
-// machine's own cache holds. cacheErrs counts the cached run's failures.
-func compareProject(p, oldAbs, newAbs, rules, jobs, newCache, cacheBase string, stdout, stderr io.Writer) (oldIssues []output.JSONIssue, oldTimes map[string]time.Duration, newIssues []output.JSONIssue, newTimes map[string]time.Duration, cacheErrs int, err error) {
+// of its own, the new one with the selected tool-cache policy, and the new one
+// again on the old one's result cache. A key that misses an input shows as
+// findings that differ from the run without it. The old run fills an empty
+// cache, so its findings are those of a run without one; the cache is made
+// here, so the cached run never depends on what this machine's own cache
+// holds. cacheErrs counts the cached run's failures.
+func compareProject(p, oldAbs, newAbs, rules, jobs, newCache, cacheBase string, noCache bool, stdout, stderr io.Writer) (oldIssues []output.JSONIssue, oldTimes map[string]time.Duration, newIssues []output.JSONIssue, newTimes map[string]time.Duration, cacheErrs int, err error) {
 	name := filepath.Base(p)
 	if err := os.MkdirAll(cacheBase, 0o700); err != nil {
 		return nil, nil, nil, nil, 0, fmt.Errorf("create result cache directory: %w", err)
@@ -313,6 +477,19 @@ func compareProject(p, oldAbs, newAbs, rules, jobs, newCache, cacheBase string, 
 			cacheErrs++
 		}
 	}()
+	newResultCache := newCache
+	if !noCache {
+		newResultCache, err = os.MkdirTemp(cacheBase, "consumers-new-")
+		if err != nil {
+			return nil, nil, nil, nil, 0, fmt.Errorf("create the new glint's fresh result cache: %w", err)
+		}
+		defer func() {
+			if removeErr := os.RemoveAll(newResultCache); removeErr != nil {
+				_, _ = fmt.Fprintf(stderr, "%s (new cache cleanup): %s\n", name, removeErr)
+				cacheErrs++
+			}
+		}()
+	}
 	oldIssues, oldTimes, oldErr := checkWithCache(oldAbs, p, rules, jobs, oldCache, true)
 	oldKnowsRules := true
 	if errors.Is(oldErr, errUnknownRule) {
@@ -322,7 +499,7 @@ func compareProject(p, oldAbs, newAbs, rules, jobs, newCache, cacheBase string, 
 	if oldErr != nil {
 		return nil, nil, nil, nil, 0, oldErr
 	}
-	newIssues, newTimes, newErr := check(newAbs, p, rules, jobs, newCache)
+	newIssues, newTimes, newErr := checkNew(newAbs, p, rules, jobs, newResultCache, noCache)
 	if newErr != nil {
 		return nil, nil, nil, nil, 0, newErr
 	}
@@ -528,7 +705,7 @@ func fileSHA256(path string) (string, error) {
 func passedFlags(fs *flag.FlagSet) []string {
 	var args []string
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name != "via" && f.Name != "host-paths" {
+		if f.Name != "via" && f.Name != "host-paths" && f.Name != "tool-caches" && f.Name != "tool-cache-reason" {
 			args = append(args, "-"+f.Name+"="+f.Value.String())
 		}
 	})
@@ -698,9 +875,31 @@ func skipUnreadable(path, root string, err error) error {
 // given with -r.
 var errUnknownRule = errors.New("unknown rule")
 
-// check runs glint over dir; a non-empty cacheDir becomes its GLINT_CACHE_DIR.
-func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, map[string]time.Duration, error) {
-	return checkWithCache(bin, dir, rules, jobs, cacheDir, false)
+func checkNew(bin, dir, rules, jobs, cacheDir string, noCache bool) ([]output.JSONIssue, map[string]time.Duration, error) {
+	issues, report, err := runGlintWithNoCache(bin, dir, rules, jobs, cacheDir, noCache)
+	if err != nil {
+		return nil, nil, err
+	}
+	return issues, parseRuleTimings(report), nil
+}
+
+func checkWithFreshCache(bin, dir, rules, jobs, cacheBase, prefix string, noCache bool) ([]output.JSONIssue, map[string]time.Duration, error) {
+	if err := os.MkdirAll(cacheBase, 0o700); err != nil {
+		return nil, nil, fmt.Errorf("create result cache directory: %w", err)
+	}
+	cacheDir, err := os.MkdirTemp(cacheBase, prefix)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create fresh result cache: %w", err)
+	}
+	issues, timings, runErr := checkNew(bin, dir, rules, jobs, cacheDir, noCache)
+	if removeErr := os.RemoveAll(cacheDir); removeErr != nil {
+		if runErr == nil {
+			runErr = fmt.Errorf("remove fresh result cache: %w", removeErr)
+		} else {
+			runErr = fmt.Errorf("%w (remove fresh result cache: %v)", runErr, removeErr)
+		}
+	}
+	return issues, timings, runErr
 }
 
 func checkWithCache(bin, dir, rules, jobs, cacheDir string, useCache bool) ([]output.JSONIssue, map[string]time.Duration, error) {
@@ -714,8 +913,12 @@ func checkWithCache(bin, dir, rules, jobs, cacheDir string, useCache bool) ([]ou
 // runGlint runs glint check --timing over dir and returns its findings and its
 // stderr, where the timing report is.
 func runGlint(bin, dir, rules, jobs, cacheDir string, useCache bool) ([]output.JSONIssue, string, error) {
+	return runGlintWithNoCache(bin, dir, rules, jobs, cacheDir, !useCache)
+}
+
+func runGlintWithNoCache(bin, dir, rules, jobs, cacheDir string, noCache bool) ([]output.JSONIssue, string, error) {
 	args := []string{"check", "-o", "json", "--no-color", "--timing"}
-	if !useCache {
+	if noCache {
 		args = append(args, "--no-cache")
 	}
 	if rules != "" {

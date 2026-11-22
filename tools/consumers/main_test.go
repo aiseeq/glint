@@ -402,7 +402,16 @@ func TestRuleTimingParseAndThreshold(t *testing.T) {
 	}
 }
 
-func TestCompareTargetsReportsOnlyConfirmedSlowerRules(t *testing.T) {
+func TestConfirmationsUseFreshCachesAndSelectedNoCachePolicyNoCache(t *testing.T) {
+	assertConfirmationCachePolicy(t, true)
+}
+
+func TestConfirmationsUseFreshCachesWithToolCachesOnNoCache(t *testing.T) {
+	assertConfirmationCachePolicy(t, false)
+}
+
+func assertConfirmationCachePolicy(t *testing.T, noCache bool) {
+	t.Helper()
 	root := t.TempDir()
 	project := filepath.Join(root, "proj")
 	if err := os.MkdirAll(project, 0o755); err != nil {
@@ -423,7 +432,8 @@ func TestCompareTargetsReportsOnlyConfirmedSlowerRules(t *testing.T) {
 	}
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	var stdout, stderr strings.Builder
-	_, errs, projects, _ := compareTargets([]string{project}, old, newer, "", "", "", t.TempDir(), nil, &stdout, &stderr)
+	cacheBase := t.TempDir()
+	_, errs, projects, _ := compareTargets([]string{project}, old, newer, "", "", "", cacheBase, nil, noCache, &stdout, &stderr)
 	if errs != 0 {
 		t.Fatalf("errors = %d, stderr %q", errs, stderr.String())
 	}
@@ -436,8 +446,27 @@ func TestCompareTargetsReportsOnlyConfirmedSlowerRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lines := strings.Split(strings.TrimSpace(string(calls)), "\n"); len(lines) != 5 {
+	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	if len(lines) != 5 {
 		t.Fatalf("calls = %q, want full old/new, new on the old one's cache, then confirmation new/old", calls)
+	}
+	var confirmationDirs []string
+	for _, line := range lines[len(lines)-2:] {
+		fields := strings.SplitN(line, "|", 3)
+		if len(fields) != 3 || fields[1] == "" {
+			t.Fatalf("confirmation call = %q, want a fresh GLINT_CACHE_DIR", line)
+		}
+		gotNoCache := strings.Contains(" "+fields[2]+" ", " --no-cache ")
+		if gotNoCache != noCache {
+			t.Fatalf("confirmation call = %q, want --no-cache %v", line, noCache)
+		}
+		if _, err := os.Stat(fields[1]); !os.IsNotExist(err) {
+			t.Fatalf("confirmation cache %q was not removed after the check: %v", fields[1], err)
+		}
+		confirmationDirs = append(confirmationDirs, fields[1])
+	}
+	if confirmationDirs[0] == confirmationDirs[1] {
+		t.Fatalf("confirmation runs shared a cache directory: %q", confirmationDirs)
 	}
 }
 
@@ -449,7 +478,7 @@ counter=%q
 call=1
 if [ -f "$counter" ]; then call=2; fi
 touch "$counter"
-printf '%%s %%s\n' %q "$*" >> %q
+printf '%%s|%%s|%%s\n' %q "$GLINT_CACHE_DIR" "$*" >> %q
 case " $* " in *" --no-cache "*) ;; *) [ -z "$GLINT_CACHE_DIR" ] || : > "$GLINT_CACHE_DIR/entry" ;; esac
 echo '{"issues":[]}'
 echo 'RULE TOTAL' >&2
@@ -460,6 +489,307 @@ else
 fi
 echo '  IN FLIGHT' >&2
 `, log+"."+name+".count", name, log, firstArgs, secondArgs)
+}
+
+func TestTouchedToolcachePackageUsesNoCache(t *testing.T) {
+	stdout, calls := runNoCacheScenario(t, "v1.0.0", true, false)
+	assertNoCacheChoice(t, stdout, calls, true)
+}
+
+func TestUntouchedToolcachePackagesUseFreshCacheWithoutNoCache(t *testing.T) {
+	stdout, calls := runNoCacheScenario(t, "v1.0.0", false, false)
+	assertNoCacheChoice(t, stdout, calls, false)
+}
+
+func TestEachProjectGetsFreshResultCacheWithoutNoCache(t *testing.T) {
+	stdout, calls := runNoCacheScenarioProjects(t, "v1.0.0", false, false, 2)
+	if len(calls) != 4 {
+		t.Fatalf("new glint calls = %q, want two fresh and two cached runs", calls)
+	}
+	firstDir, firstArgs, firstEmpty := parseNoCacheCall(t, calls[0])
+	secondDir, secondArgs, secondEmpty := parseNoCacheCall(t, calls[2])
+	if firstDir == secondDir || firstEmpty != "yes" || secondEmpty != "yes" {
+		t.Fatalf("fresh project calls = %q and %q; want distinct empty cache dirs", calls[0], calls[2])
+	}
+	if strings.Contains(" "+firstArgs+" ", " --no-cache ") || strings.Contains(" "+secondArgs+" ", " --no-cache ") {
+		t.Fatalf("tool caches should be enabled: %q, %q (stdout %q)", calls[0], calls[2], stdout)
+	}
+}
+
+func TestUnknownOldVersionUsesNoCache(t *testing.T) {
+	stdout, calls := runNoCacheScenario(t, "v9.9.9", false, false)
+	if !strings.Contains(stdout, "old version unknown") {
+		t.Fatalf("stdout %q: want fallback reason", stdout)
+	}
+	assertNoCacheChoice(t, stdout, calls, true)
+}
+
+func TestForceNoCacheFlagUsesNoCache(t *testing.T) {
+	stdout, calls := runNoCacheScenario(t, "v1.0.0", false, true)
+	if !strings.Contains(stdout, "-no-cache forced") {
+		t.Fatalf("stdout %q: want forced-choice reason", stdout)
+	}
+	assertNoCacheChoice(t, stdout, calls, true)
+}
+
+func TestViaPassesResolvedToolCachesOnNoCache(t *testing.T) {
+	assertViaNoCacheDecision(t, false, false, "on")
+}
+
+func TestViaPassesResolvedToolCachesOffNoCache(t *testing.T) {
+	assertViaNoCacheDecision(t, true, false, "off")
+}
+
+func TestViaNoCacheFlagForcesOffNoCache(t *testing.T) {
+	assertViaNoCacheDecision(t, false, true, "off")
+}
+
+func assertViaNoCacheDecision(t *testing.T, touchPackage, forceNoCache bool, wantMode string) {
+	t.Helper()
+	repo := makeViaNoCacheRepo(t, touchPackage)
+	old := filepath.Join(repo, "old")
+	newer := filepath.Join(repo, "new")
+	writeExec(t, old, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'glint version v1.0.0'; exit 0; fi\n")
+	writeExec(t, newer, "#!/bin/sh\necho '{\"issues\":[]}'\n")
+	config := filepath.Join(repo, "consumers.txt")
+	if err := os.WriteFile(config, []byte("root "+repo+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(repo, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(repo, "graft-args")
+	graftScript := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsFile + "'\n"
+	writeExec(t, filepath.Join(binDir, "graft"), graftScript)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Chdir(repo)
+	args := []string{"-config", config, "-old", old, "-new", newer, "-via", "compare", "-no-mark"}
+	if forceNoCache {
+		args = append(args, "-no-cache")
+	}
+	var stdout, stderr strings.Builder
+	if code := run(args, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "printed no result line") {
+		t.Fatalf("run code %d, stdout %q, stderr %q; fake graft should record args then omit its result line", code, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotArgs := string(data)
+	if !strings.Contains(gotArgs, "-tool-caches="+wantMode+"\n") {
+		t.Fatalf("graft args %q, want -tool-caches=%s", gotArgs, wantMode)
+	}
+	if !strings.Contains(gotArgs, "-tool-cache-reason=") {
+		t.Fatalf("graft args %q, want the decision reason forwarded", gotArgs)
+	}
+	if forceNoCache && !strings.Contains(gotArgs, "-no-cache=true\n") {
+		t.Fatalf("graft args %q, want the forced -no-cache flag forwarded", gotArgs)
+	}
+}
+
+func TestResolvedToolCachesOnRunsWithoutGitNoCache(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "alpha")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old, newer := filepath.Join(root, "old"), filepath.Join(root, "new")
+	writeExec(t, old, "#!/bin/sh\nif [ \"$1\" = rules ]; then echo '  known description'; exit 0; fi\n"+fillsCache+"echo '{\"issues\":[]}'\n")
+	log := filepath.Join(root, "new.log")
+	writeExec(t, newer, "#!/bin/sh\nif [ \"$1\" = check ]; then printf '%s|%s\\n' \"$GLINT_CACHE_DIR\" \"$*\" >> '"+log+"'; fi\necho '{\"issues\":[]}'\n")
+	config := filepath.Join(root, "consumers.txt")
+	if err := os.WriteFile(config, []byte("root "+root+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	noGitDir := filepath.Join(root, "outside-git")
+	if err := os.Mkdir(noGitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(noGitDir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	var stdout, stderr strings.Builder
+	code := run([]string{"-config", config, "-old", old, "-new", newer, "-no-mark", "-tool-caches=on", "-tool-cache-reason=resolved outside git"}, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "new glint: resolved outside git") || strings.Contains(stdout.String(), "old version unknown") {
+		t.Fatalf("run code %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)[0]
+	if strings.Contains(" "+first+" ", " --no-cache ") || !strings.Contains(first, "consumers-new-") {
+		t.Fatalf("new glint call %q: want enabled tool caches and a fresh result cache", first)
+	}
+}
+
+func makeViaNoCacheRepo(t *testing.T, touchPackage bool) string {
+	t.Helper()
+	repo := t.TempDir()
+	gitRun := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.invalid", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.invalid")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	gitRun("init", "-q")
+	toolPkg := filepath.Join(repo, "pkg", "rules", "external")
+	if err := os.MkdirAll(toolPkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toolFile := filepath.Join(toolPkg, "external.go")
+	if err := os.WriteFile(toolFile, []byte("package external\nfunc f() { _ = toolcache.New(\"x\") }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "pkg", "toolcache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "pkg", "toolcache", "cache.go"), []byte("package toolcache\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(repo, "alpha")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun("add", ".")
+	gitRun("commit", "-qm", "base")
+	gitRun("tag", "v1.0.0")
+	if touchPackage {
+		if err := os.WriteFile(toolFile, []byte("package external\n// changed\nfunc f() { _ = toolcache.New(\"x\") }\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return repo
+}
+
+func writeExec(t *testing.T, path, script string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // executable test double
+		t.Fatal(err)
+	}
+}
+
+// runNoCacheScenario makes an isolated tagged glint repository and uses
+// executable doubles to record the new build's arguments and cache directory.
+func runNoCacheScenario(t *testing.T, oldVersion string, touchPackage, force bool) (string, []string) {
+	return runNoCacheScenarioProjects(t, oldVersion, touchPackage, force, 1)
+}
+
+func runNoCacheScenarioProjects(t *testing.T, oldVersion string, touchPackage, force bool, projectCount int) (string, []string) {
+	t.Helper()
+	repo := t.TempDir()
+	gitRun := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.invalid", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.invalid")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	gitRun("init", "-q")
+	toolPackage := filepath.Join(repo, "pkg", "rules", "example")
+	if err := os.MkdirAll(toolPackage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(toolPackage, "tool.go"), []byte("package example\nfunc init() { _ = toolcache.New(\"x\") }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "pkg", "toolcache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "pkg", "toolcache", "cache.go"), []byte("package toolcache\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := range projectCount {
+		project := filepath.Join(repo, []string{"alpha", "beta"}[i])
+		if err := os.MkdirAll(project, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitRun("add", ".")
+	gitRun("commit", "-qm", "base")
+	gitRun("tag", "v1.0.0")
+	if touchPackage {
+		if err := os.WriteFile(filepath.Join(toolPackage, "tool.go"), []byte("package example\n// changed\nfunc init() { _ = toolcache.New(\"x\") }\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(repo)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(repo, "user-cache"))
+	t.Setenv("GLINT_CACHE_DIR", "")
+	log := filepath.Join(repo, "new.log")
+	old := filepath.Join(repo, "old")
+	newer := filepath.Join(repo, "new")
+	oldScript := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'glint version %s'; exit 0; fi\n", oldVersion) + fillsCache + "echo '{\"issues\":[]}'\n"
+	newScript := "#!/bin/sh\nif [ \"$1\" = rules ]; then exit 0; fi\nif [ \"$1\" = check ]; then empty=no; [ -z \"$(ls -A \"$GLINT_CACHE_DIR\" 2>/dev/null)\" ] && empty=yes; printf '%s|%s|%s\\n' \"$GLINT_CACHE_DIR\" \"$empty\" \"$*\" >> '" + log + "'; fi\necho '{\"issues\":[]} '\n"
+	for path, script := range map[string]string{old: oldScript, newer: newScript} {
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // executable test double
+			t.Fatal(err)
+		}
+	}
+	cfg := filepath.Join(repo, "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root "+repo+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-config", cfg, "-old", old, "-new", newer, "-no-mark"}
+	if force {
+		args = append(args, "-no-cache")
+	}
+	var stdout, stderr strings.Builder
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("run code %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		if line != "" {
+			calls = append(calls, line)
+		}
+	}
+	return stdout.String(), calls
+}
+
+func assertNoCacheChoice(t *testing.T, stdout string, calls []string, wantNoCache bool) {
+	t.Helper()
+	if len(calls) < 2 {
+		t.Fatalf("new glint calls = %q, want fresh and cached runs", calls)
+	}
+	dir, args, empty := parseNoCacheCall(t, calls[0])
+	if !strings.HasPrefix(filepath.Base(dir), "consumers-new") {
+		t.Fatalf("first new glint call = %q, want its fresh GLINT_CACHE_DIR", calls[0])
+	}
+	if !wantNoCache && empty != "yes" {
+		t.Fatalf("first new glint call = %q, want empty cache on entry", calls[0])
+	}
+	gotNoCache := strings.Contains(" "+args+" ", " --no-cache ")
+	if gotNoCache != wantNoCache {
+		t.Fatalf("first new glint call = %q, want --no-cache %v (stdout %q)", calls[0], wantNoCache, stdout)
+	}
+}
+
+func parseNoCacheCall(t *testing.T, line string) (dir, args, empty string) {
+	t.Helper()
+	fields := strings.SplitN(line, "|", 3)
+	if len(fields) != 3 {
+		t.Fatalf("new glint call = %q, want cache dir, emptiness, and arguments", line)
+	}
+	return fields[0], fields[2], fields[1]
 }
 
 func TestParseOldRuleNames(t *testing.T) {
