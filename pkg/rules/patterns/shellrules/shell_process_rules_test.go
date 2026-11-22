@@ -189,6 +189,8 @@ wait_ready
 run_checks
 kill "$pid"
 `)
+	// This trap protects the background job; swallowing signals is checked
+	// separately by shell-trap-signal-without-exit.
 	shellWanted(t, "shell-background-job-without-trap", "trapped.sh", `#!/bin/bash
 ./api-server.sh 5000 > "$log" 2>&1 &
 pid=$!
