@@ -1,12 +1,12 @@
 package main
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -141,9 +141,16 @@ func TestOldBinaryWithoutTheNewRuleCountsAsNoFindings(t *testing.T) {
 	}
 }
 
+// fillsCache is the shell line of a glint double that leaves a result cache
+// file in GLINT_CACHE_DIR when it runs with the cache, as glint does.
+const fillsCache = `case " $* " in *" --no-cache "*) ;; *) [ -z "$GLINT_CACHE_DIR" ] || : > "$GLINT_CACHE_DIR/entry" ;; esac
+`
+
 // The new build keeps its result cache apart: a glint run prunes the caches of
 // other builds, so a run of the new build in the shared directory would wipe
-// the caches the installed glint keeps for every project.
+// the caches the installed glint keeps for every project. The old build fills
+// a fresh directory of its own, which the cached run of the new one reads and
+// which is gone after the run.
 func TestNewBinaryUsesItsOwnResultCacheDirectory(t *testing.T) {
 	root := t.TempDir()
 	project := filepath.Join(root, "alpha")
@@ -156,9 +163,8 @@ func TestNewBinaryUsesItsOwnResultCacheDirectory(t *testing.T) {
 	userCache := filepath.Join(root, "cache")
 	rulestest.IsolateUserCache(t, userCache)
 	t.Setenv("GLINT_CACHE_DIR", "")
-	seen := map[string]string{}
 	for _, name := range []string{"old", "new"} {
-		script := "#!/bin/sh\nprintf '%s' \"$GLINT_CACHE_DIR\" > " + filepath.Join(root, name+".env") + "\necho '{\"issues\":[]}'\n"
+		script := "#!/bin/sh\n" + fillsCache + "printf '%s %s\\n' \"$GLINT_CACHE_DIR\" \"$*\" >> " + filepath.Join(root, name+".env") + "\necho '{\"issues\":[]}'\n"
 		if err := os.WriteFile(filepath.Join(root, name), []byte(script), 0o700); err != nil { //nolint:gosec // an executable test double
 			t.Fatal(err)
 		}
@@ -169,24 +175,43 @@ func TestNewBinaryUsesItsOwnResultCacheDirectory(t *testing.T) {
 	}
 	var stdout, stderr strings.Builder
 	if code := run([]string{"-config", cfg, "-old", filepath.Join(root, "old"), "-new", filepath.Join(root, "new")}, &stdout, &stderr); code != 0 {
-		t.Fatalf("code %d, stderr %q", code, stderr.String())
+		t.Fatalf("code %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
+	calls := map[string][]string{}
 	for _, name := range []string{"old", "new"} {
 		data, err := os.ReadFile(filepath.Join(root, name+".env"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		seen[name] = string(data)
+		for line := range strings.SplitSeq(string(data), "\n") {
+			if strings.Contains(line, " check ") {
+				calls[name] = append(calls[name], line)
+			}
+		}
 	}
-	if seen["old"] != "" {
-		t.Fatalf("installed glint got GLINT_CACHE_DIR %q, want the shared default", seen["old"])
+	if len(calls["old"]) != 1 || len(calls["new"]) != 2 {
+		t.Fatalf("calls = %q", calls)
 	}
-	if want := filepath.Join(userCache, "glint", "consumers-new"); seen["new"] != want {
-		t.Fatalf("new glint got GLINT_CACHE_DIR %q, want %q", seen["new"], want)
+	oldDir, oldArgs, _ := strings.Cut(calls["old"][0], " ")
+	if filepath.Dir(oldDir) != filepath.Join(userCache, "glint") || filepath.Base(oldDir) == "results" || strings.Contains(oldArgs, "--no-cache") {
+		t.Fatalf("installed glint ran as %q, want a fresh cache of its own beside the shared one", calls["old"][0])
+	}
+	if want := filepath.Join(userCache, "glint", "consumers-new") + " "; !strings.HasPrefix(calls["new"][0], want) || !strings.Contains(calls["new"][0], "--no-cache") {
+		t.Fatalf("new glint ran first as %q, want %q without the cache", calls["new"][0], want)
+	}
+	if cachedDir, cachedArgs, _ := strings.Cut(calls["new"][1], " "); cachedDir != oldDir || strings.Contains(cachedArgs, "--no-cache") {
+		t.Fatalf("new glint ran on the cache as %q, want the old glint's cache %s", calls["new"][1], oldDir)
+	}
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		t.Fatalf("the old glint's cache is left after the run: %v", err)
 	}
 }
 
-func TestConsumerCacheFindingsMatchNoCacheAndSourceIsUntouched(t *testing.T) {
+// The cached run reads the cache the old glint has just filled, not this
+// machine's own: on a host without the consumer's cache, or here with none of
+// its files, the comparison still runs, and a stale finding from the cache
+// fails it.
+func TestCachedRunDoesNotNeedTheUserCache(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		cachedJSON string
@@ -198,6 +223,8 @@ func TestConsumerCacheFindingsMatchNoCacheAndSourceIsUntouched(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv("GLINT_CACHE_DIR", "")
+			t.Chdir(t.TempDir())
 			root := t.TempDir()
 			project := filepath.Join(root, "alpha")
 			if err := os.MkdirAll(project, 0o755); err != nil {
@@ -206,20 +233,10 @@ func TestConsumerCacheFindingsMatchNoCacheAndSourceIsUntouched(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cache := filepath.Join(root, "real-cache")
-			if err := os.MkdirAll(cache, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			cacheFile := fmt.Sprintf("%x-old-stamp.gob", sha256.Sum256([]byte(project)))
-			marker := filepath.Join(cache, cacheFile)
-			if err := os.WriteFile(marker, []byte("unchanged sentinel\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("GLINT_CACHE_DIR", cache)
 			old := filepath.Join(root, "old")
 			newer := filepath.Join(root, "new")
-			oldScript := "#!/bin/sh\necho '{\"issues\":[]}'\n"
-			newScript := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = rules ]; then echo '  known-rule description'; exit 0; fi\nif [ -f \"$GLINT_CACHE_DIR/%s\" ]; then echo '%s'; else echo '{\"issues\":[]}'; fi\n", cacheFile, tc.cachedJSON)
+			oldScript := "#!/bin/sh\n" + fillsCache + "echo '{\"issues\":[]}'\n"
+			newScript := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = rules ]; then echo '  known-rule description'; exit 0; fi\ncase \" $* \" in *\" --no-cache \"*) echo '{\"issues\":[]}'; exit 0;; esac\nif [ -f \"$GLINT_CACHE_DIR/entry\" ]; then echo '%s'; else echo 'Error: no cache' >&2; exit 1; fi\n", tc.cachedJSON)
 			for path, script := range map[string]string{old: oldScript, newer: newScript} {
 				if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // executable test double
 					t.Fatal(err)
@@ -229,24 +246,25 @@ func TestConsumerCacheFindingsMatchNoCacheAndSourceIsUntouched(t *testing.T) {
 			if err := os.WriteFile(cfg, []byte("root "+root+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			before, err := os.ReadFile(marker)
-			if err != nil {
-				t.Fatal(err)
-			}
 			var stdout, stderr strings.Builder
 			code := run([]string{"-config", cfg, "-old", old, "-new", newer}, &stdout, &stderr)
-			if code != tc.wantCode || strings.Contains(stdout.String(), "cached findings differ") != tc.wantDiff || tc.wantDiff && !strings.Contains(stdout.String(), project) {
+			if code != tc.wantCode || strings.Contains(stdout.String(), "skipped (") || strings.Contains(stdout.String(), "cached findings differ") != tc.wantDiff || tc.wantDiff && !strings.Contains(stdout.String(), project) {
 				t.Fatalf("code %d, stdout %q, stderr %q; want code %d and diff %v", code, stdout.String(), stderr.String(), tc.wantCode, tc.wantDiff)
 			}
-			after, err := os.ReadFile(marker)
-			if err != nil || string(after) != string(before) {
-				t.Fatalf("source cache changed: contents %q, err %v", after, err)
-			}
-			entries, err := os.ReadDir(cache)
-			if err != nil || len(entries) != 1 || entries[0].Name() != cacheFile {
-				t.Fatalf("source cache entries = %v, err %v", entries, err)
-			}
 		})
+	}
+}
+
+// An old glint that leaves no result cache would make the cached run analyze
+// everything, a comparison without a cache: that is an error, not a pass.
+func TestOldGlintWritingNoCacheIsAnError(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	cfg, old, newer := writeConsumerRun(t, "#!/bin/sh\necho '{\"issues\":[]}'\n", "alpha")
+	var stdout, stderr strings.Builder
+	code := run([]string{"-config", cfg, "-old", old, "-new", newer}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "wrote no result cache") {
+		t.Fatalf("code %d, stdout %q, stderr %q: want the missing cache counted as an error", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -403,8 +421,9 @@ func TestCompareTargetsReportsOnlyConfirmedSlowerRules(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	var stdout, stderr strings.Builder
-	_, errs, projects, _ := compareTargets([]string{project}, old, newer, "", "", "", nil, &stdout, &stderr)
+	_, errs, projects, _ := compareTargets([]string{project}, old, newer, "", "", "", t.TempDir(), nil, &stdout, &stderr)
 	if errs != 0 {
 		t.Fatalf("errors = %d, stderr %q", errs, stderr.String())
 	}
@@ -417,8 +436,8 @@ func TestCompareTargetsReportsOnlyConfirmedSlowerRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lines := strings.Split(strings.TrimSpace(string(calls)), "\n"); len(lines) != 4 {
-		t.Fatalf("calls = %q, want full old/new then confirmation new/old", calls)
+	if lines := strings.Split(strings.TrimSpace(string(calls)), "\n"); len(lines) != 5 {
+		t.Fatalf("calls = %q, want full old/new, new on the old one's cache, then confirmation new/old", calls)
 	}
 }
 
@@ -431,6 +450,7 @@ call=1
 if [ -f "$counter" ]; then call=2; fi
 touch "$counter"
 printf '%%s %%s\n' %q "$*" >> %q
+case " $* " in *" --no-cache "*) ;; *) [ -z "$GLINT_CACHE_DIR" ] || : > "$GLINT_CACHE_DIR/entry" ;; esac
 echo '{"issues":[]}'
 echo 'RULE TOTAL' >&2
 if [ "$call" = 1 ]; then
@@ -543,7 +563,7 @@ func TestConsumerLoadFailureCountsAsError(t *testing.T) {
 // -only naming a project that is not there - is an error, while the same
 // root with a consumer compares clean.
 func TestNoConsumerToCompareIsAnError(t *testing.T) {
-	clean := "#!/bin/sh\necho '{\"issues\":[]}'\n"
+	clean := "#!/bin/sh\n" + fillsCache + "echo '{\"issues\":[]}'\n"
 	for _, tc := range []struct {
 		name     string
 		projects []string
@@ -565,5 +585,578 @@ func TestNoConsumerToCompareIsAnError(t *testing.T) {
 				t.Fatalf("code %d, stdout %q, stderr %q: want code %d with %q", code, stdout.String(), stderr.String(), tc.code, tc.stderr)
 			}
 		})
+	}
+}
+
+// hostPathsRun runs -host-paths with the given arguments and returns the
+// entries of the file it wrote, comment and empty lines left out.
+func hostPathsRun(t *testing.T, args ...string) []string {
+	t.Helper()
+	inGlintTree(t)
+	file := filepath.Join(t.TempDir(), "bin", "consumers.paths")
+	var stdout, stderr strings.Builder
+	if code := run(append(args, "-host-paths", file), &stdout, &stderr); code != 0 {
+		t.Fatalf("code %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []string
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if line != "" && !strings.HasPrefix(line, "#") {
+			entries = append(entries, line)
+		}
+	}
+	return entries
+}
+
+// inGlintTree makes the current directory a repository with the new glint
+// in bin/glint, as graft runs consumers from the glint tree; it returns the
+// repository.
+func inGlintTree(t *testing.T) string {
+	t.Helper()
+	repo := initConsumerRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "bin", "glint"), []byte("#!/bin/sh\n"), 0o700); err != nil { //nolint:gosec // an executable test double
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+	return repo
+}
+
+// hostHome makes a home directory with glint's user config naming tickets as
+// its tickets_dir ("" names none) and the installed glint in bin.
+func hostHome(t *testing.T, tickets string) string {
+	t.Helper()
+	home := t.TempDir()
+	hostHomeAt(t, home, tickets)
+	return home
+}
+
+func hostHomeAt(t *testing.T, home, tickets string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if err := os.MkdirAll(filepath.Join(home, ".config", "glint"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := "# user config\n"
+	if tickets != "" {
+		config += "tickets_dir: " + tickets + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(home, ".config", "glint", "config.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "bin", "glint"), []byte("#!/bin/sh\n"), 0o700); err != nil { //nolint:gosec // an executable test double
+		t.Fatal(err)
+	}
+}
+
+func mkConsumer(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A consumer below the root of its repository goes to the host as the whole
+// repository, as its git commands need: projectA/tool is projectA. A consumer
+// in no repository goes as itself, and one inside it folds into it. A skipped
+// consumer is not sent. The glint user config directory, the consumers config
+// and the installed glint (-old's default) are sent too.
+func TestHostPathsFoldNestedTargetsAndLeaveSkipped(t *testing.T) {
+	home := hostHome(t, "")
+	root := filepath.Join(home, "git")
+	repo := filepath.Join(root, "projectA")
+	mkConsumer(t, filepath.Join(repo, "tool"))
+	gitTest(t, repo, "init", "-q")
+	mkConsumer(t, filepath.Join(root, "plain"))
+	mkConsumer(t, filepath.Join(root, "plain", "inner"))
+	mkConsumer(t, filepath.Join(root, "frozen"))
+	cfg := filepath.Join(home, ".config", "glint", "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root ~/git\nskip frozen\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := hostPathsRun(t, "-config", cfg)
+	want := []string{filepath.Join(home, ".config", "glint"), filepath.Join(home, "bin", "glint"), filepath.Join(root, "plain"), repo}
+	slices.Sort(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("host paths = %q, want %q", got, want)
+	}
+}
+
+// tickets_dir of the user config is read by exception-ticket-closed, so it
+// goes to the host; a config without it sends none, and one inside a sent
+// directory folds into it.
+func TestHostPathsCarryTicketsDir(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tickets func(home string) string
+		want    func(home string) []string
+	}{
+		{"set", func(home string) string { return filepath.Join(home, "git", "tasks", "glint") }, func(home string) []string {
+			return []string{filepath.Join(home, "git", "tasks", "glint")}
+		}},
+		{"inside a consumer", func(home string) string { return filepath.Join(home, "git", "alpha", "tickets") }, func(string) []string { return nil }},
+		{"missing directory", func(home string) string { return filepath.Join(home, "nowhere") }, func(string) []string { return nil }},
+		{"unset", func(string) string { return "" }, func(string) []string { return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			tickets := tc.tickets(home)
+			hostHomeAt(t, home, tickets)
+			if tickets != "" && tc.name != "missing directory" {
+				if err := os.MkdirAll(tickets, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mkConsumer(t, filepath.Join(home, "git", "alpha"))
+			cfg := filepath.Join(home, ".config", "glint", "consumers.txt")
+			if err := os.WriteFile(cfg, []byte("root "+filepath.Join(home, "git")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got := hostPathsRun(t, "-config", cfg)
+			want := append([]string{filepath.Join(home, ".config", "glint"), filepath.Join(home, "bin", "glint"), filepath.Join(home, "git", "alpha")}, tc.want(home)...)
+			slices.Sort(want)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("host paths = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// -old names the glint the host runs as the old one: that file is sent, not
+// the default; a missing one is an error, as the comparison could not run.
+func TestHostPathsCarryOldBinary(t *testing.T) {
+	home := hostHome(t, "")
+	mkConsumer(t, filepath.Join(home, "git", "alpha"))
+	cfg := filepath.Join(home, ".config", "glint", "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root ~/git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(home, "builds", "glint-1.0")
+	if err := os.MkdirAll(filepath.Dir(old), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(old, []byte("#!/bin/sh\n"), 0o700); err != nil { //nolint:gosec // an executable test double
+		t.Fatal(err)
+	}
+	got := hostPathsRun(t, "-config", cfg, "-old", old)
+	if !slices.Contains(got, old) || slices.Contains(got, filepath.Join(home, "bin", "glint")) {
+		t.Fatalf("host paths = %q, want %s and not the default old glint", got, old)
+	}
+	inGlintTree(t)
+	var stdout, stderr strings.Builder
+	code := run([]string{"-config", cfg, "-old", filepath.Join(home, "missing"), "-host-paths", filepath.Join(t.TempDir(), "p")}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "old binary") {
+		t.Fatalf("code %d, stderr %q: want a missing -old to fail", code, stderr.String())
+	}
+}
+
+// worker pc refuses a go.work use that no entry covers: a use outside the
+// consumers goes to the host as its repository.
+func TestHostPathsCarryGoWorkUses(t *testing.T) {
+	home := hostHome(t, "")
+	mkConsumer(t, filepath.Join(home, "git", "alpha"))
+	shared := filepath.Join(home, "lib", "shared")
+	if err := os.MkdirAll(filepath.Join(shared, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, shared, "init", "-q")
+	work := "go 1.25\n\nuse (\n\t.\n\t../../lib/shared/pkg\n)\n"
+	if err := os.WriteFile(filepath.Join(home, "git", "alpha", "go.work"), []byte(work), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(home, ".config", "glint", "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root ~/git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := hostPathsRun(t, "-config", cfg)
+	if !slices.Contains(got, shared) {
+		t.Fatalf("host paths = %q, want the go.work use's repository %s", got, shared)
+	}
+}
+
+// worker pc takes at most 64 entries.
+func TestHostPathsRefuseMoreThanWorkerTakes(t *testing.T) {
+	home := hostHome(t, "")
+	for i := range 64 {
+		mkConsumer(t, filepath.Join(home, "git", fmt.Sprintf("p%02d", i)))
+	}
+	cfg := filepath.Join(home, ".config", "glint", "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root ~/git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inGlintTree(t)
+	var stdout, stderr strings.Builder
+	code := run([]string{"-config", cfg, "-host-paths", filepath.Join(t.TempDir(), "p")}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "at most 64") {
+		t.Fatalf("code %d, stderr %q: want more than 64 entries refused", code, stderr.String())
+	}
+}
+
+// viaRun runs -via consumers-compare in a clean repository with a graft
+// double whose body is graftBody (sh; $SUM is the new glint's SHA-256, $NEW
+// its path, $REPO the repository, $LOG a file of its arguments). It returns
+// the exit code, the output, the marker state ("" for none) and the log.
+func viaRun(t *testing.T, graftBody string, extra ...string) (code int, stdout, stderr, marker, log string) {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	repo := initConsumerRepo(t)
+	t.Chdir(repo)
+	cfg, old, newer := writeConsumerRun(t, "#!/bin/sh\nexit 3\n", "alpha")
+	sum, err := fileSHA256(newer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bins := t.TempDir()
+	logFile := filepath.Join(bins, "graft.log")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + logFile + "\nSUM=" + sum + " NEW=" + newer + " REPO=" + repo + "\n" + graftBody
+	if err := os.WriteFile(filepath.Join(bins, "graft"), []byte(script), 0o700); err != nil { //nolint:gosec // an executable test double
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bins+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var out, errOut strings.Builder
+	code = run(append([]string{"-config", cfg, "-old", old, "-new", newer, "-via", "consumers-compare"}, extra...), &out, &errOut)
+	if path, err := consumerMarkerPath(repo); err == nil {
+		if data, err := os.ReadFile(path); err == nil {
+			marker = strings.TrimSpace(string(data))
+		}
+	}
+	data, _ := os.ReadFile(logFile)
+	return code, out.String(), errOut.String(), marker, string(data)
+}
+
+// The comparison on the host prints its result line, and the marker is
+// written here for the commit and the new glint taken before it was sent;
+// the flags but -via reach the task's {args}, and differences (graft fails
+// with the line printed) still mark the commit and exit 1.
+func TestViaMarksTheSentCommit(t *testing.T) {
+	code, stdout, stderr, marker, log := viaRun(t, "echo \"consumers-result: partial $SUM\"\n", "-only", "alpha")
+	if code != 0 || marker != "partial" || !strings.Contains(stdout, "consumers-result: partial") {
+		t.Fatalf("code %d, marker %q, stdout %q, stderr %q: want the commit marked partial", code, marker, stdout, stderr)
+	}
+	if !strings.HasPrefix(log, "consumers-compare -- ") || !strings.Contains(log, "-only=alpha") || strings.Contains(log, "-via") {
+		t.Fatalf("graft got %q, want consumers-compare -- <flags but -via>", log)
+	}
+	code, _, stderr, marker, _ = viaRun(t, "echo \"consumers-result: full $SUM\"\nexit 1\n")
+	if code != 1 || marker != "full" {
+		t.Fatalf("code %d, marker %q, stderr %q: want differences marked full with exit 1", code, marker, stderr)
+	}
+}
+
+// Nothing is marked for a comparison that did not finish, ran another glint,
+// or whose commit, tree or new glint moved while it ran.
+func TestViaMarksNothingThatMoved(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, stderr string
+		code               int
+	}{
+		{"no result line", "echo '1 projects, 0 with differences, 1 errors'\nexit 1\n", "no result line", 2},
+		{"another glint", "echo 'consumers-result: full 0123456789abcdef'\n", "ran glint 0123456789ab", 0},
+		{"head moved", "echo next > \"$REPO/tracked.txt\"; git -C \"$REPO\" -c user.name=t -c user.email=t@example.com commit -qam next\necho \"consumers-result: full $SUM\"\n", "HEAD moved", 0},
+		{"tree changed", "echo dirty > \"$REPO/untracked.txt\"\necho \"consumers-result: full $SUM\"\n", "tree changed", 0},
+		{"glint rebuilt", "echo rebuilt >> \"$NEW\"\necho \"consumers-result: full $SUM\"\n", "changed during the comparison", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr, marker, _ := viaRun(t, tc.body)
+			if code != tc.code || marker != "" || !strings.Contains(stderr, tc.stderr) {
+				t.Fatalf("code %d, marker %q, stdout %q, stderr %q: want code %d, no marker and %q", code, marker, stdout, stderr, tc.code, tc.stderr)
+			}
+		})
+	}
+}
+
+// -no-mark, the comparison the host runs, writes no marker and ends with the
+// result line naming the glint it ran; without it the comparison marks the
+// commit it ran in.
+func TestNoMarkPrintsResultLineInsteadOfMarker(t *testing.T) {
+	for _, noMark := range []bool{true, false} {
+		t.Run(fmt.Sprint("no-mark ", noMark), func(t *testing.T) {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			repo := initConsumerRepo(t)
+			t.Chdir(repo)
+			cfg, old, newer := writeConsumerRun(t, "#!/bin/sh\n"+fillsCache+"echo '{\"issues\":[]}'\n", "alpha")
+			sum, err := fileSHA256(newer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"-config", cfg, "-old", old, "-new", newer}
+			if noMark {
+				args = append(args, "-no-mark")
+			}
+			var stdout, stderr strings.Builder
+			if code := run(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("code %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+			}
+			path, err := consumerMarkerPath(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, statErr := os.Stat(path)
+			if hasLine := strings.Contains(stdout.String(), "consumers-result: full "+sum+"\n"); hasLine != noMark || os.IsNotExist(statErr) != noMark {
+				t.Fatalf("stdout %q, marker stat %v: want the result line %v and the marker %v", stdout.String(), statErr, noMark, !noMark)
+			}
+		})
+	}
+}
+
+// glint on its own tree on the host needs the tree with its .git (an entry
+// equal to the root makes worker pc send it so), from whatever directory of
+// the tree it starts, the user config and tickets_dir.
+func TestSelfHostPathsSendTheTreeWithConfigAndTickets(t *testing.T) {
+	home := t.TempDir()
+	tickets := filepath.Join(home, "tasks", "glint")
+	hostHomeAt(t, home, tickets)
+	if err := os.MkdirAll(tickets, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repo := initConsumerRepo(t)
+	sub := filepath.Join(repo, "tools")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+	file := filepath.Join(t.TempDir(), "self.paths")
+	var stdout, stderr strings.Builder
+	if code := run([]string{"-self-paths", file}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if line != "" && !strings.HasPrefix(line, "#") {
+			got = append(got, line)
+		}
+	}
+	top := strings.TrimSpace(gitOutput(t, repo, "rev-parse", "--show-toplevel"))
+	want := []string{filepath.Join(home, ".config", "glint"), tickets, top}
+	slices.Sort(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("self paths = %q, want %q", got, want)
+	}
+}
+
+func gitOutput(t *testing.T, repo string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return string(out)
+}
+
+// A link in a consumer that leads out of it (projectA's docs/tasks to the
+// tickets beside the repositories) names a path the host has only when it is
+// sent, so its target is an entry; a dangling link, a link inside the tree, a
+// link up to a directory holding it, one into another consumer and one out of
+// home are not.
+func TestHostPathsCarryTargetsOfOutwardLinks(t *testing.T) {
+	home := hostHome(t, "")
+	repo := filepath.Join(home, "git", "projectA")
+	mkConsumer(t, repo)
+	gitTest(t, repo, "init", "-q")
+	mkConsumer(t, filepath.Join(home, "git", "projectB"))
+	tickets := filepath.Join(home, "tasks", "projectA")
+	if err := os.MkdirAll(tickets, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notes := filepath.Join(home, "notes.md")
+	if err := os.WriteFile(notes, []byte("# notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "docs", "inside"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for link, target := range map[string]string{
+		"docs/tasks":    "../../../tasks/projectA",
+		"docs/notes.md": notes,
+		"docs/gone":     "../../../tasks/missing",
+		"docs/here":     "inside",
+		"docs/up":       "..",
+		"docs/peer":     "../../projectB",
+		"docs/python":   "/usr/bin",
+	} {
+		if err := os.Symlink(target, filepath.Join(repo, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := filepath.Join(home, ".config", "glint", "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root ~/git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := hostPathsRun(t, "-config", cfg)
+	want := []string{filepath.Join(home, ".config", "glint"), filepath.Join(home, "bin", "glint"), filepath.Join(home, "git", "projectB"), notes, repo, tickets}
+	slices.Sort(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("host paths = %q, want %q", got, want)
+	}
+}
+
+// -new outside the glint tree is an entry; inside it, it goes with the tree.
+func TestHostPathsCarryNewBinaryOutsideTheTree(t *testing.T) {
+	home := hostHome(t, "")
+	mkConsumer(t, filepath.Join(home, "git", "alpha"))
+	cfg := filepath.Join(home, ".config", "glint", "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root ~/git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newer := filepath.Join(home, "builds", "glint-next")
+	if err := os.MkdirAll(filepath.Dir(newer), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newer, []byte("#!/bin/sh\n"), 0o700); err != nil { //nolint:gosec // an executable test double
+		t.Fatal(err)
+	}
+	if got := hostPathsRun(t, "-config", cfg, "-new", newer); !slices.Contains(got, newer) {
+		t.Fatalf("host paths = %q, want %s", got, newer)
+	}
+	if got := hostPathsRun(t, "-config", cfg); slices.ContainsFunc(got, func(p string) bool { return strings.HasSuffix(p, "/bin/glint") && !strings.HasPrefix(p, home) }) {
+		t.Fatalf("host paths = %q: bin/glint of the tree goes with the tree", got)
+	}
+}
+
+// worker pc clears the environment and keeps HOME: glint on the host reads
+// $HOME/.config/glint whatever XDG_CONFIG_HOME is here, so that is the entry,
+// and its tickets_dir is the one sent; a different XDG_CONFIG_HOME is said.
+func TestHostPathsTakeTheConfigGlintOnTheHostReads(t *testing.T) {
+	home := t.TempDir()
+	tickets := filepath.Join(home, "tasks", "glint")
+	hostHomeAt(t, home, tickets)
+	if err := os.MkdirAll(tickets, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(elsewhere, "glint"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(elsewhere, "glint", "config.yaml"), []byte("tickets_dir: "+filepath.Join(elsewhere, "t")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", elsewhere)
+	mkConsumer(t, filepath.Join(home, "git", "alpha"))
+	cfg := filepath.Join(home, ".config", "glint", "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root ~/git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inGlintTree(t)
+	file := filepath.Join(t.TempDir(), "p")
+	var stdout, stderr strings.Builder
+	if code := run([]string{"-config", cfg, "-host-paths", file}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), filepath.Join(home, ".config", "glint")+"\n") || !strings.Contains(string(data), tickets+"\n") || strings.Contains(string(data), elsewhere) {
+		t.Fatalf("host paths %q: want %s/.config/glint and its tickets_dir, not %s", data, home, elsewhere)
+	}
+	if !strings.Contains(stderr.String(), "XDG_CONFIG_HOME") {
+		t.Fatalf("stderr %q: want the differing config directory said", stderr.String())
+	}
+}
+
+// -via with -host-paths writes the list for the same -config, -old, -new and
+// -only as the comparison gets, before graft sends it: worker pc reads the
+// file when graft starts the step.
+func TestViaWritesHostPathsOfItsOwnArgumentsFirst(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	repo := initConsumerRepo(t)
+	t.Chdir(repo)
+	cfg, old, newer := writeConsumerRun(t, "#!/bin/sh\nexit 3\n", "alpha", "beta")
+	sum, err := fileSHA256(newer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := filepath.Join(t.TempDir(), "consumers.paths")
+	bins := t.TempDir()
+	logFile := filepath.Join(bins, "graft.log")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + logFile + "\ncat " + paths + " >> " + logFile + "\necho 'consumers-result: partial " + sum + "'\n"
+	if err := os.WriteFile(filepath.Join(bins, "graft"), []byte(script), 0o700); err != nil { //nolint:gosec // an executable test double
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bins+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var stdout, stderr strings.Builder
+	code := run([]string{"-config", cfg, "-old", old, "-new", newer, "-only", "alpha", "-via", "consumers-compare", "-host-paths", paths}, &stdout, &stderr)
+	data, _ := os.ReadFile(logFile)
+	log := string(data)
+	if code != 0 || strings.Contains(log, "-host-paths") || !strings.Contains(log, "/alpha\n") || strings.Contains(log, "/beta\n") || !strings.Contains(log, old+"\n") || !strings.Contains(log, newer+"\n") {
+		t.Fatalf("code %d, stderr %q, graft saw %q: want the list of alpha, -old and -new written before graft, without -host-paths in its args", code, stderr.String(), log)
+	}
+}
+
+func TestParseCacheReuseSumsRootsAndSkipsTheKeyLine(t *testing.T) {
+	report := "result cache key: rule fingerprints (core 6ab9c93e)\n" +
+		"result cache /p/alpha: 3 of 5 files unchanged, project rules 2 cached, 7 rerun\n" +
+		"result cache /p/alpha/tool: 1 of 2 files unchanged, project rules 0 cached, 4 rerun\n"
+	got, err := parseCacheReuse(report)
+	if want := (cacheReuse{roots: 2, files: 4, analyzed: 7, rulesCached: 2, rulesRerun: 11}); err != nil || got != want {
+		t.Fatalf("reuse = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+// A cached run that took nothing from the old glint's cache proves nothing by
+// equal findings: the comparison says it is blind, without failing (a release
+// that changes the core of the key misses by design); one that took files
+// says how much.
+func TestCachedRunSaysWhatItReused(t *testing.T) {
+	for _, tc := range []struct {
+		name, reuse string
+		blind       bool
+	}{
+		{"nothing", "0 of 3 files unchanged, project rules 0 cached, 5 rerun", true},
+		{"files", "3 of 3 files unchanged, project rules 0 cached, 5 rerun", false},
+		{"project rules", "0 of 3 files unchanged, project rules 5 cached, 0 rerun", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Chdir(t.TempDir())
+			script := "#!/bin/sh\n" + fillsCache + "echo '{\"issues\":[]}'\ncase \" $* \" in *\" --no-cache \"*) ;; *) echo \"result cache $PWD: " + tc.reuse + "\" >&2;; esac\n"
+			cfg, old, newer := writeConsumerRun(t, script, "alpha")
+			var stdout, stderr strings.Builder
+			code := run([]string{"-config", cfg, "-old", old, "-new", newer}, &stdout, &stderr)
+			if code != 0 || !strings.Contains(stdout.String(), "alpha: cached run: "+tc.reuse) || strings.Contains(stdout.String(), "cache comparison blind: nothing reused") != tc.blind {
+				t.Fatalf("code %d, stdout %q, stderr %q: want the reuse said and blind %v", code, stdout.String(), stderr.String(), tc.blind)
+			}
+		})
+	}
+}
+
+// In a linked worktree the root entry is the worktree itself: worker pc sends
+// a root entry's gitdir and common directory with it (pcReadGitWorktreeMetadata),
+// so the main repository is no entry of its own.
+func TestSelfHostPathsInLinkedWorktreeNameOnlyTheWorktree(t *testing.T) {
+	home := t.TempDir()
+	hostHomeAt(t, home, "")
+	repo := initConsumerRepo(t)
+	worktree := filepath.Join(t.TempDir(), "wt")
+	gitTest(t, repo, "worktree", "add", "-q", worktree)
+	t.Chdir(worktree)
+	file := filepath.Join(t.TempDir(), "self.paths")
+	var stdout, stderr strings.Builder
+	if code := run([]string{"-self-paths", file}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code %d, stderr %q", code, stderr.String())
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	top := strings.TrimSpace(gitOutput(t, worktree, "rev-parse", "--show-toplevel"))
+	mainTop := strings.TrimSpace(gitOutput(t, repo, "rev-parse", "--show-toplevel"))
+	if !strings.Contains(string(data), top+"\n") || strings.Contains(string(data), mainTop+"\n") || strings.Contains(string(data), mainTop+"/.git") {
+		t.Fatalf("self paths %q: want the worktree %s and not the main repository %s", data, top, mainTop)
 	}
 }

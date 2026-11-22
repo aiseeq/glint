@@ -190,25 +190,54 @@ tasks:
   all:
     desc: every check - fmt-check, vet, lint, tests, race, glint on itself; before install
     run: [{task: fmt-check}, {task: vet}, {task: lint}, {task: test}, {task: test-race}, {task: self-check}]
+  # consumers runs here and is light: after the build it lists, for the
+  # same -config, -old, -new and -only, what the comparison reads outside
+  # this tree in bin/consumers.paths (worker pc reads WORKER_PC_TREES when
+  # graft starts the step, graft never), takes HEAD and the SHA-256 of
+  # bin/glint, and starts consumers-compare as a graft of its own, which
+  # remote_heavy may send to the host. The host has no .git of this tree, so
+  # the run marker install's -remind reads is written here, from the result
+  # line the comparison ends with: only for that commit and that bin/glint,
+  # and only when HEAD, the clean tree and bin/glint did not move while it ran.
   consumers:
-    desc: compare old and new glint across configured consumers
-    heavy: true
-    # Stays here: the consumer projects live on this machine only. The old
-    # glint's run is not cached by tree (dropped 14.11): glint reads inputs
-    # outside the project (approved list, tickets_dir, go.work modules, ignored
-    # files), and a stale entry could hide a difference before install.
+    desc: compare old and new glint across configured consumers (on the host when this machine is busy) and mark the commit
     deps: [build]
     usage: -config PATH, -old PATH, -new PATH, -r rules, -j N, -only a,b
-    run: ['go build -o bin/consumers ./tools/consumers', 'bin/consumers -new bin/glint -j {threads} {args}']
+    run: ['go run ./tools/consumers -via consumers-compare -host-paths bin/consumers.paths {args}']
+
+  consumers-compare:
+    desc: the comparison graft consumers starts after its build; marks nothing
+    heavy: true
+    # The consumers, the targets of their links out, the glint user config,
+    # tickets_dir and the installed glint go to the host as the entries of
+    # bin/consumers.paths (WORKER_PC_TREES), which consumers writes before it
+    # starts this task; bin/glint goes with this tree. One step: each step
+    # is a worker pc job of its own, and a binary one step builds there is
+    # gone for the next. The old glint's run is not cached by tree (dropped
+    # 14.11): glint reads inputs outside the project (approved list,
+    # tickets_dir, go.work modules, ignored files), and a stale entry could
+    # hide a difference before install.
+    remote: true
+    env: {WORKER_PC_TREES: bin/consumers.paths}
+    usage: -config PATH, -old PATH, -new PATH, -r rules, -j N, -only a,b
+    run: ['go run ./tools/consumers -no-mark -new bin/glint -j {threads} {args}']
   self-check:
     desc: glint on itself, built from this tree
     heavy: true
-    # Stays here: it runs bin/glint, which build makes on this machine, and
-    # graft keeps a glint check by a relative path here.
+    # bin/glint goes with this tree, and the tree's entry in
+    # bin/self-check.paths (WORKER_PC_TREES) sends it with its .git, which
+    # glint reads; the glint user config and tickets_dir
+    # (exception-ticket-closed) go as entries, the approved models list
+    # (model-not-approved) worker pc sends with every job.
+    remote: true
+    env: {WORKER_PC_TREES: bin/self-check.paths}
     cache: *tools_cache
     usage: <glint check flags, e.g. --verbose>
-    deps: [build]
+    deps: [build, self-check-paths]
     run: ['bin/glint check -j {threads} ./... {args}']
+  self-check-paths:
+    desc: list in bin/self-check.paths what glint on this tree reads outside it, for worker pc
+    run: ['go run ./tools/consumers -self-paths bin/self-check.paths']
 
   # --- dependencies ---
   deps:
