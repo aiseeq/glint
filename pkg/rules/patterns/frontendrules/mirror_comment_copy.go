@@ -113,7 +113,7 @@ func mirrorLineMayMatchPhrase(line string) bool {
 		if b >= 'A' && b <= 'Z' {
 			b += 'a' - 'A'
 		}
-		if i > 0 && mirrorASCIIWordByte(line[i-1]) {
+		if i > 0 && patternkit.IsWordChar(line[i-1]) {
 			continue
 		}
 		switch b {
@@ -144,10 +144,6 @@ func mirrorLineMayMatchPhrase(line string) bool {
 		}
 	}
 	return false
-}
-
-func mirrorASCIIWordByte(b byte) bool {
-	return b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
 }
 
 func mirrorASCIITokenSpaceAt(line string, at int, token string) bool {
@@ -186,6 +182,22 @@ func mirrorASCIIHasAt(line string, at int, needle string) bool {
 	return true
 }
 
+// mirrorDataFileExts are the extensions of mirrorDataFile by their first letter.
+var mirrorDataFileExts = map[byte][]string{
+	'c': {"csv", "conf", "cfg", "crt"},
+	'd': {"db"},
+	'e': {"env"},
+	'i': {"ini"},
+	'j': {"json", "jsonl"},
+	'k': {"key"},
+	'l': {"log", "lock"},
+	'p': {"pem"},
+	's': {"sqlite"},
+	't': {"toml", "txt"},
+	'x': {"xml"},
+	'y': {"yaml", "yml"},
+}
+
 func mirrorMayContainDataFile(comment string) bool {
 	if !strings.Contains(comment, ".") {
 		return false
@@ -204,53 +216,8 @@ func mirrorMayContainDataFile(comment string) bool {
 		if first >= 'A' && first <= 'Z' {
 			first += 'a' - 'A'
 		}
-		switch first {
-		case 'c':
-			if mirrorASCIIHasAt(comment, i+1, "csv") || mirrorASCIIHasAt(comment, i+1, "conf") || mirrorASCIIHasAt(comment, i+1, "cfg") || mirrorASCIIHasAt(comment, i+1, "crt") {
-				return true
-			}
-		case 'd':
-			if mirrorASCIIHasAt(comment, i+1, "db") {
-				return true
-			}
-		case 'e':
-			if mirrorASCIIHasAt(comment, i+1, "env") {
-				return true
-			}
-		case 'i':
-			if mirrorASCIIHasAt(comment, i+1, "ini") {
-				return true
-			}
-		case 'j':
-			if mirrorASCIIHasAt(comment, i+1, "json") || mirrorASCIIHasAt(comment, i+1, "jsonl") {
-				return true
-			}
-		case 'k':
-			if mirrorASCIIHasAt(comment, i+1, "key") {
-				return true
-			}
-		case 'l':
-			if mirrorASCIIHasAt(comment, i+1, "log") || mirrorASCIIHasAt(comment, i+1, "lock") {
-				return true
-			}
-		case 'p':
-			if mirrorASCIIHasAt(comment, i+1, "pem") {
-				return true
-			}
-		case 's':
-			if mirrorASCIIHasAt(comment, i+1, "sqlite") {
-				return true
-			}
-		case 't':
-			if mirrorASCIIHasAt(comment, i+1, "toml") || mirrorASCIIHasAt(comment, i+1, "txt") {
-				return true
-			}
-		case 'x':
-			if mirrorASCIIHasAt(comment, i+1, "xml") {
-				return true
-			}
-		case 'y':
-			if mirrorASCIIHasAt(comment, i+1, "yaml") || mirrorASCIIHasAt(comment, i+1, "yml") {
+		for _, ext := range mirrorDataFileExts[first] {
+			if mirrorASCIIHasAt(comment, i+1, ext) {
 				return true
 			}
 		}
