@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
 
 func writeGoModule(t *testing.T, files map[string]string) (string, []*FileContext) {
@@ -78,6 +79,21 @@ func TestLoadGoProjectBuildsCrossFileTypesAndSSAWithSingleParse(t *testing.T) {
 		require.NoError(t, mapErr)
 		assert.Same(t, syntax, ctx.GoAST, "compiled AST %d must be shared with file rules", i)
 	}
+}
+
+func TestLoadPackagesUsesTrimpath(t *testing.T) {
+	root, _ := writeGoModule(t, map[string]string{"main.go": "package project\n"})
+	loader := &goProjectLoader{fset: token.NewFileSet()}
+	called := false
+	_, err := loader.loadPackages([]string{root}, nil, func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+		called = true
+		assert.Equal(t, []string{"-trimpath"}, cfg.BuildFlags)
+		assert.Equal(t, root, cfg.Dir)
+		assert.Equal(t, []string{"./..."}, patterns)
+		return nil, nil
+	})
+	require.NoError(t, err)
+	assert.True(t, called)
 }
 
 func TestLoadGoProjectReturnsTypeErrors(t *testing.T) {

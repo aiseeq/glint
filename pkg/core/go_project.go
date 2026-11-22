@@ -501,12 +501,13 @@ func (loader *goProjectLoader) loadPackages(moduleDirs []string, overlay map[str
 	var loaded []*packages.Package
 	for _, moduleDir := range moduleDirs {
 		modulePackages, err := list(&packages.Config{
-			Mode:      packages.LoadSyntax | packages.NeedModule,
-			Dir:       moduleDir,
-			Fset:      loader.fset,
-			ParseFile: loader.parseFile,
-			Tests:     false,
-			Overlay:   overlay,
+			Mode:       packages.LoadSyntax | packages.NeedModule,
+			Dir:        moduleDir,
+			BuildFlags: []string{"-trimpath"},
+			Fset:       loader.fset,
+			ParseFile:  loader.parseFile,
+			Tests:      false,
+			Overlay:    overlay,
 		}, "./...")
 		if err != nil {
 			return nil, fmt.Errorf("load Go packages in module %q: %w", moduleDir, err)
