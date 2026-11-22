@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -182,6 +183,70 @@ func TestNewBinaryUsesItsOwnResultCacheDirectory(t *testing.T) {
 	}
 	if want := filepath.Join(userCache, "glint", "consumers-new"); seen["new"] != want {
 		t.Fatalf("new glint got GLINT_CACHE_DIR %q, want %q", seen["new"], want)
+	}
+}
+
+func TestConsumerCacheFindingsMatchNoCacheAndSourceIsUntouched(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cachedJSON string
+		wantCode   int
+		wantDiff   bool
+	}{
+		{name: "different", cachedJSON: `{"issues":[{"rule":"stale","file":"a.go","line":7,"message":"cached finding"}]}`, wantCode: 2, wantDiff: true},
+		{name: "same", cachedJSON: `{"issues":[]}`, wantCode: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			root := t.TempDir()
+			project := filepath.Join(root, "alpha")
+			if err := os.MkdirAll(project, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cache := filepath.Join(root, "real-cache")
+			if err := os.MkdirAll(cache, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cacheFile := fmt.Sprintf("%x-old-stamp.gob", sha256.Sum256([]byte(project)))
+			marker := filepath.Join(cache, cacheFile)
+			if err := os.WriteFile(marker, []byte("unchanged sentinel\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GLINT_CACHE_DIR", cache)
+			old := filepath.Join(root, "old")
+			newer := filepath.Join(root, "new")
+			oldScript := "#!/bin/sh\necho '{\"issues\":[]}'\n"
+			newScript := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = rules ]; then echo '  known-rule description'; exit 0; fi\nif [ -f \"$GLINT_CACHE_DIR/%s\" ]; then echo '%s'; else echo '{\"issues\":[]}'; fi\n", cacheFile, tc.cachedJSON)
+			for path, script := range map[string]string{old: oldScript, newer: newScript} {
+				if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // executable test double
+					t.Fatal(err)
+				}
+			}
+			cfg := filepath.Join(root, "consumers.txt")
+			if err := os.WriteFile(cfg, []byte("root "+root+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(marker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr strings.Builder
+			code := run([]string{"-config", cfg, "-old", old, "-new", newer}, &stdout, &stderr)
+			if code != tc.wantCode || strings.Contains(stdout.String(), "cached findings differ") != tc.wantDiff || tc.wantDiff && !strings.Contains(stdout.String(), project) {
+				t.Fatalf("code %d, stdout %q, stderr %q; want code %d and diff %v", code, stdout.String(), stderr.String(), tc.wantCode, tc.wantDiff)
+			}
+			after, err := os.ReadFile(marker)
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("source cache changed: contents %q, err %v", after, err)
+			}
+			entries, err := os.ReadDir(cache)
+			if err != nil || len(entries) != 1 || entries[0].Name() != cacheFile {
+				t.Fatalf("source cache entries = %v, err %v", entries, err)
+			}
+		})
 	}
 }
 

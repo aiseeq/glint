@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -171,6 +172,35 @@ func compareTargets(targets []string, oldAbs, newAbs, rules, jobs, newCache stri
 			_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, newErr)
 			errs++
 			continue
+		}
+		cacheDir, cacheFiles, cacheErr := copyProjectResultCache(p)
+		if cacheErr != nil {
+			_, _ = fmt.Fprintf(stderr, "%s (cache copy): %s\n", name, cacheErr)
+			errs++
+		} else if cacheFiles == 0 {
+			_, _ = fmt.Fprintf(stdout, "%s: cached run skipped (no result cache files)\n", name)
+		} else {
+			fromCacheFindings, _, cachedErr := checkWithCache(newAbs, p, rules, jobs, cacheDir, true)
+			if cachedErr != nil {
+				_, _ = fmt.Fprintf(stderr, "%s (cached new): %s\n", name, cachedErr)
+				errs++
+			} else {
+				added, removed := difference(newIssues, fromCacheFindings)
+				if len(added)+len(removed) > 0 {
+					_, _ = fmt.Fprintf(stdout, "== %s: cached findings differ (+%d -%d)\n", p, len(added), len(removed))
+					for i := 0; i < min(3, len(added)); i++ {
+						printIssue(stdout, "+", added[i])
+					}
+					for i := 0; i < min(3, len(removed)); i++ {
+						printIssue(stdout, "-", removed[i])
+					}
+					errs++
+				}
+			}
+			if err := os.RemoveAll(cacheDir); err != nil {
+				_, _ = fmt.Fprintf(stderr, "%s (cache cleanup): %s\n", name, err)
+				errs++
+			}
 		}
 		slower, slowestNew := compareRuleTimings(oldTimes, oldRuleNames, newTimes)
 		if len(slower) > 0 {
@@ -352,7 +382,14 @@ var errUnknownRule = errors.New("unknown rule")
 
 // check runs glint over dir; a non-empty cacheDir becomes its GLINT_CACHE_DIR.
 func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, map[string]time.Duration, error) {
-	args := []string{"check", "-o", "json", "--no-color", "--timing", "--no-cache"}
+	return checkWithCache(bin, dir, rules, jobs, cacheDir, false)
+}
+
+func checkWithCache(bin, dir, rules, jobs, cacheDir string, useCache bool) ([]output.JSONIssue, map[string]time.Duration, error) {
+	args := []string{"check", "-o", "json", "--no-color", "--timing"}
+	if !useCache {
+		args = append(args, "--no-cache")
+	}
 	if rules != "" {
 		args = append(args, "-r", rules)
 	}
@@ -392,6 +429,56 @@ func check(bin, dir, rules, jobs, cacheDir string) ([]output.JSONIssue, map[stri
 		}
 	}
 	return report.Issues, parseRuleTimings(stderr.String()), nil
+}
+
+// copyProjectResultCache copies only this root's cache files into a temporary
+// directory. The source is never passed to glint, which may prune other builds.
+func copyProjectResultCache(root string) (string, int, error) {
+	source := os.Getenv("GLINT_CACHE_DIR")
+	if source == "" {
+		base, err := os.UserCacheDir()
+		if err != nil {
+			return "", 0, fmt.Errorf("find user cache directory: %w", err)
+		}
+		source = filepath.Join(base, "glint", "results")
+	} else if !filepath.IsAbs(source) {
+		return "", 0, fmt.Errorf("GLINT_CACHE_DIR must be an absolute path: %q", source)
+	}
+	entries, err := os.ReadDir(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", 0, nil
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("read result cache directory: %w", err)
+	}
+	rootHash := fmt.Sprintf("%x", sha256.Sum256([]byte(root))) + "-"
+	var matches []os.DirEntry
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), rootHash) && entry.Type().IsRegular() {
+			matches = append(matches, entry)
+		}
+	}
+	if len(matches) == 0 {
+		return "", 0, nil
+	}
+	// Beside the source, on its disk: /tmp is memory, and a consumer cache
+	// runs to hundreds of megabytes.
+	dest, err := os.MkdirTemp(filepath.Dir(source), "consumer-cache-")
+	if err != nil {
+		return "", 0, fmt.Errorf("create temporary result cache: %w", err)
+	}
+	for _, entry := range matches {
+		data, err := os.ReadFile(filepath.Join(source, entry.Name()))
+		if err != nil {
+			_ = os.RemoveAll(dest)
+			return "", 0, fmt.Errorf("read cache file %s: %w", entry.Name(), err)
+		}
+		if err := os.WriteFile(filepath.Join(dest, entry.Name()), data, 0o600); err != nil {
+			_ = os.RemoveAll(dest)
+			return "", 0, fmt.Errorf("copy cache file %s: %w", entry.Name(), err)
+		}
+	}
+	return dest, len(matches), nil
 }
 
 type slowRule struct {
