@@ -77,12 +77,24 @@ type TscRule struct {
 func NewTscRule() *TscRule {
 	r := &TscRule{
 		BaseRule: rules.NewBaseRule("tsc", "patterns",
-			"Type-checks TypeScript with tsc: by its tsconfig with the project's tsc, or strictly with the global tsc 7 when no tsconfig compiles the file. Type errors and a tsconfig without strict are high, a tsconfig tsc 7 does not build is medium",
-			core.SeverityHigh),
+			"Type-checks TypeScript with tsc: by its tsconfig with the project's tsc, or strictly with the global tsc 7 when no tsconfig compiles the file. Type errors and a tsconfig without strict are high, a tsconfig tsc 7 does not build is medium. Set compiler: global to check every program with the global tsc 7.",
+			core.SeverityHigh).DeclareSettings(rules.NewSettingSpec("compiler", "string", "project", "Compiler used for tsconfig programs: project or global.", "global")),
 		global: "tsc",
 	}
 	r.reset()
 	return r
+}
+
+// Configure validates the selected compiler mode.
+func (r *TscRule) Configure(settings map[string]any) error {
+	if err := r.BaseRule.Configure(settings); err != nil {
+		return err
+	}
+	compiler := r.GetStringSetting("compiler", "project")
+	if compiler != "project" && compiler != "global" {
+		return fmt.Errorf("tsc compiler must be \"project\" or \"global\", got %q", compiler)
+	}
+	return nil
 }
 
 // ReadsOtherFiles reports that the findings of a file depend on the files it
@@ -97,10 +109,11 @@ func (r *TscRule) reset() {
 
 // tscProgram is one tsc run: a tsconfig, or one file no tsconfig compiles.
 type tscProgram struct {
-	config string // the tsconfig; empty for a standalone file
-	file   string // the standalone file
-	tsc    string // the tsc that checks it; empty when the project has none
-	anchor string // the analyzed file that carries findings about the program itself
+	config   string // the tsconfig; empty for a standalone file
+	file     string // the standalone file
+	tsc      string // the tsc that checks it; empty when the project has none
+	compiler string // "global" selects the global tsc for a tsconfig
+	anchor   string // the analyzed file that carries findings about the program itself
 }
 
 func (p *tscProgram) name() string {
@@ -241,6 +254,12 @@ func (r *TscRule) CheckTools(files []*core.FileContext) error {
 	r.reset()
 	r.files = files
 	r.plan, r.planErr = planTscPrograms(files, r.RespectGitignore(), r.SkipDirs()...)
+	compiler := r.GetStringSetting("compiler", "project")
+	if r.plan != nil {
+		for _, program := range r.plan.programs {
+			program.compiler = compiler
+		}
+	}
 	hasTS := false
 	for _, ctx := range files {
 		hasTS = hasTS || ctx.IsTypeScriptFile()
@@ -253,7 +272,7 @@ func (r *TscRule) CheckTools(files []*core.FileContext) error {
 	}
 	var missing []string
 	for _, program := range r.plan.programs {
-		if program.config != "" && program.tsc == "" {
+		if program.config != "" && program.compiler != "global" && program.tsc == "" {
 			missing = append(missing, program.config)
 		}
 	}
@@ -488,10 +507,18 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 	dir := filepath.Dir(program.config)
 	project := []string{"-p", program.config}
 	run := append(append([]string{}, project...), "--noEmit", "--incremental", "--pretty", "false", "--listFiles")
+	compiler := program.tsc
+	paths := []string{program.tsc, global.path}
 	identity := append([]string{program.config, program.tsc, global.path}, project...)
+	if program.compiler == "global" {
+		compiler = global.path
+		paths = []string{global.path}
+		// Its own key: the default mode keeps the answers it stored before.
+		identity = append([]string{"compiler=global", program.config, global.path}, project...)
+	}
 	identity = append(identity, "--showConfig")
 	identity = append(identity, run...)
-	lookup, err := statCachedAnswer(identity, []string{program.tsc, global.path})
+	lookup, err := statCachedAnswer(identity, paths)
 	if err != nil {
 		return tscAnswer{}, err
 	}
@@ -501,7 +528,7 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 	slowStarted := time.Now()
 	notStrict := lookup.notStrict
 	if !lookup.configKnown {
-		shown, showErr := tscOutput(program.tsc, dir, append(project, "--showConfig")...)
+		shown, showErr := tscOutput(compiler, dir, append(project, "--showConfig")...)
 		if showErr != nil {
 			return tscAnswer{}, showErr
 		}
@@ -518,30 +545,32 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 			return tscAnswer{}, err
 		}
 	}
-	localMajor := lookup.localMajor
-	localVersion := lookup.localVersion
-	localReuse := lookup.reuseBuildInfo
-	if localVersion == "" {
-		localVersion, err = toolVersion(program.tsc)
-		if err != nil {
-			return tscAnswer{}, err
+	localMajor, localVersion, localReuse := lookup.localMajor, lookup.localVersion, lookup.reuseBuildInfo
+	if program.compiler == "global" {
+		localMajor, localVersion = 7, global.version
+	} else {
+		if localVersion == "" {
+			localVersion, err = toolVersion(program.tsc)
+			if err != nil {
+				return tscAnswer{}, err
+			}
 		}
-	}
-	if match := tscVersion.FindStringSubmatch(localVersion); match != nil {
-		if major, parseErr := strconv.Atoi(match[1]); parseErr == nil {
-			localMajor = major
+		if match := tscVersion.FindStringSubmatch(localVersion); match != nil {
+			if major, parseErr := strconv.Atoi(match[1]); parseErr == nil {
+				localMajor = major
+			}
 		}
-	}
-	if !toolcache.Disabled && localMajor > 0 && localMajor < 7 {
-		localReuse = true
+		if !toolcache.Disabled && localMajor > 0 && localMajor < 7 {
+			localReuse = true
+		}
 	}
 	answer := tscAnswer{NotStrict: notStrict}
 	var listed []byte
-	answer.Errors, listed, err = incrementalTscDiagnostics(program.tsc, dir, program.config, localReuse, run...)
+	answer.Errors, listed, err = incrementalTscDiagnostics(compiler, dir, program.config, localReuse, run...)
 	if err != nil {
 		return tscAnswer{}, err
 	}
-	if strings.TrimSpace(localVersion) != strings.TrimSpace(global.version) {
+	if program.compiler != "global" && strings.TrimSpace(localVersion) != strings.TrimSpace(global.version) {
 		newer, newerListed, runErr := incrementalTscDiagnostics(global.path, dir, program.config, lookup.reuseBuildInfo, run...)
 		if runErr != nil {
 			return tscAnswer{}, fmt.Errorf("tsc 7: %w", runErr)
@@ -560,7 +589,7 @@ func runTscProgram(program *tscProgram, global globalTscInfo) (tscAnswer, error)
 		listed = append(listed, newerListed...)
 	}
 	if !toolcache.Disabled {
-		stored, err := storeProjectStatFingerprintIfStable(identity, []string{program.tsc, global.path}, program.config, listed, answer, slowStarted, lookup.inputs, localMajor, localVersion, global.version)
+		stored, err := storeProjectStatFingerprintIfStable(identity, paths, program.config, listed, answer, slowStarted, lookup.inputs, localMajor, localVersion, global.version)
 		if err != nil {
 			return tscAnswer{}, err
 		}
