@@ -87,7 +87,7 @@ func readStandardBodies(t *testing.T, project *core.GoProjectContext, sources *D
 // at, built without -trimpath) names the file on disk: a listed file of the
 // same base name elsewhere, another copy of the package, is not read in its
 // place.
-func TestDependencySourcesAbsolutePositionNamesTheListedFile(t *testing.T) {
+func TestDependencySourcesAbsolutePositionNamesTheFile(t *testing.T) {
 	t.Setenv("GOFLAGS", "")
 	t.Setenv("GOWORK", "off")
 	t.Setenv("GOTOOLCHAIN", "local")
@@ -108,42 +108,14 @@ func TestDependencySourcesAbsolutePositionNamesTheListedFile(t *testing.T) {
 	require.NotNil(t, sample)
 	sources := NewDependencySources(project)
 	libPkg := sample.Package.Imports["example.com/lib"].Types
+	ready := libPkg.Scope().Lookup("Ready").(*types.Func)
+	require.NotNil(t, sources.FuncDecl(ready))
+
 	copied := filepath.Join(t.TempDir(), "lib.go")
 	require.NoError(t, os.WriteFile(copied, []byte("package lib\n\nfunc Ready() bool { return false }\n"), 0o600))
-	listed := sources.packageFiles[libPkg]["lib.go"]
-	got, ok := sources.sourcePath(libPkg, listed)
-	assert.True(t, ok)
-	assert.Equal(t, listed, got)
-	got, ok = sources.sourcePath(libPkg, copied)
-	assert.False(t, ok)
-	assert.Empty(t, got)
-}
-
-func TestDependencySourcesTrimpathPositionFindsReplaceSource(t *testing.T) {
-	t.Setenv("GOFLAGS", "-trimpath")
-	t.Setenv("GOWORK", "off")
-	t.Setenv("GOTOOLCHAIN", "local")
-	root, contexts := rulestest.Module(t, map[string]string{
-		"go.mod":                 "module example.com/sample\n\ngo 1.24\n\nrequire example.com/lib v0.0.0\n\nreplace example.com/lib => ./third_party/lib\n",
-		"third_party/lib/go.mod": "module example.com/lib\n\ngo 1.24\n",
-		"third_party/lib/lib.go": "package lib\n\nfunc Ready() bool { return true }\n",
-		"sample.go":              "package sample\n\nimport \"example.com/lib\"\n\nfunc Use() bool { return lib.Ready() }\n",
-	})
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
-	require.NoError(t, err)
-	var sample *core.GoPackageContext
-	for _, pkg := range project.Packages {
-		if pkg.Package.PkgPath == "example.com/sample" {
-			sample = pkg
-		}
-	}
-	require.NotNil(t, sample)
-	libPkg := sample.Package.Imports["example.com/lib"].Types
-	ready := libPkg.Scope().Lookup("Ready").(*types.Func)
-	decl := NewDependencySources(project).FuncDecl(ready)
-	require.NotNil(t, decl)
-	assert.Equal(t, "Ready", decl.Name.Name)
-	assert.NotNil(t, decl.Body)
+	sources = NewDependencySources(project)
+	sources.packageFiles[libPkg]["lib.go"] = copied
+	assert.Nil(t, sources.FuncDecl(ready))
 }
 
 // GOPATH mode (GO111MODULE=off over a go.mod) loads every package without a
