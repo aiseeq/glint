@@ -1,6 +1,8 @@
 package shellrules
 
 import (
+	"go/ast"
+	"go/token"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -18,9 +20,7 @@ func init() {
 	rules.Register(newShellRule("shell-file-name-from-time-of-day",
 		"Detects a file name built from $(date) with the time of day only (%H%M%S, no date, no $$), or a name stamp taken twice for files that belong together — parallel runs collide, and two stamps of one run differ by a second",
 		core.SeverityMedium, checkTimeOfDayNames))
-	rules.Register(newShellRule("shell-pgrep-matches-own-wrapper",
-		"Detects pgrep -f PATTERN inside a script passed to bash -c, sh -c or ssh — the wrapper carries the pattern on its own command line, and pgrep finds it; or a pattern that matches the command line of the script running pgrep (bash stream-watch.sh) — pgrep finds the script and its $( ) subshell, and a [s] class does not help",
-		core.SeverityMedium, checkPgrepOwnWrapper))
+	rules.Register(newShellPgrepRule())
 	rules.Register(newShellRule("shell-background-job-without-trap",
 		"Detects a background job the script kills only at the end of its normal path, with no trap — an error, a timeout or Ctrl-C leaves the job running",
 		core.SeverityMedium, checkBackgroundWithoutTrap))
@@ -198,9 +198,77 @@ func looksLikePath(value string) bool {
 }
 
 var (
-	pgrepPattern   = regexp.MustCompile(`\bpgrep\s+(?:-[A-Za-z]+\s+)*?-[A-Za-z]*f[A-Za-z]*\s+`)
+	pgrepPattern   = regexp.MustCompile(`\b(pgrep|pkill)\s+(?:-[A-Za-z]+\s+)*?-[A-Za-z]*f[A-Za-z]*\s+`)
 	capturedScript = regexp.MustCompile(`^\s*(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)=\$\(\s*cat\s*<<`)
 )
+
+type shellPgrepRule struct{ *shellRule }
+
+func newShellPgrepRule() *shellPgrepRule {
+	return &shellPgrepRule{newShellRule("shell-pgrep-matches-own-wrapper",
+		"Detects pgrep -f or pkill -f whose literal pattern matches its shell wrapper or the script running it",
+		core.SeverityMedium, checkPgrepOwnWrapper)}
+}
+
+func (r *shellPgrepRule) ReportsOn(ctx *core.FileContext) bool {
+	return ctx.IsGoFile() || ctx.IsShellFile() || ctx.IsMakefile()
+}
+
+func (r *shellPgrepRule) RequiresSSA() bool { return false }
+
+func (r *shellPgrepRule) AnalyzeGoProject(project *core.GoProjectContext) ([]*core.Violation, error) {
+	var out []*core.Violation
+	for _, file := range project.Files {
+		if file.GoAST == nil || file.IsTestFile() {
+			continue
+		}
+		ast.Inspect(file.GoAST, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "Command" || len(call.Args) < 3 {
+				return true
+			}
+			binary, ok := execStringArgument(call.Args[0])
+			if !ok || (filepath.Base(binary) != "sh" && filepath.Base(binary) != "bash") {
+				return true
+			}
+			flag, ok := execStringArgument(call.Args[1])
+			if !ok || flag != "-c" {
+				return true
+			}
+			body, ok := execStringArgument(call.Args[2])
+			if !ok {
+				return true
+			}
+			wrapped := "bash -c " + strconv.Quote(body)
+			ctx := core.NewFileContext(filepath.Join(project.ProjectRoot, "exec-wrapper.sh"), project.ProjectRoot, []byte(wrapped), nil)
+			src, ok := patternkit.ReadShell(ctx)
+			if !ok {
+				return true
+			}
+			for _, v := range checkPgrepOwnWrapper(r.shellRule, src) {
+				v.File = file.RelPath
+				v.Line = file.GoFileSet.Position(call.Pos()).Line
+				v.Code = strings.TrimSpace(file.GetLine(v.Line))
+				out = append(out, v)
+			}
+			return true
+		})
+	}
+	return out, nil
+}
+
+func execStringArgument(expr ast.Expr) (string, bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	value, err := strconv.Unquote(lit.Value)
+	return value, err == nil
+}
 
 // checkPgrepOwnWrapper reports pgrep -f inside a quoted script run by
 // another shell: a quoted string on one line, a quoted script of bash -c,
@@ -219,13 +287,20 @@ func checkPgrepOwnWrapper(r *shellRule, src *patternkit.ShellSource) []*core.Vio
 			return
 		}
 		reported[line] = true
-		message := "pgrep -f runs inside a script passed to another shell, whose command line carries the same pattern — pgrep finds the wrapper"
-		suggestion := "Write one character of the pattern as a class (pgrep -f '[s]ession.sh'), or match the process name exactly (pgrep -x)"
+		message := "A process command with -f runs inside a script passed to another shell, whose command line carries the same pattern — the wrapper matches too"
+		suggestion := "Use a pidfile, match the process name exactly (pkill -x), or change one pattern character to a class ([w]orker-loop)"
 		if self {
 			// A class does not help here: the script's command line holds
 			// the name itself, not the pattern, and the class matches it.
-			message = "pgrep -f pattern matches the command line of this script (bash " + filepath.Base(script) + ") — pgrep finds the script and its $( ) subshell"
-			suggestion = "Leave out the ancestors of pgrep (pgrep -Af), or match the process name exactly (pgrep -x)"
+			message = "The -f pattern matches the command line of this script (bash " + filepath.Base(script) + ") — the process command also matches the script and its $( ) subshell"
+			if line > 0 && line <= len(src.Ctx.Lines) {
+				match := pgrepPattern.FindStringSubmatch(src.Ctx.Lines[line-1])
+				if match != nil && match[1] == "pkill" {
+					suggestion = "Use a pidfile or match the intended process name exactly (pkill -x)"
+				} else {
+					suggestion = "Leave out the ancestors of pgrep (pgrep -Af), or match the process name exactly (pgrep -x)"
+				}
+			}
 		}
 		out = appendReport(out, src.Report(r, line, message, suggestion))
 	}
@@ -278,7 +353,7 @@ func checkPgrepOwnWrapper(r *shellRule, src *patternkit.ShellSource) []*core.Vio
 // the command line of a wrapper carrying it: no [x] class and no ^ anchor.
 func findsWrapper(rest string) bool {
 	pattern := pgrepArgument(rest)
-	return pattern != "" && !strings.Contains(pattern, "[") && !strings.HasPrefix(pattern, "^")
+	return pattern != "" && !strings.ContainsAny(pattern, "[$`") && !strings.HasPrefix(pattern, "^")
 }
 
 // namesScript reports a pgrep -f pattern (the text after -f) that matches
@@ -289,7 +364,7 @@ func findsWrapper(rest string) bool {
 // the rule says nothing about a pattern it cannot read.
 func namesScript(rest, rel string) bool {
 	pattern := pgrepArgument(rest)
-	if pattern == "" || rel == "" {
+	if pattern == "" || strings.ContainsAny(pattern, "$`") || rel == "" {
 		return false
 	}
 	base := filepath.Base(rel)

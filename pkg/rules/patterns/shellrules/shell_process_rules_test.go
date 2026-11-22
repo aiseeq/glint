@@ -4,7 +4,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Repro from a real project: every worker of a parallel series built the bot
@@ -104,6 +108,7 @@ run_in() {
         export $(tr "\0" "\n" < /proc/$P/environ | grep ^DISPLAY=)
         cd "$cwd" && exec "$@"' _ "$2" "$3"
 }
+
 inner=$(cat <<INNER
 set -e
 P=\$(pgrep -f session.sh | head -1) # want
@@ -131,6 +136,47 @@ shot_in() {
         grim /tmp/shot.png'
 }
 `)
+}
+
+func TestShellPkillMatchesOwnWrapper(t *testing.T) {
+	shellWanted(t, "shell-pgrep-matches-own-wrapper", "stop-worker.sh", `#!/bin/bash
+bash -c 'pkill -f worker-loop' # want
+ssh host "pkill -f worker-loop" # want
+sh -c 'pgrep -f worker-loop | xargs kill' # want
+pkill -f stop-worker # want
+pkill -x worker
+pkill worker
+sh -c "pkill -f '^/usr/bin/worker'"
+pattern=worker-loop
+sh -c "pkill -f $pattern"
+pkill -f worker-loop
+echo "$(cat worker.pid)" | xargs kill
+`)
+	rule, ok := rules.Get("shell-pgrep-matches-own-wrapper")
+	require.True(t, ok)
+	ctx := rulestest.TextFile(t, "stop-worker.sh", "pkill -f stop-worker\n")
+	violations := rule.AnalyzeFile(ctx)
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Suggestion, "pidfile")
+	assert.Contains(t, violations[0].Suggestion, "pkill -x")
+}
+
+func TestShellPkillMatchesOwnWrapperGoExec(t *testing.T) {
+	project := rulestest.Project(t, map[string]string{"main.go": `package main
+import "os/exec"
+func main() {
+	exec.Command("sh", "-c", "pkill -f worker-loop")
+}
+`})
+	rule, ok := rules.Get("shell-pgrep-matches-own-wrapper")
+	require.True(t, ok)
+	goRule, ok := rule.(interface {
+		AnalyzeGoProject(*core.GoProjectContext) ([]*core.Violation, error)
+	})
+	require.True(t, ok, "rule must inspect Go exec.Command shell scripts")
+	got, err := goRule.AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
 }
 
 // Repro from a real project: a server started in the background was stopped
