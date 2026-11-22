@@ -435,28 +435,7 @@ func (c *resultCache) keyProject(projectRoot, inputs string, projectRules []stri
 		if _, ok := rule.(rules.GoProjectRule); ok {
 			dependencies := fingerprint
 			if reads, declared := rule.(rules.ProjectRuleCacheDependencies); declared {
-				indexes := make(map[string]string, len(indexDependencies))
-				for _, dependency := range indexDependencies {
-					name, value, found := strings.Cut(dependency, "=")
-					if found {
-						indexes[name] = value
-					}
-				}
-				var selected []string
-				unknown := false
-				for _, name := range reads.ProjectRuleCacheDependencies() {
-					value, found := indexes[name]
-					if !found {
-						unknown = true
-						break
-					}
-					selected = append(selected, name+"="+value)
-				}
-				if unknown {
-					selected = indexDependencies
-				}
-				slices.Sort(selected)
-				dependencies += "\n" + strings.Join(selected, "\n")
+				dependencies += "\n" + strings.Join(declaredIndexDependencies(reads.ProjectRuleCacheDependencies(), indexDependencies), "\n")
 			}
 			if input, keyed := rule.(rules.CacheInputRule); keyed {
 				value, err := input.CacheInputs(projectRoot)
@@ -1278,6 +1257,28 @@ func (c *resultCache) fingerprint(rule rules.Rule) string {
 	return fingerprint
 }
 
+// declaredIndexDependencies picks the "name=fingerprint" entries of the
+// indexes a project rule declares it reads, sorted; a declared index that is
+// not enabled keys the rule by every index, as before the declaration.
+func declaredIndexDependencies(names, indexDependencies []string) []string {
+	indexes := make(map[string]string, len(indexDependencies))
+	for _, dependency := range indexDependencies {
+		if name, value, found := strings.Cut(dependency, "="); found {
+			indexes[name] = value
+		}
+	}
+	selected := make([]string, 0, len(names))
+	for _, name := range names {
+		value, found := indexes[name]
+		if !found {
+			return indexDependencies
+		}
+		selected = append(selected, name+"="+value)
+	}
+	slices.Sort(selected)
+	return selected
+}
+
 func (c *resultCache) ruleCodeFingerprint(symbols []string) string {
 	packages := make(map[string]bool)
 	for _, symbol := range symbols {
@@ -1307,11 +1308,7 @@ func (c *resultCache) allRuleFingerprints() string {
 }
 
 func (c *resultCache) fingerprintPackages(packages map[string]bool) string {
-	paths := make([]string, 0, len(packages))
-	for path := range packages {
-		paths = append(paths, path)
-	}
-	slices.Sort(paths)
+	paths := slices.Sorted(maps.Keys(packages))
 	var parts []string
 	for _, path := range paths {
 		parts = append(parts, path+"="+c.ruleFingerprints[path])
