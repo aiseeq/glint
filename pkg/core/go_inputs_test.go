@@ -599,3 +599,16 @@ func TestGoInputsGoworkOffMatchesNoWorkspace(t *testing.T) {
 	assert.NotEqual(t, workspace, offWithWork, "a found go.work and GOWORK=off are different loads")
 	assert.Equal(t, off, offWithWork, "GOWORK=off ignores the go.work")
 }
+
+func TestGoInputsIgnoreBuildParallelismInGoflags(t *testing.T) {
+	_, root := inputsModule(t)
+	t.Setenv("GOFLAGS", "-modcacherw")
+	plain, _ := inputsOf(t, root)
+	t.Setenv("GOFLAGS", "-p=1 -modcacherw  -p=4")
+	parallel, _ := inputsOf(t, root)
+	assert.Equal(t, plain, parallel, "-p sets how many builds run at once, not what the load reads")
+
+	t.Setenv("GOFLAGS", "-modcacherw -tags=integration")
+	tagged, _ := inputsOf(t, root)
+	assert.NotEqual(t, plain, tagged, "build tags change which files the load reads")
+}

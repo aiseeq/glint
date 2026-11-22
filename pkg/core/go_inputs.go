@@ -136,6 +136,7 @@ func hashModuleInputs(moduleDir string) (string, bool, error) {
 	if env["GOWORK"] == "off" {
 		env["GOWORK"] = ""
 	}
+	env["GOFLAGS"] = withoutBuildParallelism(env["GOFLAGS"])
 	sum := sha256.New()
 	for _, key := range goEnvKeys {
 		writeHashLine(sum, "%s=%s\n", key, env[key])
@@ -595,4 +596,20 @@ func unresolvableLink(path string, err error) bool {
 	}
 	_, statErr := os.Stat(path)
 	return os.IsNotExist(statErr) || errors.Is(statErr, syscall.ELOOP)
+}
+
+// withoutBuildParallelism drops -p from GOFLAGS: it sets how many builds run
+// at once, not what the load reads, and graft exec appends its own -p=N, so a
+// gate and a plain run of the same tree would otherwise never share the cache.
+// GOFLAGS holds space-separated -flag=value settings.
+func withoutBuildParallelism(goflags string) string {
+	fields := strings.Fields(goflags)
+	kept := fields[:0]
+	for _, field := range fields {
+		if strings.HasPrefix(field, "-p=") || strings.HasPrefix(field, "--p=") {
+			continue
+		}
+		kept = append(kept, field)
+	}
+	return strings.Join(kept, " ")
 }
