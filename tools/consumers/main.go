@@ -100,6 +100,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	sort.Strings(targets)
+	// No consumer to compare is no evidence that nothing changed: a host
+	// without the consumer copies, or a name in -only that is not there,
+	// would otherwise pass as "no differences".
+	for name := range selected {
+		if !slices.ContainsFunc(targets, func(p string) bool { return filepath.Base(p) == name }) {
+			_, _ = fmt.Fprintf(stderr, "consumers: -only %s: no such consumer below the roots\n", name)
+			return 2
+		}
+	}
+	if len(targets) == 0 {
+		_, _ = fmt.Fprintf(stderr, "consumers: no consumer projects below the roots %s\n", strings.Join(cfg.roots, ", "))
+		return 2
+	}
 	if _, err := os.Stat(oldAbs); err != nil {
 		_, _ = fmt.Fprintf(stderr, "consumers: old binary %s: %v\n", oldAbs, err)
 		return 2

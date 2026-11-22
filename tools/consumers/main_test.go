@@ -431,3 +431,74 @@ func gitTest(t *testing.T, repo string, args ...string) {
 		t.Fatalf("git %v: %s: %v", args, out, err)
 	}
 }
+
+// writeConsumerRun lays out a root with the given consumer projects, an old
+// and a new glint double printing script, and the configuration naming the
+// root; it returns the configuration and both binaries.
+func writeConsumerRun(t *testing.T, script string, projects ...string) (cfg, old, newer string) {
+	t.Helper()
+	root := t.TempDir()
+	for _, name := range projects {
+		project := filepath.Join(root, name)
+		if err := os.MkdirAll(project, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bins := t.TempDir()
+	old, newer = filepath.Join(bins, "old"), filepath.Join(bins, "new")
+	for _, path := range []string{old, newer} {
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // an executable test double
+			t.Fatal(err)
+		}
+	}
+	cfg = filepath.Join(bins, "consumers.txt")
+	if err := os.WriteFile(cfg, []byte("root "+root+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cfg, old, newer
+}
+
+// A consumer whose packages fail to load makes both glints fail the same
+// way; that is an error of the comparison, not "no differences".
+func TestConsumerLoadFailureCountsAsError(t *testing.T) {
+	loadFails := "#!/bin/sh\necho 'Error: load Go project context: could not import example.com/missing' >&2\nexit 1\n"
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	cfg, old, newer := writeConsumerRun(t, loadFails, "alpha", "beta")
+	var stdout, stderr strings.Builder
+	code := run([]string{"-config", cfg, "-old", old, "-new", newer}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stdout.String(), "2 errors") || !strings.Contains(stderr.String(), "alpha: ") {
+		t.Fatalf("code %d, stdout %q, stderr %q: want both load failures counted as errors", code, stdout.String(), stderr.String())
+	}
+}
+
+// No consumer to compare - an empty root on a host without the copies, or
+// -only naming a project that is not there - is an error, while the same
+// root with a consumer compares clean.
+func TestNoConsumerToCompareIsAnError(t *testing.T) {
+	clean := "#!/bin/sh\necho '{\"issues\":[]}'\n"
+	for _, tc := range []struct {
+		name     string
+		projects []string
+		args     []string
+		code     int
+		stderr   string
+	}{
+		{"empty root", nil, nil, 2, "no consumer projects"},
+		{"unknown only", []string{"alpha"}, []string{"-only", "gamma"}, 2, "-only gamma"},
+		{"one consumer", []string{"alpha"}, nil, 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Chdir(t.TempDir()) // a clean compare writes the run marker of the current directory
+			cfg, old, newer := writeConsumerRun(t, clean, tc.projects...)
+			var stdout, stderr strings.Builder
+			code := run(append([]string{"-config", cfg, "-old", old, "-new", newer}, tc.args...), &stdout, &stderr)
+			if code != tc.code || !strings.Contains(stderr.String(), tc.stderr) {
+				t.Fatalf("code %d, stdout %q, stderr %q: want code %d with %q", code, stdout.String(), stderr.String(), tc.code, tc.stderr)
+			}
+		})
+	}
+}
