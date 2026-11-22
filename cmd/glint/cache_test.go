@@ -11,7 +11,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -22,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/aiseeq/glint/internal/cachekey"
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/frontendrules"
@@ -342,7 +342,7 @@ func runSubsetIndexedCached(t *testing.T, dir, version, value, path string) (cor
 	list := []rules.Rule{rule}
 	cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 	require.NoError(t, err)
-	cache.ruleFingerprints[reflect.TypeFor[subsetIndexedFindingRule]().PkgPath()] = version
+	cache.ruleFingerprints[rule.Name()] = version
 	cache.keyProject("", "same-inputs", nil, list, "")
 	found, panics, err := analyzeProjectContained(contexts, contexts, list, append(rules.GetEnabled(cfg), rule), cfg, nil, cache)
 	require.NoError(t, err)
@@ -465,7 +465,7 @@ func TestResultCacheInvalidatesOnlyRulesWithChangedFingerprint(t *testing.T) {
 	run := func(fingerprint string) core.ViolationList {
 		cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 		require.NoError(t, err)
-		cache.ruleFingerprints[reflect.TypeFor[countingRule]().PkgPath()] = fingerprint
+		cache.ruleFingerprints[rule.Name()] = fingerprint
 		got, err := analyzeFiles(ctx, []rules.Rule{rule}, core.DefaultConfig(), nil, cache)
 		require.NoError(t, err)
 		require.NoError(t, cache.save())
@@ -589,9 +589,7 @@ func TestFullRunDropsDeletedFileFromCache(t *testing.T) {
 
 func TestNewRootCacheUsesBinaryHashWithoutBuildManifest(t *testing.T) {
 	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
-	previous := cacheBuildManifest
-	cacheBuildManifest = ""
-	t.Cleanup(func() { cacheBuildManifest = previous })
+	useManifest(t, func() (*cachekey.Manifest, error) { return nil, cachekey.ErrNone })
 
 	cache, err := newRootCache("/project", "", core.DefaultConfig(), false)
 	require.NoError(t, err)
@@ -644,8 +642,8 @@ func TestProjectCacheFingerprintCoversRuleStateDependencies(t *testing.T) {
 	open := func(indexFingerprint string) *resultCache {
 		cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 		require.NoError(t, err)
-		cache.ruleFingerprints[reflect.TypeFor[frontendrules.TSPathNotRoutedRule]().PkgPath()] = indexFingerprint
-		cache.ruleFingerprints[reflect.TypeFor[projectStubRule]().PkgPath()] = "consumer-v1"
+		cache.ruleFingerprints[indexer.Name()] = indexFingerprint
+		cache.ruleFingerprints[consumer.Name()] = "consumer-v1"
 		return cache
 	}
 	first := open("index-v1")
@@ -664,7 +662,7 @@ func TestProjectCacheReportsPartialRuleHits(t *testing.T) {
 	first := newProjectStubRule()
 	second := &projectStubRule{BaseRule: rules.NewBaseRule("project-stub-2", "patterns", "another project rule", core.SeverityMedium)}
 	cache := &resultCache{
-		ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "code-v1"},
+		ruleFingerprints: map[string]string{first.Name(): "code-v1", second.Name(): "code-v1"},
 	}
 	ruleNames := []string{first.Name(), second.Name()}
 	cache.keyProject("", "inputs", ruleNames, []rules.Rule{first, second}, "")
@@ -682,7 +680,7 @@ func TestProjectCacheFullScopeServesPartialRun(t *testing.T) {
 	cache := &resultCache{
 		previousProject:  previous,
 		build:            "code-v1",
-		ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "code-v1"},
+		ruleFingerprints: map[string]string{rule.Name(): "code-v1"},
 	}
 	assert.Same(t, previous, cache.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "file-a"))
 	previous.Fingerprints = maps.Clone(cache.projectFingerprints)
@@ -738,7 +736,7 @@ func TestProjectCacheFullRunReplacesFindingsWithNewFingerprint(t *testing.T) {
 		Fingerprints: map[string]string{rule.Name(): "old"},
 		Violations:   map[string][]core.Violation{rule.Name(): {{Rule: rule.Name(), Message: "old finding"}}},
 	}
-	cache := &resultCache{previousProject: previous, ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "new"}}
+	cache := &resultCache{previousProject: previous, ruleFingerprints: map[string]string{rule.Name(): "new"}}
 	cache.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
 	newFingerprint := cache.projectFingerprints[rule.Name()]
 	newFinding := &core.Violation{Rule: rule.Name(), Message: "new finding"}
@@ -748,7 +746,7 @@ func TestProjectCacheFullRunReplacesFindingsWithNewFingerprint(t *testing.T) {
 	assert.Equal(t, newFingerprint, cache.currentProject.Fingerprints[rule.Name()])
 	assert.Equal(t, "new finding", cache.currentProject.Violations[rule.Name()][0].Message)
 
-	next := &resultCache{previousProject: cache.currentProject, ruleFingerprints: map[string]string{reflect.TypeFor[projectStubRule]().PkgPath(): "new"}}
+	next := &resultCache{previousProject: cache.currentProject, ruleFingerprints: map[string]string{rule.Name(): "new"}}
 	next.keyProject("", "inputs", []string{rule.Name()}, []rules.Rule{rule}, "")
 	assert.True(t, next.projectRuleReusable(rule), "the next full run reuses the refreshed entry")
 	assert.Equal(t, "1 cached, 0 rerun", next.projectState())

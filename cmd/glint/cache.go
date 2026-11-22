@@ -27,8 +27,9 @@ import (
 
 // cacheFormat changes whenever the stored layout does, or what it means: a
 // suppression entry carries the severity of what it silenced since 8, a
-// finding about a marker the marker's rules since 9.
-const cacheFormat = "glint-results-9"
+// finding about a marker the marker's rules since 9, a rule's fingerprint is
+// the hash of the code reachable from its registration since 10.
+const cacheFormat = "glint-results-10"
 
 // maxProjectCacheVariants keeps room for the five Go input modes in the
 // adversary scenario, plus variants created by edits and concurrent runs.
@@ -50,7 +51,14 @@ type resultCache struct {
 	stamp             string
 	configFingerprint string
 	keyDescription    string
-	ruleFingerprints  map[string]string
+	// ruleFingerprints holds the hash of each rule's own code by rule name;
+	// allFingerprint, of the whole build, keys a rule it does not name.
+	ruleFingerprints map[string]string
+	allFingerprint   string
+	// previousRuleFingerprints is what the cache read recorded for the
+	// rules of its run, runRuleFingerprints what this run records.
+	previousRuleFingerprints map[string]string
+	runRuleFingerprints      map[string]string
 	// previous is what the last run stored, by path relative to the root.
 	previous map[string]cacheEntry
 	loaded   bool
@@ -123,11 +131,14 @@ type rootSubsetEntry struct {
 }
 
 type cacheContents struct {
-	Subsets         map[string]rootSubsetEntry
-	Stamp           string
-	Entries         map[string]cacheEntry
-	Project         *projectEntry
-	FingerprintSets []map[string]string
+	// RuleFingerprints records the fingerprint of every rule the runs that
+	// wrote the cache ran, cached or not: --timing compares them.
+	RuleFingerprints map[string]string
+	Subsets          map[string]rootSubsetEntry
+	Stamp            string
+	Entries          map[string]cacheEntry
+	Project          *projectEntry
+	FingerprintSets  []map[string]string
 }
 
 // openRootCache opens the result cache of a root walked over scopes: a run
@@ -178,7 +189,7 @@ func newRootCache(root, seed string, cfg *core.Config, goTreesFromLoader bool) (
 	}
 	cache, err := openResultCache(dir, root, seed, key.core, stamp)
 	if err == nil {
-		cache.ruleFingerprints = key.packages
+		cache.ruleFingerprints, cache.allFingerprint = key.rules, key.all
 		cache.keyDescription = key.description
 		analysis := cacheAnalysisConfig(cfg)
 		config, marshalErr := yaml.Marshal(&analysis)
@@ -192,18 +203,24 @@ func newRootCache(root, seed string, cfg *core.Config, goTreesFromLoader bool) (
 }
 
 type resultCacheKey struct {
+	// core is the driver's hash: it names the cache files.
 	core        string
-	packages    map[string]string
+	rules       map[string]string
+	all         string
 	description string
 }
 
 func cacheBuildKey() (resultCacheKey, error) {
 	manifest := cacheKeyManifest()
+	if manifest.err != nil {
+		return resultCacheKey{}, manifest.err
+	}
 	if manifest.trusted {
 		return resultCacheKey{
-			core:        manifest.core,
-			packages:    manifest.packages,
-			description: fmt.Sprintf("result cache key: rule fingerprints (core %s)", manifest.core),
+			core:        manifest.driver,
+			rules:       manifest.rules,
+			all:         manifest.all,
+			description: fmt.Sprintf("result cache key: rule fingerprints by registration (driver %s)", manifest.driver),
 		}, nil
 	}
 	binary, err := executableHash()
@@ -213,7 +230,7 @@ func cacheBuildKey() (resultCacheKey, error) {
 	core := buildTag(binary)
 	return resultCacheKey{
 		core:        core,
-		packages:    map[string]string{},
+		rules:       map[string]string{},
 		description: fmt.Sprintf("result cache key: binary hash %s (build without verified fingerprints)", core),
 	}, nil
 }
@@ -353,6 +370,7 @@ func (c *resultCache) read(path string) (found bool, err error) {
 		return false, fmt.Errorf("decode result cache %s: %w", path, err)
 	}
 	if stored.Stamp == c.stamp {
+		c.previousRuleFingerprints = stored.RuleFingerprints
 		c.previous = stored.Entries
 		c.subsetPrevious = stored.Subsets
 		c.previousProject = stored.Project
@@ -797,8 +815,13 @@ func (c *resultCache) save() error {
 	if c.subsetCurrent != nil {
 		subsets = c.subsetCurrent
 	}
-	contents := cacheContents{Stamp: c.stamp, Entries: entries, Subsets: subsets}
-	rootChanged := !c.loaded || !cacheContentsEqual(contents, cacheContents{Stamp: c.stamp, Entries: c.previous, Subsets: c.subsetPrevious})
+	ruleFingerprints := maps.Clone(c.previousRuleFingerprints)
+	if ruleFingerprints == nil || c.rootRunComplete {
+		ruleFingerprints = make(map[string]string, len(c.runRuleFingerprints))
+	}
+	maps.Copy(ruleFingerprints, c.runRuleFingerprints)
+	contents := cacheContents{Stamp: c.stamp, Entries: entries, Subsets: subsets, RuleFingerprints: ruleFingerprints}
+	rootChanged := !c.loaded || !cacheContentsEqual(contents, cacheContents{Stamp: c.stamp, Entries: c.previous, Subsets: c.subsetPrevious, RuleFingerprints: c.previousRuleFingerprints})
 	if !rootChanged {
 		now := time.Now()
 		err := os.Chtimes(c.path, now, now)
@@ -1225,19 +1248,35 @@ func cacheStamp(cfg *core.Config, goTreesFromLoader, tolerant bool, coreFingerpr
 }
 
 func (c *resultCache) fingerprint(rule rules.Rule) string {
-	t := reflect.TypeOf(rule)
-	for t != nil && t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
 	fingerprint := c.build
-	if t != nil && c.ruleFingerprints[t.PkgPath()] != "" {
-		fingerprint = c.ruleFingerprints[t.PkgPath()]
+	if own := c.ruleFingerprints[rule.Name()]; own != "" {
+		fingerprint = own
+	} else if c.allFingerprint != "" {
+		fingerprint = c.allFingerprint
 	}
 	if c.configFingerprint != "" {
 		sum := sha256.Sum256([]byte(fingerprint + "\x00" + c.configFingerprint))
 		return hex.EncodeToString(sum[:])
 	}
 	return fingerprint
+}
+
+// recordRuleFingerprints notes the fingerprints of the rules of this run, for
+// the cache file and for ruleFingerprintChanges.
+func (c *resultCache) recordRuleFingerprints(list []rules.Rule) {
+	c.runRuleFingerprints = c.fingerprints(list)
+}
+
+// ruleFingerprintChanges counts the rules of this run whose fingerprint is
+// not the one the cache read recorded (a rule it does not name counts), of
+// all the rules of this run.
+func (c *resultCache) ruleFingerprintChanges() (changed, total int) {
+	for name, fingerprint := range c.runRuleFingerprints {
+		if c.previousRuleFingerprints[name] != fingerprint {
+			changed++
+		}
+	}
+	return changed, len(c.runRuleFingerprints)
 }
 
 func (c *resultCache) fingerprints(list []rules.Rule) map[string]string {

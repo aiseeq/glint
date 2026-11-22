@@ -10,8 +10,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -20,39 +18,28 @@ import (
 	"github.com/aiseeq/akit/proc"
 )
 
-type Manifest struct {
-	Core     string            `json:"core"`
-	Packages map[string]string `json:"packages"`
-}
-
+// Snapshot is the state of the build's packages at one moment.
 type Snapshot struct {
 	Packages map[string]Package
-	Manifest Manifest
+	// Module is the main module's path.
+	Module string
+	// External hashes what the module's own source does not decide: the
+	// packages outside the module (their versions, local replacements, the
+	// toolchain) and the build environment.
+	External string
 }
 
+// Package is one package of the build as go list -export reports it.
 type Package struct {
 	ImportPath string
-	Dir        string
 	BuildID    string
 	Imports    []string
-	Sources    []string
 }
 
 type listedPackage struct {
-	ImportPath   string
-	Dir          string
-	BuildID      string
-	Imports      []string
-	GoFiles      []string
-	CgoFiles     []string
-	CFiles       []string
-	CXXFiles     []string
-	MFiles       []string
-	HFiles       []string
-	SFiles       []string
-	SwigFiles    []string
-	SwigCXXFiles []string
-	EmbedFiles   []string
+	ImportPath string
+	BuildID    string
+	Imports    []string
 }
 
 func Capture(ctx context.Context, root string) (Snapshot, error) {
@@ -85,19 +72,12 @@ func Capture(ctx context.Context, root string) (Snapshot, error) {
 		if listed.BuildID == "" {
 			continue
 		}
-		pkg := Package{
-			ImportPath: listed.ImportPath,
-			Dir:        listed.Dir,
-			BuildID:    listed.BuildID,
-			Imports:    listed.Imports,
-			Sources: slices.Concat(listed.GoFiles, listed.CgoFiles, listed.CFiles, listed.CXXFiles, listed.MFiles,
-				listed.HFiles, listed.SFiles, listed.SwigFiles, listed.SwigCXXFiles, listed.EmbedFiles),
-		}
+		pkg := Package(listed)
 
 		packages[pkg.ImportPath] = pkg
 	}
 
-	goEnv, err := commandOutput(ctx, root, "go", "env", "-json", "GOFLAGS", "GOOS", "GOARCH", "CGO_ENABLED", "GOEXPERIMENT")
+	goEnv, err := commandOutput(ctx, root, "go", "env", "-json", "GOFLAGS", "GOOS", "GOARCH", "CGO_ENABLED", "GOEXPERIMENT", "GOVERSION")
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("read build environment: %w", err)
 	}
@@ -105,70 +85,37 @@ func Capture(ctx context.Context, root string) (Snapshot, error) {
 	if err := json.Unmarshal(goEnv, &environment); err != nil {
 		return Snapshot{}, fmt.Errorf("decode build environment: %w", err)
 	}
-	manifest, err := BuildManifest(modulePath, packages, environment)
+	external, err := ExternalKey(modulePath, packages, environment)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{Packages: packages, Manifest: manifest}, nil
+	return Snapshot{Packages: packages, Module: modulePath, External: external}, nil
 }
 
-func BuildManifest(modulePath string, packages map[string]Package, environment map[string]string) (Manifest, error) {
-	ids := make(map[string]string, len(packages))
-	for path, pkg := range packages {
-		ids[path] = pkg.BuildID
-	}
-	manifest := Manifest{Packages: make(map[string]string)}
+// ExternalKey hashes the BuildIDs of the packages outside the module that
+// the binary links, and the build environment. A BuildID covers a package's
+// source, its dependencies' and the compiler, so a new version, an edited
+// local replacement or another toolchain changes it.
+func ExternalKey(modulePath string, packages map[string]Package, environment map[string]string) (string, error) {
 	commandPath := modulePath + "/cmd/glint"
+	if _, ok := packages[commandPath]; !ok {
+		return "", fmt.Errorf("go list did not include %s", commandPath)
+	}
 	linked := linkedInto(commandPath, packages)
-	coreParts := make([]string, 0, len(packages)+8)
-	for path, pkg := range packages {
-		if !withinModule(path, modulePath) {
-			continue
-		}
-		if isRulePackage(path, modulePath) {
-			manifest.Packages[path] = pkg.BuildID
-			continue
-		}
-		// Module packages the binary does not link (build tools, test
-		// helpers) cannot change what it reports.
-		if path != commandPath && linked[path] {
-			coreParts = append(coreParts, path+" "+pkg.BuildID)
-		}
-	}
-	command, ok := packages[commandPath]
-	if !ok {
-		return Manifest{}, fmt.Errorf("go list did not include %s", commandPath)
-	}
-	sources := append([]string(nil), command.Sources...)
-	sort.Strings(sources)
-	hash := sha256.New()
-	for _, name := range sources {
-		data, err := readFile(filepath.Join(command.Dir, name))
-		if err != nil {
-			return Manifest{}, fmt.Errorf("read %s source %s: %w", commandPath, name, err)
-		}
-		_, _ = fmt.Fprintf(hash, "%s\x00", name)
-		_, _ = hash.Write(data)
-		_, _ = hash.Write([]byte{0})
-	}
-	coreParts = append(coreParts, "cmd/glint sources "+hex.EncodeToString(hash.Sum(nil)))
-	for _, imported := range command.Imports {
-		if isRulePackage(imported, modulePath) || isCommand(imported, modulePath) {
-			continue
-		}
-		if id := ids[imported]; id != "" {
-			coreParts = append(coreParts, "cmd/glint dependency "+imported+" "+id)
+	parts := make([]string, 0, len(linked)+1)
+	for path := range linked {
+		if pkg, ok := packages[path]; ok && !withinModule(path, modulePath) {
+			parts = append(parts, path+" "+pkg.BuildID)
 		}
 	}
 	environmentJSON, err := json.Marshal(environment)
 	if err != nil {
-		return Manifest{}, fmt.Errorf("encode build environment: %w", err)
+		return "", fmt.Errorf("encode build environment: %w", err)
 	}
-	coreParts = append(coreParts, "build environment "+string(environmentJSON))
-	sort.Strings(coreParts)
-	coreHash := sha256.Sum256([]byte(strings.Join(coreParts, "\n")))
-	manifest.Core = hex.EncodeToString(coreHash[:])[:16]
-	return manifest, nil
+	parts = append(parts, "build environment "+string(environmentJSON))
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func VerifyStable(before, after Snapshot) error {
@@ -211,22 +158,6 @@ func linkedInto(root string, packages map[string]Package) map[string]bool {
 func withinModule(importPath, modulePath string) bool {
 	return importPath == modulePath || strings.HasPrefix(importPath, modulePath+"/")
 }
-
-func isRulePackage(importPath, modulePath string) bool {
-	if !withinModule(importPath, modulePath) {
-		return false
-	}
-	relative := strings.TrimPrefix(strings.TrimPrefix(importPath, modulePath), "/")
-	return strings.HasPrefix(relative, "pkg/rules/") &&
-		!strings.HasPrefix(relative, "pkg/rules/patterns/internal/") &&
-		!strings.HasPrefix(relative, "pkg/rules/helpers")
-}
-
-func isCommand(importPath, modulePath string) bool {
-	return importPath == modulePath+"/cmd/glint"
-}
-
-var readFile = os.ReadFile
 
 func commandOutput(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)

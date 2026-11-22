@@ -288,6 +288,11 @@ func init() {
 		},
 	})
 	rootCmd.AddCommand(checkCmd)
+	rootCmd.AddCommand(&cobra.Command{
+		Use: "cache-deps", Hidden: true, Args: cobra.NoArgs,
+		Short: "Print, as JSON, the functions the result cache key of the driver and of each rule covers",
+		RunE:  runCacheDeps,
+	})
 	rootCmd.AddCommand(instructionSizeCmd)
 	rootCmd.AddCommand(guideCmd)
 	rootCmd.AddCommand(rulesCmd)
@@ -644,11 +649,14 @@ func runCheck(_ *cobra.Command, args []string) (runErr error) {
 		if cache != nil {
 			journalCachedFiles += cache.reused
 			journal.noteCacheMiss(cache)
+			cache.recordRuleFingerprints(enabledRules)
 			if err := cache.save(); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: result cache of %s not saved: %v\n", projectRoot, err)
 			}
 			if flagTiming {
 				fmt.Fprintln(os.Stderr, cache.keyDescription)
+				changed, total := cache.ruleFingerprintChanges()
+				fmt.Fprintf(os.Stderr, "rule fingerprints: %d of %d changed\n", changed, total)
 				fmt.Fprintf(os.Stderr, "result cache %s: %d of %d files unchanged, project rules %s\n",
 					projectRoot, cache.reused, prepared.analyzedFiles(), cache.projectState())
 			}

@@ -37,3 +37,15 @@ func TestPublishVerifiedReplacesTheBinaryAfterVerification(t *testing.T) {
 	assert.Equal(t, "verified", string(got))
 	assert.NoFileExists(t, out+".unverified")
 }
+
+// The run asks every enabled rule what to walk, load and build before any
+// rule analyzes (requiredFilePredicate, additionalFilePredicate,
+// prepareScopedAnalysis, rootProjectRulePlan, selectTypedProjectRules): an
+// answer of one rule changes what every other rule sees, so these methods
+// are the driver's, whichever rule they belong to.
+func TestTheMethodsThatPlanTheRunAreTheDrivers(t *testing.T) {
+	methods := glintDeps(".", "example.com/m").RegistryMethods
+	for _, name := range []string{"RequiresFile", "RequiresAdditionalFile", "TypedGoProjectImports", "NeedsTypedGoProject", "RequiresSSA"} {
+		assert.Contains(t, methods, name)
+	}
+}

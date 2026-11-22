@@ -3,6 +3,8 @@ package rules
 import (
 	"fmt"
 	"maps"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -15,7 +17,9 @@ import (
 type Registry struct {
 	rules      map[string]Rule
 	byCategory map[string][]Rule
-	mu         sync.RWMutex
+	// sites records where Register was called for each rule.
+	sites map[string]RegistrationSite
+	mu    sync.RWMutex
 }
 
 // Global registry instance
@@ -204,6 +208,50 @@ func Register(rule Rule) {
 	if err := globalRegistry.Register(rule); err != nil {
 		panic(err)
 	}
+	var pcs [1]uintptr
+	if runtime.Callers(2, pcs[:]) == 1 {
+		frame, _ := runtime.CallersFrames(pcs[:]).Next()
+		if pkg := packageOfFunction(frame.Function); pkg != "" {
+			globalRegistry.setSite(rule.Name(), RegistrationSite{File: pkg + "/" + filepath.Base(frame.File), Line: frame.Line})
+		}
+	}
+}
+
+// RegistrationSite is where Register was called for a rule: File is
+// "<import path>/<file name>". The build keys the result cache of a rule by
+// the code reachable from that call (internal/depgraph).
+type RegistrationSite struct {
+	File string
+	Line int
+}
+
+func (r *Registry) setSite(name string, site RegistrationSite) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sites == nil {
+		r.sites = make(map[string]RegistrationSite)
+	}
+	r.sites[name] = site
+}
+
+// RegistrationSiteOf returns where the rule of name was registered with
+// Register.
+func RegistrationSiteOf(name string) (RegistrationSite, bool) {
+	globalRegistry.mu.RLock()
+	defer globalRegistry.mu.RUnlock()
+	site, ok := globalRegistry.sites[name]
+	return site, ok
+}
+
+// packageOfFunction returns the import path in a runtime function name such
+// as "example.com/m/pkg/x.init.0".
+func packageOfFunction(name string) string {
+	slash := strings.LastIndex(name, "/")
+	dot := strings.Index(name[slash+1:], ".")
+	if dot < 0 {
+		return ""
+	}
+	return name[:slash+1+dot]
 }
 
 // Get returns a rule from the global registry
