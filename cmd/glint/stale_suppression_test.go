@@ -233,6 +233,85 @@ categories:
 	}
 }
 
+func TestStaleSuppressionAfterProjectExceptionMovesWithResultCache(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
+	writeModuleFile(t, root, "go.mod", "module example.com/projectA\n\ngo 1.24\n")
+	writeModuleFile(t, root, "logic.go", `package projectA
+
+func projectAFirst(x int) int {
+	a := x + 1
+	b := a * 2
+	c := b + 3
+	d := c * 4
+	return d + 5
+}
+
+func projectACopy(x int) int {
+	a := x + 2
+	b := a * 2
+	c := b + 3
+	d := c * 4
+	return d + 5
+}
+
+func projectASolo(x int) int {
+	return x
+}
+`)
+	config := `version: 1
+categories:
+  duplication:
+    rules:
+      near-duplicate-func:
+        exceptions:
+          - file: logic.go
+            function: projectACopy
+            reason: known project finding
+          - file: logic.go
+            function: projectASolo
+            reason: no finding remains
+`
+	run := func() (findings, stale core.ViolationList, cache *resultCache) {
+		t.Helper()
+		cfg, all, err := loadConfig(root)
+		require.NoError(t, err)
+		var enabled []rules.Rule
+		for _, rule := range all {
+			if slices.Contains([]string{"near-duplicate-func", "stale-suppression"}, rule.Name()) {
+				enabled = append(enabled, rule)
+			}
+		}
+		require.Len(t, enabled, 2)
+		prepared, err := prepareAnalysis(core.NewGoProjectLoader(), root, cfg, enabled, true)
+		require.NoError(t, err)
+		rules.ResetState(enabled)
+		violations, err := analyzeProject(prepared.contexts, enabled, cfg, prepared.project, prepared.cache)
+		require.NoError(t, err)
+		findings, suppressions := core.SplitSuppressions(violations)
+		stale, err = staleSuppressions(enabled, deadcode.StaleSuppressionRun{
+			Contexts: prepared.contexts, Suppressions: suppressions, Config: cfg, WholeRoot: true,
+		})
+		require.NoError(t, err)
+		require.NoError(t, prepared.cache.save())
+		return findings, stale, prepared.cache
+	}
+	writeModuleFile(t, root, ".glint.yaml", config)
+	initialFindings, initialStale, _ := run()
+	assert.Empty(t, foundAt(initialFindings), "the project exception silences the near-duplicate finding")
+	assert.Equal(t, []string{".glint.yaml:10"}, foundAt(initialStale), "only the exception without a finding is stale")
+
+	shiftedConfig := "settings:\n  fail_on: low\n\n" + config
+	writeModuleFile(t, root, ".glint.yaml", shiftedConfig)
+	uncachedFindings, uncachedStale := analyzeWithRules(t, root, nil, "near-duplicate-func", "stale-suppression")
+	cachedFindings, cachedStale, cached := run()
+	assert.Empty(t, foundAt(uncachedFindings), "the moved project exception still silences the finding")
+	assert.Equal(t, []string{".glint.yaml:13"}, foundAt(uncachedStale), "the moved dead exception is stale")
+	assert.Equal(t, foundAt(uncachedFindings), foundAt(cachedFindings))
+	assert.Equal(t, foundAt(uncachedStale), foundAt(cachedStale))
+	assert.NotNil(t, cached.projectHit, "the project cache is selected by unchanged inputs")
+}
+
 const atoiSource = `package check
 
 import "strconv"
