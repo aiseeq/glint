@@ -131,12 +131,17 @@ func hashModuleInputs(moduleDir string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
+	// go env GOWORK is the go.work the load uses, "" when none is found and
+	// "off" when GOWORK=off: both of the latter load without a workspace.
+	if env["GOWORK"] == "off" {
+		env["GOWORK"] = ""
+	}
 	sum := sha256.New()
 	for _, key := range goEnvKeys {
 		writeHashLine(sum, "%s=%s\n", key, env[key])
 	}
 	dirs := []string{moduleDir}
-	if work := env["GOWORK"]; work != "" && work != "off" {
+	if work := env["GOWORK"]; work != "" {
 		uses, localReplaces, err := workspaceModules(work)
 		if err != nil {
 			return "", false, err

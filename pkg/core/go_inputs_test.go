@@ -579,3 +579,23 @@ func TestGoInputsChangeWithTransitiveTestdataImportInGroup(t *testing.T) {
 	require.True(t, cacheable)
 	assert.NotEqual(t, base, changed, "a testdata package imported by an imported testdata package changes the typed load")
 }
+
+// Without a go.work an empty GOWORK and GOWORK=off load the same module, so
+// they share a key: one caller of glint sets GOWORK=off and another does not.
+// With a go.work found above the module they are different loads.
+func TestGoInputsGoworkOffMatchesNoWorkspace(t *testing.T) {
+	module, root := inputsModule(t)
+	t.Setenv("GOWORK", "")
+	unset, _ := inputsOf(t, root)
+	t.Setenv("GOWORK", "off")
+	off, _ := inputsOf(t, root)
+	assert.Equal(t, unset, off, "no go.work: GOWORK=off is the same load as an empty GOWORK")
+
+	writeInputsFile(t, module, "go.work", "go 1.22\n\nuse .\n")
+	t.Setenv("GOWORK", "")
+	workspace, _ := inputsOf(t, root)
+	t.Setenv("GOWORK", "off")
+	offWithWork, _ := inputsOf(t, root)
+	assert.NotEqual(t, workspace, offWithWork, "a found go.work and GOWORK=off are different loads")
+	assert.Equal(t, off, offWithWork, "GOWORK=off ignores the go.work")
+}
