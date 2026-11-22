@@ -516,6 +516,59 @@ func TestEachProjectGetsFreshResultCacheWithoutNoCache(t *testing.T) {
 	}
 }
 
+func TestChangeOutsideToolcachePackagesKeepsToolCachesNoCache(t *testing.T) {
+	stdout, calls := runNoCacheScenarioAfter(t, "v1.0.0", false, 1, func(repo string, git func(...string)) {
+		writeNoCacheFile(t, filepath.Join(repo, "pkg", "core", "core.go"), "package core\n")
+		git("add", "pkg/core/core.go")
+		git("commit", "-qm", "core")
+		writeNoCacheFile(t, filepath.Join(repo, "pkg", "core", "extra.go"), "package core\n")
+	})
+	assertNoCacheChoice(t, stdout, calls, false)
+}
+
+func TestUntrackedFileInToolcachePackageUsesNoCache(t *testing.T) {
+	stdout, calls := runNoCacheScenarioAfter(t, "v1.0.0", false, 1, func(repo string, _ func(...string)) {
+		writeNoCacheFile(t, filepath.Join(repo, "pkg", "rules", "example", "parse.go"), "package example\n")
+	})
+	if !strings.Contains(stdout, "pkg/rules/example") {
+		t.Fatalf("stdout %q: want the package with the untracked file named", stdout)
+	}
+	assertNoCacheChoice(t, stdout, calls, true)
+}
+
+func TestUntrackedToolcacheCallerUsesNoCache(t *testing.T) {
+	stdout, calls := runNoCacheScenarioAfter(t, "v1.0.0", false, 1, func(repo string, _ func(...string)) {
+		writeNoCacheFile(t, filepath.Join(repo, "pkg", "rules", "fresh", "tool.go"), "package fresh\nfunc init() { _ = toolcache.New(\"y\") }\n")
+	})
+	if !strings.Contains(stdout, "pkg/rules/fresh") {
+		t.Fatalf("stdout %q: want the new toolcache package named", stdout)
+	}
+	assertNoCacheChoice(t, stdout, calls, true)
+}
+
+func TestToolcachePackageOfOldVersionOnlyUsesNoCache(t *testing.T) {
+	stdout, calls := runNoCacheScenarioAfter(t, "v1.1.0", false, 1, func(repo string, git func(...string)) {
+		writeNoCacheFile(t, filepath.Join(repo, "pkg", "rules", "legacy", "tool.go"), "package legacy\nfunc init() { _ = toolcache.New(\"z\") }\n")
+		git("add", "pkg/rules/legacy/tool.go")
+		git("commit", "-qm", "legacy")
+		git("tag", "v1.1.0")
+		git("rm", "-q", "pkg/rules/legacy/tool.go")
+		git("commit", "-qm", "drop legacy")
+	})
+	if !strings.Contains(stdout, "pkg/rules/legacy") {
+		t.Fatalf("stdout %q: want the dropped toolcache package named", stdout)
+	}
+	assertNoCacheChoice(t, stdout, calls, true)
+}
+
+func TestDirtyOldVersionUsesNoCache(t *testing.T) {
+	stdout, calls := runNoCacheScenario(t, "v1.0.0-dirty", false, false)
+	if !strings.Contains(stdout, "built from a dirty tree") {
+		t.Fatalf("stdout %q: want the dirty build named as the reason", stdout)
+	}
+	assertNoCacheChoice(t, stdout, calls, true)
+}
+
 func TestUnknownOldVersionUsesNoCache(t *testing.T) {
 	stdout, calls := runNoCacheScenario(t, "v9.9.9", false, false)
 	if !strings.Contains(stdout, "old version unknown") {
@@ -686,6 +739,28 @@ func runNoCacheScenario(t *testing.T, oldVersion string, touchPackage, force boo
 
 func runNoCacheScenarioProjects(t *testing.T, oldVersion string, touchPackage, force bool, projectCount int) (string, []string) {
 	t.Helper()
+	return runNoCacheScenarioAfter(t, oldVersion, force, projectCount, func(repo string, _ func(...string)) {
+		if touchPackage {
+			writeNoCacheFile(t, filepath.Join(repo, "pkg", "rules", "example", "tool.go"), "package example\n// changed\nfunc init() { _ = toolcache.New(\"x\") }\n")
+		}
+	})
+}
+
+func writeNoCacheFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runNoCacheScenarioAfter is runNoCacheScenarioProjects with change run on the
+// repository after the v1.0.0 tag: it may commit (with git) or leave files
+// uncommitted.
+func runNoCacheScenarioAfter(t *testing.T, oldVersion string, force bool, projectCount int, change func(repo string, git func(...string))) (string, []string) {
+	t.Helper()
 	repo := t.TempDir()
 	gitRun := func(args ...string) {
 		t.Helper()
@@ -722,11 +797,7 @@ func runNoCacheScenarioProjects(t *testing.T, oldVersion string, touchPackage, f
 	gitRun("add", ".")
 	gitRun("commit", "-qm", "base")
 	gitRun("tag", "v1.0.0")
-	if touchPackage {
-		if err := os.WriteFile(filepath.Join(toolPackage, "tool.go"), []byte("package example\n// changed\nfunc init() { _ = toolcache.New(\"x\") }\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	change(repo, gitRun)
 	t.Chdir(repo)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(repo, "user-cache"))
 	t.Setenv("GLINT_CACHE_DIR", "")

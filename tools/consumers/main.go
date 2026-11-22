@@ -282,44 +282,28 @@ func newGlintNoCache(oldBin string, force bool) (bool, string) {
 		}
 		return true, fmt.Sprintf("--no-cache (old version unknown: find glint repository: %v)", err)
 	}
+	if strings.HasSuffix(version, "-dirty") {
+		return true, fmt.Sprintf("--no-cache (old glint %s was built from a dirty tree: no commit holds its code)", version)
+	}
 	rev, err := glintRevision(repo, version)
 	if err != nil {
 		return true, fmt.Sprintf("--no-cache (old version unknown: %v)", err)
 	}
-	oldPackages, err := toolcachePackages(repo, rev)
+	packages, err := toolcachePackageSet(repo, rev)
 	if err != nil {
 		return true, fmt.Sprintf("--no-cache (old version unknown: %v)", err)
 	}
-	headPackages, err := toolcachePackages(repo, "HEAD")
+	changed, err := changedToolcachePackages(repo, rev, packages)
 	if err != nil {
 		return true, fmt.Sprintf("--no-cache (old version unknown: %v)", err)
 	}
-	packageSet := make(map[string]bool, len(oldPackages)+len(headPackages))
-	for _, pkg := range append(oldPackages, headPackages...) {
-		packageSet[pkg] = true
-	}
-	packages := slices.Sorted(maps.Keys(packageSet))
-	args := []string{"diff", "--quiet", rev, "--"}
-	args = append(args, packages...)
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repo
-	err = cmd.Run()
-	if err == nil {
+	if len(changed) == 0 {
 		return false, fmt.Sprintf("tool caches on (%s..HEAD leaves %s untouched)", version, strings.Join(packages, ", "))
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		changed, listErr := changedToolcachePackages(repo, rev, packages)
-		if listErr != nil {
-			return true, fmt.Sprintf("--no-cache (old version unknown: %v)", listErr)
-		}
-		return true, fmt.Sprintf("--no-cache (%s..HEAD changes %s)", version, strings.Join(changed, ", "))
-	}
-	return true, fmt.Sprintf("--no-cache (old version unknown: git diff %s..HEAD: %v)", version, err)
+	return true, fmt.Sprintf("--no-cache (%s..HEAD changes %s)", version, strings.Join(changed, ", "))
 }
 
 func glintRevision(repo, version string) (string, error) {
-	version = strings.TrimSuffix(version, "-dirty")
 	try := func(ref string) (string, error) {
 		cmd := exec.Command("git", "rev-parse", "--verify", ref+"^{commit}")
 		cmd.Dir = repo
@@ -343,42 +327,68 @@ func glintRevision(repo, version string) (string, error) {
 	return "", fmt.Errorf("cannot resolve old glint version %q to a commit in %s", version, repo)
 }
 
-func toolcachePackages(repo, rev string) ([]string, error) {
+// toolcachePackageSet is pkg/toolcache with the packages that call
+// toolcache.New at the old version's commit, at HEAD or in the working tree,
+// untracked files included: a package that stopped or started using a tool
+// cache changes what the cache holds either way.
+func toolcachePackageSet(repo, rev string) ([]string, error) {
 	set := map[string]bool{"pkg/toolcache": true}
-	cmd := exec.Command("git", "grep", "-l", "-E", `toolcache\.New\(`, rev, "--", "pkg")
+	for _, where := range []string{rev, "HEAD", ""} {
+		if err := addToolcachePackages(set, repo, where); err != nil {
+			return nil, err
+		}
+	}
+	return slices.Sorted(maps.Keys(set)), nil
+}
+
+// addToolcachePackages adds to set the directories of the files under pkg
+// that call toolcache.New at rev, or in the working tree when rev is empty.
+func addToolcachePackages(set map[string]bool, repo, rev string) error {
+	args := []string{"grep", "-l", "--untracked", "-E", `toolcache\.New\(`}
+	if rev != "" {
+		args = []string{"grep", "-l", "-E", `toolcache\.New\(`, rev}
+	}
+	args = append(args, "--", "pkg")
+	cmd := exec.Command("git", args...)
 	cmd.Dir = repo
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-			return nil, fmt.Errorf("find toolcache.New packages at %s: %w", rev, err)
+			return fmt.Errorf("find toolcache.New packages at %q: %w", rev, err)
 		}
 	}
 	for line := range strings.SplitSeq(string(out), "\n") {
-		if _, path, ok := strings.Cut(line, ":"); ok && path != "" {
+		path := line
+		if rev != "" {
+			path = strings.TrimPrefix(line, rev+":")
+		}
+		if path != "" {
 			set[filepath.ToSlash(filepath.Dir(path))] = true
 		}
 	}
-	packages := slices.Sorted(maps.Keys(set))
-	return packages, nil
+	return nil
 }
 
+// changedToolcachePackages lists the packages whose files differ between rev
+// and the working tree, uncommitted and untracked files included.
 func changedToolcachePackages(repo, rev string, packages []string) ([]string, error) {
-	args := append([]string{"diff", "--name-only", rev, "--"}, packages...)
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repo
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("list changed toolcache packages: %w", err)
-	}
 	changedSet := map[string]bool{}
-	for file := range strings.SplitSeq(string(out), "\n") {
-		if file == "" {
-			continue
+	for _, args := range [][]string{
+		append([]string{"diff", "--name-only", rev, "--"}, packages...),
+		append([]string{"ls-files", "--others", "--exclude-standard", "--"}, packages...),
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		out, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("list changed toolcache packages: git %s: %w", args[0], err)
 		}
-		for _, pkg := range packages {
-			if file == pkg || strings.HasPrefix(file, pkg+"/") {
-				changedSet[pkg] = true
+		for file := range strings.SplitSeq(string(out), "\n") {
+			for _, pkg := range packages {
+				if file != "" && (file == pkg || strings.HasPrefix(file, pkg+"/")) {
+					changedSet[pkg] = true
+				}
 			}
 		}
 	}
