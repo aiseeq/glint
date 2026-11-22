@@ -23,6 +23,9 @@ func NewSuppressionWithoutReasonRule() *SuppressionWithoutReasonRule {
 	return &SuppressionWithoutReasonRule{rules.NewBaseRule("suppression-without-reason", "deadcode", "Requires a reason after inline suppression markers", core.SeverityLow)}
 }
 
+// RuleCacheReadsRegistry: only a marker that names a registered rule is judged.
+func (r *SuppressionWithoutReasonRule) RuleCacheReadsRegistry() {}
+
 // AnalyzeFile reports suppression markers that have no explanation.
 func (r *SuppressionWithoutReasonRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 	return r.markersWithoutReason(ctx, func(string) bool { return true })
@@ -121,6 +124,9 @@ type StaleSuppressionRule struct {
 const staleSuppressionName = "stale-suppression"
 
 // NewStaleSuppressionRule creates the rule.
+// RuleCacheReadsRegistry: a marker naming no registered rule is stale.
+func (r *StaleSuppressionRule) RuleCacheReadsRegistry() {}
+
 func NewStaleSuppressionRule() *StaleSuppressionRule {
 	return &StaleSuppressionRule{BaseRule: rules.NewBaseRule(
 		staleSuppressionName,

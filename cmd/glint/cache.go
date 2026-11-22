@@ -51,6 +51,8 @@ type resultCache struct {
 	configFingerprint string
 	keyDescription    string
 	ruleFingerprints  map[string]string
+	// registry keys the rules that read the registry (RuleCacheReadsRegistry).
+	registry string
 	// previous is what the last run stored, by path relative to the root.
 	previous map[string]cacheEntry
 	loaded   bool
@@ -179,6 +181,7 @@ func newRootCache(root, seed string, cfg *core.Config, goTreesFromLoader bool) (
 	cache, err := openResultCache(dir, root, seed, key.core, stamp)
 	if err == nil {
 		cache.ruleFingerprints = key.packages
+		cache.registry = registryKey(registeredRuleNames())
 		cache.keyDescription = key.description
 		config, marshalErr := cacheConfigBytes(cfg)
 		if marshalErr != nil {
@@ -1250,11 +1253,30 @@ func (c *resultCache) fingerprint(rule rules.Rule) string {
 	if code, ok := rule.(rules.RuleCacheCodeSymbols); ok {
 		fingerprint += "\x00" + c.ruleCodeFingerprint(code.RuleCacheCodeSymbols())
 	}
+	if _, ok := rule.(rules.RuleCacheReadsRegistry); ok {
+		fingerprint += "\x00registry=" + c.registry
+	}
 	if c.configFingerprint != "" {
 		sum := sha256.Sum256([]byte(fingerprint + "\x00" + c.configFingerprint))
 		return hex.EncodeToString(sum[:])
 	}
 	return fingerprint
+}
+
+// registeredRuleNames lists the names of the rules of this build.
+func registeredRuleNames() []string {
+	all := rules.All()
+	names := make([]string, len(all))
+	for i, rule := range all {
+		names[i] = rule.Name()
+	}
+	return names
+}
+
+// registryKey is the hash of a set of rule names, whatever their order.
+func registryKey(names []string) string {
+	sum := sha256.Sum256([]byte(strings.Join(slices.Sorted(slices.Values(names)), "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // declaredIndexDependencies picks the "name=fingerprint" entries of the

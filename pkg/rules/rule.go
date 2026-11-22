@@ -47,6 +47,14 @@ type RuleCacheCodeSymbols interface {
 	RuleCacheCodeSymbols() []string
 }
 
+// RuleCacheReadsRegistry marks a rule whose findings depend on which rules
+// are registered (rules.Get on a name it read from the code): the cache keys
+// its findings by the registered rule names too, so a release that adds or
+// drops a rule reruns it.
+type RuleCacheReadsRegistry interface {
+	RuleCacheReadsRegistry()
+}
+
 // NonGoFilesRule is a GoProjectRule that also reads files other than Go
 // (shell scripts, Makefiles) in AnalyzeFile: the check flow runs it on every
 // file like a file rule, its findings cached by the file, and AnalyzeFile
