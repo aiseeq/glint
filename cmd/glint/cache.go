@@ -422,9 +422,7 @@ func (c *resultCache) keyProject(projectRoot, inputs string, projectRules []stri
 	}
 	var indexDependencies []string
 	for _, rule := range enabled {
-		_, indexes := rule.(rules.ProjectFilesRule)
-		_, analyzesProject := rule.(rules.GoProjectRule)
-		if indexes || analyzesProject {
+		if _, indexes := rule.(rules.ProjectFilesRule); indexes {
 			indexDependencies = append(indexDependencies, rule.Name()+"="+c.projectFingerprints[rule.Name()])
 		}
 	}
@@ -435,7 +433,31 @@ func (c *resultCache) keyProject(projectRoot, inputs string, projectRules []stri
 		}
 		fingerprint := c.fingerprint(rule)
 		if _, ok := rule.(rules.GoProjectRule); ok {
-			dependencies := fingerprint + "\n" + strings.Join(indexDependencies, "\n")
+			dependencies := fingerprint
+			if reads, declared := rule.(rules.ProjectRuleCacheDependencies); declared {
+				indexes := make(map[string]string, len(indexDependencies))
+				for _, dependency := range indexDependencies {
+					name, value, found := strings.Cut(dependency, "=")
+					if found {
+						indexes[name] = value
+					}
+				}
+				var selected []string
+				unknown := false
+				for _, name := range reads.ProjectRuleCacheDependencies() {
+					value, found := indexes[name]
+					if !found {
+						unknown = true
+						break
+					}
+					selected = append(selected, name+"="+value)
+				}
+				if unknown {
+					selected = indexDependencies
+				}
+				slices.Sort(selected)
+				dependencies += "\n" + strings.Join(selected, "\n")
+			}
 			if input, keyed := rule.(rules.CacheInputRule); keyed {
 				value, err := input.CacheInputs(projectRoot)
 				if err != nil {
@@ -1246,11 +1268,55 @@ func (c *resultCache) fingerprint(rule rules.Rule) string {
 	if t != nil && c.ruleFingerprints[t.PkgPath()] != "" {
 		fingerprint = c.ruleFingerprints[t.PkgPath()]
 	}
+	if code, ok := rule.(rules.RuleCacheCodeSymbols); ok {
+		fingerprint += "\x00" + c.ruleCodeFingerprint(code.RuleCacheCodeSymbols())
+	}
 	if c.configFingerprint != "" {
 		sum := sha256.Sum256([]byte(fingerprint + "\x00" + c.configFingerprint))
 		return hex.EncodeToString(sum[:])
 	}
 	return fingerprint
+}
+
+func (c *resultCache) ruleCodeFingerprint(symbols []string) string {
+	packages := make(map[string]bool)
+	for _, symbol := range symbols {
+		matched := ""
+		for path := range c.ruleFingerprints {
+			if strings.HasPrefix(symbol, path+".") && len(path) > len(matched) {
+				matched = path
+			}
+		}
+		if matched == "" {
+			return c.allRuleFingerprints()
+		}
+		packages[matched] = true
+	}
+	if len(packages) == 0 {
+		return c.allRuleFingerprints()
+	}
+	return c.fingerprintPackages(packages)
+}
+
+func (c *resultCache) allRuleFingerprints() string {
+	packages := make(map[string]bool, len(c.ruleFingerprints))
+	for path := range c.ruleFingerprints {
+		packages[path] = true
+	}
+	return c.fingerprintPackages(packages)
+}
+
+func (c *resultCache) fingerprintPackages(packages map[string]bool) string {
+	paths := make([]string, 0, len(packages))
+	for path := range packages {
+		paths = append(paths, path)
+	}
+	slices.Sort(paths)
+	var parts []string
+	for _, path := range paths {
+		parts = append(parts, path+"="+c.ruleFingerprints[path])
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (c *resultCache) fingerprints(list []rules.Rule) map[string]string {

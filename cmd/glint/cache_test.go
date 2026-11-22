@@ -638,14 +638,14 @@ func TestResultCacheDirRejectsRelativeGLINTCacheDir(t *testing.T) {
 
 func TestProjectCacheFingerprintCoversRuleStateDependencies(t *testing.T) {
 	dir := t.TempDir()
-	consumer := newProjectStubRule()
 	indexer := frontendrules.NewTSPathNotRoutedRule()
+	consumer := &projectCacheIndexConsumer{projectStubRule: newProjectStubRule(), indexName: indexer.Name()}
 	ruleset := []rules.Rule{indexer, consumer}
 	open := func(indexFingerprint string) *resultCache {
 		cache, err := openResultCache(dir, "/project", "", "build", "stamp")
 		require.NoError(t, err)
 		cache.ruleFingerprints[reflect.TypeFor[frontendrules.TSPathNotRoutedRule]().PkgPath()] = indexFingerprint
-		cache.ruleFingerprints[reflect.TypeFor[projectStubRule]().PkgPath()] = "consumer-v1"
+		cache.ruleFingerprints[reflect.TypeFor[projectCacheIndexConsumer]().PkgPath()] = "consumer-v1"
 		return cache
 	}
 	first := open("index-v1")

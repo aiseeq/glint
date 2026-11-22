@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"reflect"
+	"runtime"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -63,6 +65,24 @@ func (r *TypedFuncRule) AnalyzeFile(_ *core.FileContext) []*core.Violation { ret
 
 // RequiresSSA reports that typed syntax is enough.
 func (r *TypedFuncRule) RequiresSSA() bool { return false }
+
+// RuleCacheCodeSymbols exposes callback code that implements this rule in its
+// defining rule package, rather than in patternkit where the shared type lives.
+func (r *TypedFuncRule) RuleCacheCodeSymbols() []string {
+	var symbols []string
+	for _, callback := range []reflect.Value{reflect.ValueOf(r.Check), reflect.ValueOf(r.ForProject), reflect.ValueOf(r.ProjectPrecheck), reflect.ValueOf(r.SeverityOf)} {
+		if !callback.IsValid() || callback.IsNil() {
+			continue
+		}
+		fn := runtime.FuncForPC(callback.Pointer())
+		if fn == nil {
+			symbols = append(symbols, "")
+			continue
+		}
+		symbols = append(symbols, fn.Name())
+	}
+	return symbols
+}
 
 // AnalyzeGoProject runs the check over every function of the project.
 func (r *TypedFuncRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([]*core.Violation, error) {

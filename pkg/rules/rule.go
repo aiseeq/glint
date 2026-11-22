@@ -32,6 +32,21 @@ type GoProjectRule interface {
 	RequiresSSA() bool
 }
 
+// ProjectRuleCacheDependencies declares project-files indexes whose data a
+// GoProjectRule reads. The cache uses these rule names to invalidate only
+// readers when an index implementation changes. An undeclared relationship
+// should be added here rather than relying on the presence of unrelated rules.
+type ProjectRuleCacheDependencies interface {
+	ProjectRuleCacheDependencies() []string
+}
+
+// RuleCacheCodeSymbols declares code symbols outside a rule's dynamic type
+// package that affect its findings. Symbols use runtime.Func.Name format so
+// the cache can associate callbacks with build manifest package fingerprints.
+type RuleCacheCodeSymbols interface {
+	RuleCacheCodeSymbols() []string
+}
+
 // NonGoFilesRule is a GoProjectRule that also reads files other than Go
 // (shell scripts, Makefiles) in AnalyzeFile: the check flow runs it on every
 // file like a file rule, its findings cached by the file, and AnalyzeFile
