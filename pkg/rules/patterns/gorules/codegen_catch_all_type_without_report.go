@@ -5,11 +5,11 @@ import (
 	"go/token"
 	"go/types"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"github.com/aiseeq/glint/pkg/rules/helpers"
 )
 
 var catchAllWords = [...]string{"any", "unknown", "interface"}
@@ -244,7 +244,7 @@ func markCatchAllWords(expr ast.Expr, checked map[string]bool) {
 	if !ok || lit.Kind != token.STRING {
 		return
 	}
-	value, ok := stringLiteralValue(lit)
+	value, ok := helpers.StringLiteral(lit)
 	if !ok {
 		return
 	}
@@ -256,7 +256,7 @@ func markCatchAllWords(expr ast.Expr, checked map[string]bool) {
 }
 
 func checkedCatchAll(expr ast.Expr, checked map[string]bool) bool {
-	value, ok := stringLiteralValue(expr)
+	value, ok := helpers.StringLiteral(expr)
 	if !ok {
 		return false
 	}
@@ -289,15 +289,6 @@ func hasWholeWord(value, word string) bool {
 			return false
 		}
 	}
-}
-
-func stringLiteralValue(expr ast.Expr) (string, bool) {
-	lit, ok := expr.(*ast.BasicLit)
-	if !ok || lit.Kind != token.STRING {
-		return "", false
-	}
-	value, err := strconv.Unquote(lit.Value)
-	return value, err == nil
 }
 
 func catchAllString(expr ast.Expr) bool {

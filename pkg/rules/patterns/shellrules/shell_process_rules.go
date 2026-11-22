@@ -2,7 +2,6 @@ package shellrules
 
 import (
 	"go/ast"
-	"go/token"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -231,15 +230,15 @@ func (r *shellPgrepRule) AnalyzeGoProject(project *core.GoProjectContext) ([]*co
 			if !ok || selector.Sel.Name != "Command" || len(call.Args) < 3 {
 				return true
 			}
-			binary, ok := execStringArgument(call.Args[0])
+			binary, ok := helpers.StringLiteral(call.Args[0])
 			if !ok || (filepath.Base(binary) != "sh" && filepath.Base(binary) != "bash") {
 				return true
 			}
-			flag, ok := execStringArgument(call.Args[1])
+			flag, ok := helpers.StringLiteral(call.Args[1])
 			if !ok || flag != "-c" {
 				return true
 			}
-			body, ok := execStringArgument(call.Args[2])
+			body, ok := helpers.StringLiteral(call.Args[2])
 			if !ok {
 				return true
 			}
@@ -259,15 +258,6 @@ func (r *shellPgrepRule) AnalyzeGoProject(project *core.GoProjectContext) ([]*co
 		})
 	}
 	return out, nil
-}
-
-func execStringArgument(expr ast.Expr) (string, bool) {
-	lit, ok := expr.(*ast.BasicLit)
-	if !ok || lit.Kind != token.STRING {
-		return "", false
-	}
-	value, err := strconv.Unquote(lit.Value)
-	return value, err == nil
 }
 
 // checkPgrepOwnWrapper reports pgrep -f inside a quoted script run by
