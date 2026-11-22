@@ -123,10 +123,10 @@ type StaleSuppressionRule struct {
 // staleSuppressionName is the name of stale-suppression.
 const staleSuppressionName = "stale-suppression"
 
-// NewStaleSuppressionRule creates the rule.
 // RuleCacheReadsRegistry: a marker naming no registered rule is stale.
 func (r *StaleSuppressionRule) RuleCacheReadsRegistry() {}
 
+// NewStaleSuppressionRule creates the rule.
 func NewStaleSuppressionRule() *StaleSuppressionRule {
 	return &StaleSuppressionRule{BaseRule: rules.NewBaseRule(
 		staleSuppressionName,

@@ -54,3 +54,17 @@ func TestStaleSuppressionReadsTheRegistry(t *testing.T) {
 		require.True(t, reads, "%s judges marker names by the registry", name)
 	}
 }
+
+// The cache a run opens keys the registry readers by every rule of the build.
+func TestNewRootCacheKeysTheRegistryByAllRuleNames(t *testing.T) {
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
+	cache, err := newRootCache("/project", "", core.DefaultConfig(), false)
+	require.NoError(t, err)
+	var names []string
+	for _, rule := range rules.All() {
+		names = append(names, rule.Name())
+	}
+	require.Contains(t, names, "suppression-without-reason")
+	require.Equal(t, registryKey(names), cache.registry)
+	require.NotEqual(t, registryKey(names[1:]), cache.registry, "one rule fewer is another registry")
+}
