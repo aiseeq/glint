@@ -104,7 +104,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// No consumer to compare is no evidence that nothing changed: a host
 	// without the consumer copies, or a name in -only that is not there,
 	// would otherwise pass as "no differences".
-	for name := range selected {
+	for _, name := range slices.Sorted(maps.Keys(selected)) {
 		if !slices.ContainsFunc(targets, func(p string) bool { return filepath.Base(p) == name }) {
 			_, _ = fmt.Fprintf(stderr, "consumers: -only %s: no such consumer below the roots\n", name)
 			return 2
