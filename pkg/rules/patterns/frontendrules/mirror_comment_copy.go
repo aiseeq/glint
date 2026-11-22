@@ -3,6 +3,7 @@ package frontendrules
 import (
 	"go/ast"
 	"go/types"
+	"slices"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
@@ -29,6 +30,11 @@ var mirrorPhrase = regexp.MustCompile(`(?i:\bcop(?:y|ied)\s+from\s+[A-Za-z_$][\w
 
 // Every mirrorPhrase alternative contains one of these case-folded stems.
 var mirrorPhraseNeedles = []string{"cop", "ported", "duplicated", "mirror", "keep", "must", "same", "держать", "зеркал", "копи", "дублиру"}
+
+// Characters that may start a phrase stem only after case folding: Cyrillic
+// stems, ſ (s), ᲁ (д) and the Kelvin sign U+212A (k).
+const mirrorUnicodePhraseStarts = "дДзЗкКſᲁ\u212a"
+
 var mirrorCodeSource = regexp.MustCompile(`(?i:\b(?:backend|back-end|server|сервер|бэкенд|бэкэнд|go)\b|\b[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\b|\b(?:src|pkg|internal|models|constants)/[\w./-]+)`)
 var mirrorLiteralInitializer = regexp.MustCompile(`(?s)^\s*(?:['"\x60][^'"\x60]*['"\x60]|-?\d+(?:\.\d+)?|true|false|null|\[[\s\w$:'"\x60,.-]*\]|\{[\s\w$:'"\x60,.-]*\})\s*;?\s*$`)
 
@@ -45,11 +51,229 @@ var mirrorVariableDecl = regexp.MustCompile(`^(?:(?:export|default|declare)\s+)*
 var mirrorDecl = regexp.MustCompile(`^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:const|let|var|function|type|interface|class)\b|^(?:func\s+(?:\([^)]*\)\s*)?[A-Za-z_][A-Za-z0-9_]*\s*\(|(?:var|const|type)\s+[A-Za-z_][A-Za-z0-9_]*\b)`)
 
 func mirrorDeclaration(line string) bool {
-	return helpers.ContainsAny(line, []string{"const", "let", "var", "function", "type", "interface", "class", "func"}) && mirrorDecl.MatchString(strings.TrimSpace(line))
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	switch line[0] {
+	case 'c':
+		if !strings.HasPrefix(line, "const") && !strings.HasPrefix(line, "class") {
+			return false
+		}
+	case 'd':
+		if !strings.HasPrefix(line, "default") && !strings.HasPrefix(line, "declare") {
+			return false
+		}
+	case 'e':
+		if !strings.HasPrefix(line, "export") {
+			return false
+		}
+	case 'f':
+		if !strings.HasPrefix(line, "function") && !strings.HasPrefix(line, "func") {
+			return false
+		}
+	case 'i':
+		if !strings.HasPrefix(line, "interface") {
+			return false
+		}
+	case 'l':
+		if !strings.HasPrefix(line, "let") {
+			return false
+		}
+	case 't':
+		if !strings.HasPrefix(line, "type") {
+			return false
+		}
+	case 'v':
+		if !strings.HasPrefix(line, "var") {
+			return false
+		}
+	default:
+		return false
+	}
+	return mirrorDecl.MatchString(line)
 }
 
-func mirrorCommentMatchesPhrase(comment string) bool {
-	return helpers.ContainsAny(helpers.FoldLower(comment), mirrorPhraseNeedles) && !mirrorExplanatory.MatchString(comment) && mirrorPhrase.MatchString(comment)
+// mirrorLineMayMatchPhrase checks the ASCII needles without allocating. The
+// Unicode path keeps FoldLower's special case-folding behavior for Cyrillic
+// and compatibility letters.
+func mirrorLineMayMatchPhrase(line string) bool {
+	checkedUnicodeStarts := false
+	for i := 0; i < len(line); i++ {
+		b := line[i]
+		if b >= 0x80 {
+			if !checkedUnicodeStarts {
+				checkedUnicodeStarts = true
+				if strings.ContainsAny(line, mirrorUnicodePhraseStarts) {
+					return helpers.ContainsAny(helpers.FoldLower(line), mirrorPhraseNeedles)
+				}
+			}
+			continue
+		}
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if i > 0 && mirrorASCIIWordByte(line[i-1]) {
+			continue
+		}
+		switch b {
+		case 'c':
+			if mirrorASCIITokenSpaceAt(line, i, "copy") || mirrorASCIITokenSpaceAt(line, i, "copied") {
+				return true
+			}
+		case 'p':
+			if mirrorASCIITokenSpaceAt(line, i, "ported") {
+				return true
+			}
+		case 'd':
+			if mirrorASCIITokenSpaceAt(line, i, "duplicated") {
+				return true
+			}
+		case 'm':
+			if mirrorASCIITokenSpaceAt(line, i, "mirror") || mirrorASCIITokenSpaceAt(line, i, "mirrors") || mirrorASCIITokenSpaceAt(line, i, "must") {
+				return true
+			}
+		case 'k':
+			if mirrorASCIITokenSpaceAt(line, i, "keep") {
+				return true
+			}
+		case 's':
+			if mirrorASCIITokenSpaceAt(line, i, "same") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mirrorASCIIWordByte(b byte) bool {
+	return b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
+}
+
+func mirrorASCIITokenSpaceAt(line string, at int, token string) bool {
+	if len(line)-at < len(token) {
+		return false
+	}
+	for j := range token {
+		b := line[at+j]
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b != token[j] {
+			return false
+		}
+	}
+	if len(line)-at == len(token) {
+		return true // The joined comment inserts whitespace between lines.
+	}
+	b := line[at+len(token)]
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\v' || b == '\f'
+}
+
+func mirrorASCIIHasAt(line string, at int, needle string) bool {
+	if len(line)-at < len(needle) {
+		return false
+	}
+	for j := 1; j < len(needle); j++ {
+		c := line[at+j]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != needle[j] {
+			return false
+		}
+	}
+	return true
+}
+
+func mirrorMayContainDataFile(comment string) bool {
+	if !strings.Contains(comment, ".") {
+		return false
+	}
+	for i := 0; i < len(comment); i++ {
+		if comment[i] >= 0x80 {
+			return mirrorDataFile.MatchString(comment)
+		}
+		if comment[i] != '.' {
+			continue
+		}
+		if i+1 >= len(comment) {
+			continue
+		}
+		first := comment[i+1]
+		if first >= 'A' && first <= 'Z' {
+			first += 'a' - 'A'
+		}
+		switch first {
+		case 'c':
+			if mirrorASCIIHasAt(comment, i+1, "csv") || mirrorASCIIHasAt(comment, i+1, "conf") || mirrorASCIIHasAt(comment, i+1, "cfg") || mirrorASCIIHasAt(comment, i+1, "crt") {
+				return true
+			}
+		case 'd':
+			if mirrorASCIIHasAt(comment, i+1, "db") {
+				return true
+			}
+		case 'e':
+			if mirrorASCIIHasAt(comment, i+1, "env") {
+				return true
+			}
+		case 'i':
+			if mirrorASCIIHasAt(comment, i+1, "ini") {
+				return true
+			}
+		case 'j':
+			if mirrorASCIIHasAt(comment, i+1, "json") || mirrorASCIIHasAt(comment, i+1, "jsonl") {
+				return true
+			}
+		case 'k':
+			if mirrorASCIIHasAt(comment, i+1, "key") {
+				return true
+			}
+		case 'l':
+			if mirrorASCIIHasAt(comment, i+1, "log") || mirrorASCIIHasAt(comment, i+1, "lock") {
+				return true
+			}
+		case 'p':
+			if mirrorASCIIHasAt(comment, i+1, "pem") {
+				return true
+			}
+		case 's':
+			if mirrorASCIIHasAt(comment, i+1, "sqlite") {
+				return true
+			}
+		case 't':
+			if mirrorASCIIHasAt(comment, i+1, "toml") || mirrorASCIIHasAt(comment, i+1, "txt") {
+				return true
+			}
+		case 'x':
+			if mirrorASCIIHasAt(comment, i+1, "xml") {
+				return true
+			}
+		case 'y':
+			if mirrorASCIIHasAt(comment, i+1, "yaml") || mirrorASCIIHasAt(comment, i+1, "yml") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mirrorCommentText(lines []string, start, end int) (string, bool) {
+	possiblePhrase := slices.ContainsFunc(lines[start:end], mirrorLineMayMatchPhrase)
+	if !possiblePhrase {
+		return "", false
+	}
+	comment := strings.Join(lines[start:end], " ")
+	if mirrorGitFileCopy.MatchString(comment) {
+		comment = mirrorGitFileCopy.ReplaceAllString(comment, "file version")
+	}
+	if mirrorMayContainDataFile(comment) {
+		comment = mirrorDataFile.ReplaceAllString(comment, "file")
+	}
+	if !mirrorPhrase.MatchString(comment) || !mirrorCodeSource.MatchString(comment) {
+		return comment, false
+	}
+	return comment, true
 }
 
 func mirrorInitializer(line string) string {
@@ -109,11 +333,12 @@ func (r *MirrorCommentCopyRule) AnalyzeFile(c *core.FileContext) []*core.Violati
 			}
 			start--
 		}
-		comment := mirrorDataFile.ReplaceAllString(mirrorGitFileCopy.ReplaceAllString(strings.Join(c.Lines[start:i], " "), "file version"), "file")
-		if !mirrorCommentMatchesPhrase(comment) {
+		// The block helper skips the regex pipeline when no phrase marker occurs.
+		comment, possiblePhrase := mirrorCommentText(c.Lines, start, i)
+		if !possiblePhrase {
 			continue
 		}
-		if !mirrorCodeSource.MatchString(comment) {
+		if mirrorExplanatory.MatchString(comment) {
 			continue
 		}
 		if mirrorVariableDecl.MatchString(strings.TrimSpace(line)) {

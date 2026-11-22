@@ -418,3 +418,36 @@ func TestMirrorCommentCopyLiteralPrefilterKeepsUnicodeFolds(t *testing.T) {
 	code := "// Muſt match the backend list.\nexport const B = ['alpha']\n// ᲁублирует backend список.\nexport const C = ['alpha']\n"
 	assert.Equal(t, []string{"src/folds.ts:2", "src/folds.ts:4"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/folds.ts", code))
 }
+
+// These hand cases pin the legacy replacement-then-phrase/source behavior.
+func TestMirrorCommentCopyHandDifferentialCases(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		src  string
+		want []string
+	}{
+		{"h1 digit data file creates phrase", "src/h1.ts", "// copy of 1config.json.ts\nexport function a() {}", []string{"src/h1.ts:2"}},
+		{"h2 long s in data file", "src/h2.ts", "// copy of auth.jſon\nexport function b() {}", nil},
+		{"h3 kelvin in data file", "src/h3.ts", "// copy of id.Key\nexport function c() {}", nil},
+		{"h4 ASCII code source boundary", "src/h4.ts", "// копия serverless config.yaml\nexport function d() {}", nil},
+		{"h5 control positive", "src/h5.ts", "// copy from models.User\nexport function e() {}", []string{"src/h5.ts:2"}},
+		{"h6 control negative", "src/h6.ts", "// copy from config.yaml\nexport function f() {}", nil},
+		{"h7 Russian source with data file", "src/h7.ts", "// копия бэкенд, формат как в config.yaml\nexport const LIMITS = [1, 2];", nil},
+		{"h8 dash data file", "src/h8.ts", "// Mirror the list in app-settings.json.ts\nexport function g() {}", []string{"src/h8.ts:2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), tc.path, tc.src))
+		})
+	}
+	goSource := "package hand\n\n// копия сервер, см. limits.yaml\nconst Limit = 3\n\n// copy of 2fa.json.go\nfunc F() {}\n"
+	assert.Equal(t, []int{7}, rulestest.GoFileRuleLines(t, NewMirrorCommentCopyRule(), "src/h9.go", goSource))
+}
+
+// The Kelvin sign K (U+212A) folds with k, and \b of the phrase sees a word
+// boundary between an ASCII letter and it: "xKeep" is "x" and "keep".
+func TestMirrorCommentCopyLiteralPrefilterKeepsKelvinSign(t *testing.T) {
+	code := "// xKeep in sync with backend\nexport const A = 1;\n"
+	assert.Equal(t, []string{"src/kelvin.ts:2"}, patterntest.LinesOf(t, NewMirrorCommentCopyRule(), "src/kelvin.ts", code))
+}
