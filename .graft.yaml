@@ -45,6 +45,10 @@ go_vet:
 go_fix:
   enabled: true
 
+# staticcheck SA fails the gate only on a finding on a line changed against
+# HEAD; it builds with go_vet's env.
+staticcheck: {enabled: true}
+
 # bin/ holds glint (graft build) and tools/consumers (go build): rebuilt on
 # demand, so a merged worktree goes with them.
 worktree:
