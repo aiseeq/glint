@@ -113,7 +113,13 @@ func (r *BusinessConstantInCodeRule) AnalyzeGoProject(ctx *core.GoProjectContext
 	var violations []*core.Violation
 	for obj, use := range index.uses {
 		declFile, declaredLine, err := ctx.DeclaredAt(obj)
-		if err != nil || !analyzed[declFile.Path] || index.configurable[obj] {
+		if errors.Is(err, core.ErrNotProjectObject) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("business constant in code: %w", err)
+		}
+		if !analyzed[declFile.Path] || index.configurable[obj] {
 			continue
 		}
 		at := ctx.FileSet.Position(use.pos)

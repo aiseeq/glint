@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"maps"
 	"os/exec"
@@ -107,6 +108,14 @@ func Use(day time.Time) (time.Time, bool) {
 	assert.Equal(t, "time/time.go", project.FileSet.PositionFor(saturday.Pos(), false).Filename)
 	_, err = project.FileForObject(saturday)
 	require.ErrorContains(t, err, "not loaded from project sources")
+	require.ErrorIs(t, err, ErrNotProjectObject, "a standard library object lies outside the project, which is no failure")
+	_, _, err = project.DeclaredAt(saturday)
+	require.ErrorIs(t, err, ErrNotProjectObject)
+	_, err = project.FileForObject(nil)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrNotProjectObject, "a nil object is a failure of the caller")
+	_, err = project.FileForObject(types.NewVar(token.NoPos, saturday.Pkg(), "Synthetic", saturday.Type()))
+	require.ErrorIs(t, err, ErrNotProjectObject, "an object without a position is declared in no project file")
 	_, _, err = project.DeclarationForObject(saturday)
 	require.Error(t, err)
 	assert.Equal(t, []any{projectSyntaxPackagesKey{}}, loadSharedKeys(project), "a standard library object maps no directory and indexes no package")
@@ -138,6 +147,7 @@ func Use(day time.Time) (time.Time, bool) {
 	stranger := types.NewVar(trimmedFile.Pos(strings.Index(string(source), "Codes")), types.NewPackage("example.com/shared/lib", "lib"), "Codes", codes.Type())
 	_, err = project.FileForObject(stranger)
 	require.ErrorContains(t, err, "not among the loaded packages")
+	require.ErrorIs(t, err, ErrNotProjectObject)
 }
 
 // A module nested under the path of the root module, taken by a replace, is

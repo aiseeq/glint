@@ -297,6 +297,11 @@ func (ctx *GoProjectContext) DeclarationForObject(object types.Object) (*FileCon
 
 // trimmedObject is an object whose position export data gave under -trimpath:
 // the project packages of its package path and its file.
+// ErrNotProjectObject marks an object declared outside the project files: the
+// standard library, a dependency, a package the load does not hold, an object
+// without a position. A rule skips such an object; other errors are failures.
+var ErrNotProjectObject = errors.New("the object is not declared in a project file")
+
 type trimmedObject struct {
 	valid    bool
 	pkgPath  string
@@ -313,12 +318,12 @@ func (ctx *GoProjectContext) fileForObject(object types.Object, adjusted bool) (
 	pkgPath := objectPkgPath(object)
 	position := ctx.FileSet.PositionFor(object.Pos(), adjusted)
 	if !position.IsValid() || position.Filename == "" {
-		return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s: invalid or unknown position", pkgPath, object.Name())
+		return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s: invalid or unknown position: %w", pkgPath, object.Name(), ErrNotProjectObject)
 	}
 	if filepath.IsAbs(position.Filename) {
-		file, err := ctx.File(position.Filename)
-		if err != nil {
-			return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: %w", pkgPath, object.Name(), position, err)
+		file, ok := ctx.RunFile(position.Filename)
+		if !ok {
+			return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: no file context: %w", pkgPath, object.Name(), position, ErrNotProjectObject)
 		}
 		return file, trimmedObject{}, nil
 	}
@@ -330,7 +335,7 @@ func (ctx *GoProjectContext) fileForObject(object types.Object, adjusted bool) (
 	}
 	sources, ok := syntax[pkgPath]
 	if !ok {
-		return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: the package is not loaded from project sources", pkgPath, object.Name(), position)
+		return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: the package is not loaded from project sources: %w", pkgPath, object.Name(), position, ErrNotProjectObject)
 	}
 	views, err := SharedLoad(ctx, projectPackageViewsKey{}, func() (map[*types.Package]*packages.Package, error) {
 		return projectPackageViews(syntax), nil
@@ -340,7 +345,7 @@ func (ctx *GoProjectContext) fileForObject(object types.Object, adjusted bool) (
 	}
 	view, ok := views[object.Pkg()]
 	if !ok {
-		return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: the package of the object is not among the loaded packages", pkgPath, object.Name(), position)
+		return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: the package of the object is not among the loaded packages: %w", pkgPath, object.Name(), position, ErrNotProjectObject)
 	}
 	// The go command trims the directory of the package to trimmedImportDir.
 	rel := strings.TrimPrefix(filepath.ToSlash(position.Filename), trimmedImportDir(view)+"/")
@@ -348,7 +353,7 @@ func (ctx *GoProjectContext) fileForObject(object types.Object, adjusted bool) (
 	if file, ok := ctx.filesByPath[filename]; ok {
 		return file, trimmedObject{valid: true, pkgPath: pkgPath, packages: sources, filename: filename}, nil
 	}
-	return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: %q is not a project file", pkgPath, object.Name(), position, filename)
+	return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: %q is not a project file: %w", pkgPath, object.Name(), position, filename, ErrNotProjectObject)
 }
 
 type projectSyntaxPackagesKey struct{}
