@@ -256,8 +256,24 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 	}
 	violations := make([]*core.Violation, 0, len(judged))
 	for _, exception := range judged {
+		var target []string
+		if exception.Exception.File != "" {
+			target = append(target, fmt.Sprintf("file %q", exception.Exception.File))
+		}
+		if exception.Exception.Files != "" {
+			target = append(target, fmt.Sprintf("files %q", exception.Exception.Files))
+		}
+		if exception.Exception.Function != "" {
+			target = append(target, fmt.Sprintf("function %q", exception.Exception.Function))
+		}
+		if exception.Exception.Pattern != "" {
+			target = append(target, fmt.Sprintf("pattern %q", exception.Exception.Pattern))
+		}
+		if len(target) == 0 {
+			target = append(target, "without a file, function, or pattern")
+		}
 		v := r.CreateViolation(exception.place.File, exception.place.Line,
-			fmt.Sprintf("Exception of %s matched no finding of this run — it silences nothing and waits for the next real one", exception.Rule))
+			fmt.Sprintf("Exception of %s for %s matched no finding of this run — it silences nothing and waits for the next real one", exception.Rule, strings.Join(target, ", ")))
 		v.WithSuggestion("Delete the exception, or narrow it to the finding it was written for")
 		v.WithContext("category", exception.Category)
 		violations = append(violations, v)

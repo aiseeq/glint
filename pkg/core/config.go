@@ -800,6 +800,7 @@ func (c *Config) ExceptionKey(e Exception) string {
 // ExceptionKeyAt identifies an exception declaration at a supplied source
 // position, for readers that decode configuration nodes outside LoadConfig.
 func (c *Config) ExceptionKeyAt(source string, line, column int) string {
+	source = filepath.Clean(source)
 	if c.path != "" {
 		if rel, err := filepath.Rel(filepath.Dir(c.path), source); err == nil && filepath.IsLocal(rel) {
 			source = rel

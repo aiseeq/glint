@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/aiseeq/glint/pkg/core"
 )
@@ -23,6 +24,75 @@ func oversightExceptionProject(t *testing.T, rule, exceptions string) string {
 	writeModuleFile(t, root, "internal/payprov/client.go", "package payprov\n\n// nolint:hardcoded-secret\nvar Token = \"tok\"\n")
 	writeModuleFile(t, root, "internal/payprov/refund.go", "package payprov\n")
 	return root
+}
+
+func TestBroadExclusionFlowListKeepsEachExceptionSeverity(t *testing.T) {
+	root := t.TempDir()
+	config := `version: 1
+categories:
+  deadcode:
+    rules:
+      suppression-without-reason:
+        exceptions: [{files: "*.go", reason: first}, {files: "*.go", reason: second}]
+`
+	writeModuleFile(t, root, ".glint.yaml", config)
+	writeModuleFile(t, root, "go.mod", oversightModule)
+	writeModuleFile(t, root, "main.go", "package main\n")
+	writeModuleFile(t, root, "sub/other.go", "package sub\n")
+	cfg, err := core.LoadConfigWithDefaults(root)
+	require.NoError(t, err)
+	exceptions := cfg.GetRuleExceptions("deadcode", core.SuppressionReasonRule)
+	require.Len(t, exceptions, 2)
+	require.Equal(t, exceptions[0].DeclaredAt(), exceptions[1].DeclaredAt())
+	require.NotEqual(t, exceptions[0].DeclaredAtColumn(), exceptions[1].DeclaredAtColumn())
+	suppressions := core.ViolationList{
+		core.NewSuppressionEntry(core.SuppressionReasonRule, "deadcode", "main.go", 1, core.SeverityMedium,
+			core.SuppressionExceptionPrefix+cfg.ExceptionKey(exceptions[0])),
+		core.NewSuppressionEntry(core.SuppressionReasonRule, "deadcode", "sub/other.go", 1, core.SeverityCritical,
+			core.SuppressionExceptionPrefix+cfg.ExceptionKey(exceptions[1])),
+	}
+	found, err := broadExclusionFindings(cfg, nil, newSilencedSeverities(cfg, suppressions))
+	require.NoError(t, err)
+	require.Len(t, found, 2)
+	assert.Equal(t, []core.Severity{core.SeverityMedium, core.SeverityCritical}, []core.Severity{found[0].Severity, found[1].Severity})
+}
+
+func TestKeepsExceptionFlowListDistinguishesDeclarationColumns(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".glint.yaml")
+	oneOnly := `version: 1
+categories:
+  deadcode:
+    rules:
+      stale-suppression:
+        exceptions: [{file: "*.go", function: One, reason: first}]
+`
+	writeModuleFile(t, root, ".glint.yaml", oneOnly)
+	cfg, err := core.LoadConfigWithDefaults(root)
+	require.NoError(t, err)
+	flow := `version: 1
+categories:
+  deadcode:
+    rules:
+      stale-suppression:
+        exceptions: [{file: "*.go", function: One, reason: first}, {file: "*.go", function: Two, reason: second}]
+`
+	var doc yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(flow), &doc))
+	node := doc.Content[0]
+	for _, key := range []string{"categories", "deadcode", "rules", "stale-suppression", "exceptions"} {
+		node = configNode(node, key)
+	}
+	items := broadListItems(node)
+	require.Len(t, items, 2)
+	first, err := decodeBroadException(items[0], "stale-suppression")
+	require.NoError(t, err)
+	second, err := decodeBroadException(items[1], "stale-suppression")
+	require.NoError(t, err)
+	require.Equal(t, first.DeclaredAt(), second.DeclaredAt())
+	require.NotEqual(t, first.DeclaredAtColumn(), second.DeclaredAtColumn())
+	assert.True(t, keepsException(cfg, oneLineException{rule: "stale-suppression", exception: &first, source: path}))
+	assert.False(t, keepsException(cfg, oneLineException{rule: "stale-suppression", exception: &second, source: path}))
 }
 
 // An exception of a rule watching suppressions takes that watch away from

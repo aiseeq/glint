@@ -211,6 +211,10 @@ categories:
 	require.NoError(t, err)
 	_, uncached := analyzeWithRules(t, root, nil, "error-string", "stale-suppression")
 	require.Equal(t, []string{".glint.yaml:6"}, foundAt(uncached))
+	require.Len(t, uncached, 1)
+	assert.Contains(t, uncached[0].Message, `file "errs.go"`)
+	assert.Contains(t, uncached[0].Message, `function "Stale"`)
+	assert.NotContains(t, uncached[0].Message, `function "Used"`)
 	_, first := analyzeWithRules(t, root, cache, "error-string", "stale-suppression")
 	assert.Equal(t, foundAt(uncached), foundAt(first))
 	require.NoError(t, cache.save())
@@ -219,6 +223,24 @@ categories:
 	_, cached := analyzeWithRules(t, root, warm, "error-string", "stale-suppression")
 	assert.Equal(t, foundAt(uncached), foundAt(cached))
 	assert.Positive(t, warm.reused)
+
+	blockConfig := `version: 1
+categories:
+  patterns:
+    rules:
+      error-string:
+        exceptions:
+          - file: errs.go
+            function: Used
+            reason: known
+          - file: errs.go
+            function: Stale
+            reason: no finding
+`
+	writeModuleFile(t, root, ".glint.yaml", blockConfig)
+	_, blockStale := analyzeWithRules(t, root, nil, "error-string", "stale-suppression")
+	assert.Equal(t, []string{".glint.yaml:10"}, foundAt(blockStale))
+	assert.Contains(t, blockStale[0].Message, `function "Stale"`)
 }
 
 // Moving configuration changes exception locations even when its analysis

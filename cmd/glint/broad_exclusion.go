@@ -41,12 +41,11 @@ type broadEntry struct {
 	// glob: one line of one file when the project holds at most one file
 	// they name; nil for other entries.
 	oneLine *core.Exception
-	// excepts is an exception of another rule that names files, judged by the
-	// files it covers (core.Exception.CoversFile); nil for other entries.
+	// excepts is the exception declaration whose matched findings determine
+	// this entry's severity by its node column; nil when the entry has none.
 	excepts *core.Exception
-	// declaredAt is the line of an exception's entry that declares the
-	// exception, in origin when it is set and in file otherwise: what the
-	// exception silenced is found there (silencedSeverities.exception).
+	// declaredAt is the line of an exception's entry that declares it, in
+	// origin when set and in file otherwise; the reported finding stays here.
 	declaredAt int
 	// file is the configuration file, absolute, the entry is reported in and
 	// whose marker keeps it.
@@ -365,8 +364,9 @@ type oversightPlaces struct {
 }
 
 // oneLineException is an exception of one line of a rule watching
-// suppressions, and source the configuration file, absolute, that declares
-// it, at the exception's line (core.Exception.DeclaredAt).
+// suppressions, with its absolute source configuration file. The exception
+// retains its declaration line and column for identity; findings stay on its
+// line (core.Exception.DeclaredAt).
 type oneLineException struct {
 	rule      string
 	exception *core.Exception

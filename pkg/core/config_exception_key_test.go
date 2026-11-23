@@ -24,6 +24,7 @@ categories:
 	exceptions := cfg.GetRuleExceptions("patterns", "error-string")
 	require.Len(t, exceptions, 2)
 	require.NotEqual(t, cfg.ExceptionKey(exceptions[0]), cfg.ExceptionKey(exceptions[1]))
+	require.Equal(t, cfg.ExceptionKey(exceptions[0]), cfg.ExceptionKeyAt(dir+"/./.glint.yaml", 6, exceptions[0].DeclaredAtColumn()))
 	require.Equal(t, 6, exceptions[0].DeclaredAt())
 	require.Equal(t, 6, exceptions[1].DeclaredAt())
 
