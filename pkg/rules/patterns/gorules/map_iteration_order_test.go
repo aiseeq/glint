@@ -1554,3 +1554,531 @@ func Resolve(dirs map[string]*pkgState, decls map[string]map[string][]string) {
 		assert.NotEqual(t, "map_iteration_dedup_winner", v.Context["pattern"])
 	}
 }
+
+// The entry is written only in the branch where the slot is already taken:
+// every later entry overwrites it, so the last one wins - an overwrite, not a
+// first-wins claim.
+func TestMapIterationOrderAcceptsWriteInTakenBranch(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type queue struct {
+	pending map[int]bool
+	again   map[int]string
+}
+
+func (q *queue) Queue(src map[string]int) {
+	for name, slot := range src {
+		q.push(slot, name)
+	}
+}
+
+func (q *queue) push(slot int, name string) {
+	if q.pending[slot] {
+		q.again[slot] = name
+		return
+	}
+	q.pending[slot] = true
+}
+`)
+
+	for _, v := range violations {
+		assert.NotEqual(t, "map_iteration_dedup_winner", v.Context["pattern"])
+	}
+}
+
+// A test that leaves an else branch: the else branch is where the slot is
+// free, and the entry kept there is the first one.
+func TestMapIterationOrderReportsDedupWinnerInElseBranch(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+func Collect(owners map[string][]int) ([]string, int) {
+	seen := map[int]bool{}
+	dups := 0
+	var out []string
+	add := func(line int, text string) {
+		if seen[line] {
+			dups++
+		} else {
+			seen[line] = true
+			out = append(out, text)
+		}
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, owner)
+		}
+	}
+	slices.Sort(out)
+	return out, dups
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 19, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The kept value is built from the slot alone, through a local: whoever wins,
+// the same value is kept.
+func TestMapIterationOrderAcceptsValueOfTheSlotThroughLocal(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type File struct{ Path string }
+
+type Entry struct{ Path string }
+
+type tree struct{ entries map[string]*Entry }
+
+func (t *tree) Load(files map[string]File) {
+	for _, f := range files {
+		t.adopt(f.Path)
+	}
+}
+
+func (t *tree) adopt(p string) {
+	if t.entries[p] != nil {
+		return
+	}
+	e := &Entry{Path: p}
+	t.entries[p] = e
+}
+`)
+
+	for _, v := range violations {
+		assert.NotEqual(t, "map_iteration_dedup_winner", v.Context["pattern"])
+	}
+}
+
+// The slot is built from the map key in a local of the loop: unique per entry.
+func TestMapIterationOrderAcceptsSlotFromKeyThroughCallerLocal(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Entry struct {
+	Path string
+	Name string
+}
+
+type tree struct{ entries map[string]*Entry }
+
+func (t *tree) Load(names map[string]string) {
+	for dir, n := range names {
+		p := dir + "/" + n
+		t.adopt(p, n)
+	}
+}
+
+func (t *tree) adopt(p, name string) {
+	if t.entries[p] != nil {
+		return
+	}
+	t.entries[p] = &Entry{Path: p, Name: name}
+}
+`)
+
+	for _, v := range violations {
+		assert.NotEqual(t, "map_iteration_dedup_winner", v.Context["pattern"])
+	}
+}
+
+// The entry reaches the call through an element of the map value's slice.
+func TestMapIterationOrderReportsDedupWinnerFromNestedElement(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+type Hit struct {
+	Line int
+	Who  string
+}
+
+func Owners(bySource map[string][]Hit) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(line int, who string) {
+		if seen[line] {
+			return
+		}
+		seen[line] = true
+		out = append(out, who)
+	}
+	for _, hits := range bySource {
+		for _, h := range hits {
+			add(h.Line, h.Who)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 22, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A generic callee is found through its origin.
+func TestMapIterationOrderReportsDedupWinnerInGenericFunction(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func keep[K comparable, V any](dst map[K]V, k K, v V) {
+	if _, ok := dst[k]; ok {
+		return
+	}
+	dst[k] = v
+}
+
+func Owners(src map[string]int) map[int]string {
+	out := map[int]string{}
+	for name, slot := range src {
+		keep(out, slot, name)
+	}
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 13, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A closure bound with var x = func(...) is the same callee.
+func TestMapIterationOrderReportsDedupWinnerInVarClosure(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Pick(src map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	var add = func(slot int, name string) {
+		if seen[slot] {
+			return
+		}
+		seen[slot] = true
+		out = append(out, name)
+	}
+	for name, slot := range src {
+		add(slot, name)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 16, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A value looked up by the key is not the key: two entries can hold the same
+// line, so the slot is shared.
+func TestMapIterationOrderReportsDedupWinnerOnValueLookedUpByKey(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+type Site struct{ Line int }
+
+func Owners(sites map[string]Site) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(line int, who string) {
+		if seen[line] {
+			return
+		}
+		seen[line] = true
+		out = append(out, who)
+	}
+	for owner := range sites {
+		site := sites[owner]
+		add(site.Line, owner)
+	}
+	slices.Sort(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 19, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A local built up from itself is followed once: the entry still reaches the
+// kept value through it.
+func TestMapIterationOrderReportsDedupWinnerThroughReassignedLocal(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+func Owners(owners map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(line int, who string) {
+		if seen[line] {
+			return
+		}
+		seen[line] = true
+		label := "by "
+		label = label + who
+		out = append(out, label)
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, owner)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 19, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The entry reaches the call through a local the loop declares from it.
+func TestMapIterationOrderReportsDedupWinnerThroughLoopLocal(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+func Owners(claims map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(line int, label string) {
+		if seen[line] {
+			return
+		}
+		seen[line] = true
+		out = append(out, label)
+	}
+	for owner, line := range claims {
+		label := "by " + owner
+		add(line, label)
+	}
+	slices.Sort(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 17, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The write after a guard that marks the slot in its branch and goes on runs
+// for every entry: every value is kept, none wins.
+func TestMapIterationOrderAcceptsWriteAfterGuardBranch(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+func Collect(owners map[string][]int) ([]string, int) {
+	seen := map[int]bool{}
+	unique := 0
+	var all []string
+	add := func(line int, text string) {
+		if !seen[line] {
+			seen[line] = true
+			unique++
+		}
+		all = append(all, text)
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, owner)
+		}
+	}
+	slices.Sort(all)
+	return all, unique
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// The claim reads the target through comma-ok in the guard's init: the value
+// written while the slot is free is the first entry's.
+func TestMapIterationOrderReportsDedupWinnerOnCommaOkClaim(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func first(dst map[int]string, slot int, val string) {
+	if _, ok := dst[slot]; !ok {
+		dst[slot] = val
+	}
+}
+
+func Fill(dst map[int]string, src map[string]int) {
+	for name, slot := range src {
+		first(dst, slot, name)
+	}
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 11, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The caller passes the slot's own value as the kept value (p := n; adopt(p,
+// n)): whoever wins, the same value is kept.
+func TestMapIterationOrderAcceptsValueThatIsTheSlotArgument(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Entry struct {
+	Path string
+	Name string
+}
+
+type Tree struct{ entries map[string]*Entry }
+
+func (t *Tree) Reconcile(listing map[string][]string) {
+	for dir, names := range listing {
+		for _, n := range names {
+			p := n
+			_ = dir
+			t.adopt(p, n)
+		}
+	}
+}
+
+func (t *Tree) adopt(p, name string) {
+	if t.entries[p] != nil {
+		return
+	}
+	t.entries[p] = &Entry{Path: p, Name: name}
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A value filled from the same argument as a field of the slot is more than
+// the slot: adopt(e, e) keyed by e.ID keeps e.Name of the first entry.
+func TestMapIterationOrderReportsDedupWinnerOnFieldOfSlotArgument(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Item struct {
+	ID   int
+	Name string
+}
+
+type Index struct{ names map[int]string }
+
+func (x *Index) Fill(groups map[string]Item) {
+	for _, it := range groups {
+		x.adopt(it, it)
+	}
+}
+
+func (x *Index) adopt(key, item Item) {
+	if _, ok := x.names[key.ID]; ok {
+		return
+	}
+	x.names[key.ID] = item.Name
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 12, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A copy of the slot's value written again (p = strings.ToLower(p)) is no
+// longer that value: "A" and "a" share the slot and keep different names.
+func TestMapIterationOrderReportsDedupWinnerOnRewrittenSlotCopy(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "strings"
+
+type Tree struct{ names map[string]string }
+
+func (t *Tree) Reconcile(listing map[string][]string) {
+	for _, names := range listing {
+		for _, n := range names {
+			p := n
+			p = strings.ToLower(p)
+			t.adopt(p, n)
+		}
+	}
+}
+
+func (t *Tree) adopt(p, name string) {
+	if _, ok := t.names[p]; ok {
+		return
+	}
+	t.names[p] = name
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 12, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A variadic value filled from the slot and from more of the entry keeps the
+// rest: adopt(n, dir, n) keeps the dir of the first entry with that n.
+func TestMapIterationOrderReportsDedupWinnerOnVariadicBesideSlotArgument(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Tree struct{ parts map[string][]string }
+
+func (t *Tree) Reconcile(listing map[string][]string) {
+	for dir, names := range listing {
+		for _, n := range names {
+			t.adopt(n, dir, n)
+		}
+	}
+}
+
+func (t *Tree) adopt(p string, parts ...string) {
+	if t.parts[p] != nil {
+		return
+	}
+	t.parts[p] = parts
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 8, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The slot is the name the previous entry left (last = n after the call):
+// a copy assigned after the call is not the value it is called with.
+func TestMapIterationOrderReportsDedupWinnerOnSlotOfPreviousEntry(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Tree struct {
+	next    map[string]string
+	ignored map[string]bool
+}
+
+func (t *Tree) Reconcile(listing map[string][]string) {
+	var last string
+	for _, names := range listing {
+		for _, n := range names {
+			if _, skip := t.ignored[n]; skip {
+				continue
+			}
+			t.adopt(last, n)
+			last = n
+		}
+	}
+}
+
+func (t *Tree) adopt(p, name string) {
+	if _, ok := t.next[p]; ok {
+		return
+	}
+	t.next[p] = name
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 15, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}

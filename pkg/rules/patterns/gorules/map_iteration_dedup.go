@@ -27,15 +27,18 @@ import (
 //
 // Sorting the result does not help: the order of what was kept is stable, but
 // which of the entries sharing a slot was kept is the walk order, which Go
-// randomizes. Not such a claim: a slot built from the map key, which no two
-// entries share; a value with nothing of the entry beyond the slot, which reads
-// the same whoever wins; a test that compares the slot with the value (keep the
+// randomizes. Not such a claim: a slot built from the map key or a local of the
+// loop computed from it, which no two entries share; a value with nothing of
+// the entry beyond the slot, directly or through a local, which reads the same
+// whoever wins; a test that compares the slot with the value (keep the
 // largest), which a comparison and not the walk decides; a test that does not
-// stop the write; a seen map the callee makes afresh on every call; and state
+// stop the write, or writes the entry only while the slot is taken, where the
+// last entry wins; a seen map the callee makes afresh on every call; and state
 // of one entry or one iteration, which the other entries never reach.
 func dedupWinner(fn *ast.FuncDecl, file *ast.File, rangeStmt *ast.RangeStmt, info *types.Info) (*ast.CallExpr, string, bool) {
-	tainted := loopTaint(rangeStmt)
+	tainted := dedupTaint(rangeStmt)
 	key, _ := rangeTargetNames(rangeStmt)
+	keyed := keyTaint(rangeStmt, key)
 	var (
 		found  *ast.CallExpr
 		callee string
@@ -46,11 +49,87 @@ func dedupWinner(fn *ast.FuncDecl, file *ast.File, rangeStmt *ast.RangeStmt, inf
 			return
 		}
 		target, ok := resolveDedupCallee(fn, file, call, info)
-		if ok && target.keepsFirstEntry(fn, rangeStmt, key, tainted, info) {
+		if ok && target.keepsFirstEntry(fn, rangeStmt, key, keyed, tainted, info) {
 			found, callee = call, types.ExprString(call.Fun)
 		}
 	})
 	return found, callee, found != nil
+}
+
+// dedupTaint returns the names that carry the entry the loop is at: its key
+// and value, the locals the body declares from them, and the variables of a
+// nested walk over them (for _, h := range hits). One walk in source order is
+// enough: a name is declared before it is read.
+func dedupTaint(rangeStmt *ast.RangeStmt) map[string]bool {
+	key, values := rangeTargetNames(rangeStmt)
+	tainted := map[string]bool{}
+	for _, name := range append([]string{key}, values...) {
+		if name != "" {
+			tainted[name] = true
+		}
+	}
+	mark := func(expr ast.Expr) {
+		if ident, ok := expr.(*ast.Ident); ok {
+			tainted[ident.Name] = true
+		}
+	}
+	ast.Inspect(rangeStmt.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if node.Tok == token.DEFINE && len(node.Lhs) == len(node.Rhs) {
+				for i, lhs := range node.Lhs {
+					if helpers.MentionsAnyName(node.Rhs[i], tainted) {
+						mark(lhs)
+					}
+				}
+			}
+		case *ast.RangeStmt:
+			if helpers.MentionsAnyName(node.X, tainted) {
+				mark(node.Key)
+				mark(node.Value)
+			}
+		}
+		return true
+	})
+	return tainted
+}
+
+// keyTaint returns the loop key and the locals the body declares from it,
+// p := dir + "/" + n: a slot built from any of them is unique per entry. A
+// lookup by the key (v := m[k]) reads the value, which entries may share, and
+// does not count.
+func keyTaint(rangeStmt *ast.RangeStmt, key string) map[string]bool {
+	keyed := map[string]bool{key: true}
+	ast.Inspect(rangeStmt.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" && mentionsOutsideIndex(assign.Rhs[i], keyed) {
+				keyed[ident.Name] = true
+			}
+		}
+		return true
+	})
+	return keyed
+}
+
+// mentionsOutsideIndex reports whether the expression reads one of the names
+// other than as the index of a lookup.
+func mentionsOutsideIndex(expr ast.Expr, names map[string]bool) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.IndexExpr:
+			found = found || mentionsOutsideIndex(node.X, names)
+			return false
+		case *ast.Ident:
+			found = found || names[node.Name]
+		}
+		return !found
+	})
+	return found
 }
 
 // callCarriesEntry reports whether an argument or the receiver of the call
@@ -75,6 +154,8 @@ type dedupCallee struct {
 	// derived maps a local of the callee to the parameters its value comes
 	// from: line := at.Line carries at.
 	derived map[types.Object]map[types.Object]bool
+	// sources maps a local of the callee to the expressions assigned to it.
+	sources map[types.Object][]ast.Expr
 }
 
 // resolveDedupCallee finds the body of a call to a closure the function binds
@@ -178,6 +259,7 @@ func (c *dedupCallee) bind(fnType *ast.FuncType, recv *ast.FieldList, call *ast.
 // is computed from.
 func (c *dedupCallee) derive(info *types.Info) {
 	c.derived = map[types.Object]map[types.Object]bool{}
+	c.sources = map[types.Object][]ast.Expr{}
 	ast.Inspect(c.body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
@@ -218,6 +300,7 @@ func (c *dedupCallee) flowInto(target, source ast.Expr, info *types.Info) {
 	if !c.declares(obj) {
 		return
 	}
+	c.sources[obj] = append(c.sources[obj], source)
 	params := c.paramsIn(source, info)
 	if len(params) == 0 {
 		return
@@ -232,10 +315,10 @@ func (c *dedupCallee) flowInto(target, source ast.Expr, info *types.Info) {
 // call fills that slot from something other than the loop key, and the
 // guarded write keeps more of the entry than the slot in state that outlives
 // the function.
-func (c *dedupCallee) keepsFirstEntry(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt, key string, tainted map[string]bool, info *types.Info) bool {
+func (c *dedupCallee) keepsFirstEntry(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt, key string, keyed, tainted map[string]bool, info *types.Info) bool {
 	entry := c.entryParams(tainted)
 	for _, guard := range c.guards(rangeStmt, key, info) {
-		if c.slotOfKey(guard.slot.Index, key, info) {
+		if c.slotOfKey(guard.slot.Index, keyed, info) {
 			continue
 		}
 		// The seen map and the slot are what the guard may read; a value
@@ -245,7 +328,7 @@ func (c *dedupCallee) keepsFirstEntry(fn *ast.FuncDecl, rangeStmt *ast.RangeStmt
 		if c.readsEntryBeyond(guard.test.Cond, c.besideSeenMap(entry, guard.slot, info), slot, info) {
 			continue
 		}
-		if c.keepsEntry(fn, guard.test, entry, slot, info) {
+		if c.keepsEntry(fn, guard, c.besideSlotValue(entry, guard.slot.Index, loopAliases(rangeStmt, info), info), slot, info) {
 			return true
 		}
 	}
@@ -266,11 +349,116 @@ func (c *dedupCallee) besideSeenMap(entry map[types.Object]bool, slot *ast.Index
 	return beside
 }
 
+// besideSlotValue returns the entry parameters other than those the caller
+// fills with the very value the slot is: after p := n, adopt(p, n) keeps n,
+// which is the slot, so whoever wins, the same value is kept. Only a slot that
+// is a whole parameter counts: a slot of key.ID says nothing of key.Name.
+func (c *dedupCallee) besideSlotValue(entry map[types.Object]bool, index ast.Expr, aliases map[types.Object]string, info *types.Info) map[types.Object]bool {
+	spell := func(arg ast.Expr) string {
+		if ident, ok := ast.Unparen(arg).(*ast.Ident); ok {
+			if source, ok := aliases[info.Uses[ident]]; ok {
+				return source
+			}
+		}
+		return types.ExprString(arg)
+	}
+	slotValues := map[string]bool{}
+	if ident, ok := ast.Unparen(index).(*ast.Ident); ok {
+		for _, arg := range c.bound[info.Uses[ident]] {
+			slotValues[spell(arg)] = true
+		}
+	}
+	beside := map[types.Object]bool{}
+	for param := range entry {
+		same := true
+		for _, arg := range c.bound[param] {
+			same = same && slotValues[spell(arg)]
+		}
+		if !same {
+			beside[param] = true
+		}
+	}
+	return beside
+}
+
+// loopAliases returns the locals the loop body declares as a copy of another
+// value (p := n) and assigns nowhere else, by how that value is spelled. An
+// increment (p++) keeps p a function of n, so whoever wins under a slot of p
+// keeps the same n, and does not count as a write.
+func loopAliases(rangeStmt *ast.RangeStmt, info *types.Info) map[types.Object]string {
+	aliases := map[types.Object]string{}
+	writes := map[types.Object]int{}
+	ast.Inspect(rangeStmt.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			ident, ok := lhs.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			obj := info.ObjectOf(ident)
+			writes[obj]++
+			if info.Defs[ident] == obj && len(assign.Lhs) == len(assign.Rhs) {
+				aliases[obj] = types.ExprString(assign.Rhs[i])
+			}
+		}
+		return true
+	})
+	for obj, count := range writes {
+		if count > 1 {
+			delete(aliases, obj)
+		}
+	}
+	return aliases
+}
+
 // dedupGuard is an if that tests a slot the callee also fills.
 type dedupGuard struct {
 	test *ast.IfStmt
 	// slot is how the slot is spelled: taken[line].
 	slot *ast.IndexExpr
+	// marks are the statements that fill the slot.
+	marks []ast.Node
+}
+
+// freeSpan returns where the statements that run while the slot is still
+// free sit: the branch of the guard that fills the slot, or - after a guard
+// whose branch leaves (return, continue, break) - the rest of the body. A
+// guard whose taken branch only overwrites (t.again[slot] = name) lets the
+// last entry win, and is no claim; one that neither leaves nor fills the slot
+// in a branch keeps every entry.
+func (g dedupGuard) freeSpan(body *ast.BlockStmt) (from, to token.Pos, ok bool) {
+	within := func(branch ast.Node) bool {
+		for _, mark := range g.marks {
+			if mark.Pos() >= branch.Pos() && mark.End() <= branch.End() {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case within(g.test.Body):
+		return g.test.Body.Pos(), g.test.Body.End(), true
+	case g.test.Else != nil && within(g.test.Else):
+		return g.test.Else.Pos(), g.test.Else.End(), true
+	case leaves(g.test.Body):
+		return g.test.End(), body.End(), true
+	}
+	return token.NoPos, token.NoPos, false
+}
+
+// leaves reports whether a block ends with a return, continue or break.
+func leaves(block *ast.BlockStmt) bool {
+	if len(block.List) == 0 {
+		return false
+	}
+	switch block.List[len(block.List)-1].(type) {
+	case *ast.ReturnStmt, *ast.BranchStmt:
+		return true
+	}
+	return false
 }
 
 // guards returns the ifs that test seen[slot] - in the condition or in the
@@ -291,8 +479,11 @@ func (c *dedupCallee) guards(rangeStmt *ast.RangeStmt, key string, info *types.I
 			}
 			ast.Inspect(part, func(m ast.Node) bool {
 				index, ok := m.(*ast.IndexExpr)
-				if ok && !c.declaresRoot(index.X, info) && !c.ofOneEntry(index.X, rangeStmt, key, info) && c.assignsSlot(index) {
-					guards = append(guards, dedupGuard{test: ifStmt, slot: index})
+				if !ok || c.declaresRoot(index.X, info) || c.ofOneEntry(index.X, rangeStmt, key, info) {
+					return true
+				}
+				if marks := c.slotMarks(index); len(marks) > 0 {
+					guards = append(guards, dedupGuard{test: ifStmt, slot: index, marks: marks})
 				}
 				return true
 			})
@@ -326,33 +517,37 @@ func (c *dedupCallee) ofOneEntry(seenMap ast.Expr, rangeStmt *ast.RangeStmt, key
 	return obj != nil && obj.Pos() >= rangeStmt.Pos() && obj.Pos() < rangeStmt.Body.End()
 }
 
-// assignsSlot reports whether the callee writes the slot it tested: assigns
-// it or counts it up.
-func (c *dedupCallee) assignsSlot(index *ast.IndexExpr) bool {
+// slotMarks returns the statements of the callee that write the slot it
+// tested: assign it or count it up.
+func (c *dedupCallee) slotMarks(index *ast.IndexExpr) []ast.Node {
 	spelled := types.ExprString(index)
-	assigned := false
+	var marks []ast.Node
 	ast.Inspect(c.body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
 			for _, lhs := range node.Lhs {
-				assigned = assigned || types.ExprString(lhs) == spelled
+				if types.ExprString(lhs) == spelled {
+					marks = append(marks, node)
+					break
+				}
 			}
 		case *ast.IncDecStmt:
-			assigned = assigned || types.ExprString(node.X) == spelled
+			if types.ExprString(node.X) == spelled {
+				marks = append(marks, node)
+			}
 		}
-		return !assigned
+		return true
 	})
-	return assigned
+	return marks
 }
 
-// slotOfKey reports whether the caller builds the slot from the loop key: a
-// map holds a key once, so no two entries share such a slot.
-func (c *dedupCallee) slotOfKey(index ast.Expr, key string, info *types.Info) bool {
+// slotOfKey reports whether the caller builds the slot from the loop key or a
+// local of the loop computed from it: a map holds a key once, so no two
+// entries share such a slot.
+func (c *dedupCallee) slotOfKey(index ast.Expr, keyed map[string]bool, info *types.Info) bool {
 	for param := range c.paramsIn(index, info) {
-		for _, arg := range c.bound[param] {
-			if patternkit.Mentions(arg, key) {
-				return true
-			}
+		if argsMention(c.bound[param], keyed) {
+			return true
 		}
 	}
 	return false
@@ -373,11 +568,15 @@ func (c *dedupCallee) entryParams(tainted map[string]bool) map[types.Object]bool
 // keepsEntry reports whether a write the guard lets through only once per
 // slot keeps more of the entry than the slot - in the value, or in an index
 // of the target - in a target that outlives the function.
-func (c *dedupCallee) keepsEntry(fn *ast.FuncDecl, guard *ast.IfStmt, entry map[types.Object]bool, slot map[string]bool, info *types.Info) bool {
+func (c *dedupCallee) keepsEntry(fn *ast.FuncDecl, guard dedupGuard, entry map[types.Object]bool, slot map[string]bool, info *types.Info) bool {
+	from, to, ok := guard.freeSpan(c.body)
+	if !ok {
+		return false
+	}
 	kept := false
 	ast.Inspect(c.body, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
-		if kept || !ok || !gatedBy(guard, assign) {
+		if kept || !ok || assign.Pos() < from || assign.End() > to {
 			return !kept
 		}
 		for i, lhs := range assign.Lhs {
@@ -389,23 +588,6 @@ func (c *dedupCallee) keepsEntry(fn *ast.FuncDecl, guard *ast.IfStmt, entry map[
 		return !kept
 	})
 	return kept
-}
-
-// gatedBy reports whether the guard decides if the statement runs: it sits in
-// a branch of the guard, or after a guard whose branch leaves (return,
-// continue, break).
-func gatedBy(guard *ast.IfStmt, stmt ast.Node) bool {
-	if stmt.Pos() >= guard.Body.Pos() && stmt.End() <= guard.End() {
-		return true
-	}
-	if stmt.Pos() < guard.End() || len(guard.Body.List) == 0 {
-		return false
-	}
-	switch guard.Body.List[len(guard.Body.List)-1].(type) {
-	case *ast.ReturnStmt, *ast.BranchStmt:
-		return true
-	}
-	return false
 }
 
 // indexCarries reports whether an index of the target reads more of the
@@ -425,11 +607,33 @@ func (c *dedupCallee) indexCarries(target ast.Expr, entry map[types.Object]bool,
 // readsEntryBeyond reports whether the expression reads the entry other than
 // through the slot itself: text in Report{line, text} when the slot is line,
 // f.Name when it is f.Line.
+//
+// A local is followed to what was assigned to it and checked the same way:
+// e := &Entry{Path: p} keeps nothing beyond the slot p.
 func (c *dedupCallee) readsEntryBeyond(node ast.Node, entry map[types.Object]bool, slot map[string]bool, info *types.Info) bool {
+	return c.readsBeyond(node, entry, slot, info, map[types.Object]bool{})
+}
+
+func (c *dedupCallee) readsBeyond(node ast.Node, entry map[types.Object]bool, slot map[string]bool, info *types.Info, followed map[types.Object]bool) bool {
 	found := false
 	forEachChain(node, func(chain ast.Expr, root *ast.Ident) {
-		if !slot[types.ExprString(chain)] && c.mentionsAny(root, entry, info) {
+		if found || slot[types.ExprString(chain)] {
+			return
+		}
+		obj := info.Uses[root]
+		if entry[obj] {
 			found = true
+			return
+		}
+		if followed[obj] {
+			return
+		}
+		followed[obj] = true
+		for _, source := range c.sources[obj] {
+			if c.readsBeyond(source, entry, slot, info, followed) {
+				found = true
+				return
+			}
 		}
 	})
 	return found
@@ -579,14 +783,4 @@ func (c *dedupCallee) paramsIn(expr ast.Node, info *types.Info) map[types.Object
 		return true
 	})
 	return params
-}
-
-// mentionsAny reports whether the expression reads one of the parameters.
-func (c *dedupCallee) mentionsAny(expr ast.Node, params map[types.Object]bool, info *types.Info) bool {
-	for param := range c.paramsIn(expr, info) {
-		if params[param] {
-			return true
-		}
-	}
-	return false
 }
