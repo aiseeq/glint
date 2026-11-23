@@ -2,6 +2,7 @@ package moneyrules
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 	"sort"
 
@@ -543,124 +544,197 @@ func hasSpreadsheetPrecisionFormat(info *types.Info, body *ast.BlockStmt) bool {
 }
 
 func hasDecimalSignificantRounding(info *types.Info, body *ast.BlockStmt) bool {
-	var rounds []*ast.CallExpr
-	digitValues := make(map[types.Object]bool)
-	precisionValues := make(map[types.Object]bool)
+	assignments := spreadsheetValueAssignments(info, body)
+	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if ok && isDecimalRoundingCall(info, call) {
-			rounds = append(rounds, call)
+		if ok && isDecimalSignificantRound(info, call, assignments) {
+			found = true
+			return false
+		}
+		return !found
+	})
+	return found
+}
+
+type spreadsheetVariableAssignment struct {
+	count int
+	rhs   ast.Expr
+}
+
+func spreadsheetValueAssignments(info *types.Info, body *ast.BlockStmt) map[types.Object]spreadsheetVariableAssignment {
+	assignments := make(map[types.Object]spreadsheetVariableAssignment)
+	add := func(lhs ast.Expr, rhs ast.Expr) {
+		id, ok := ast.Unparen(lhs).(*ast.Ident)
+		if !ok || id.Name == "_" {
+			return
+		}
+		obj := info.Defs[id]
+		if obj == nil {
+			obj = info.Uses[id]
+		}
+		if obj == nil {
+			return
+		}
+		if _, isConst := obj.(*types.Const); isConst {
+			return
+		}
+		assignment := assignments[obj]
+		assignment.count++
+		if assignment.count == 1 {
+			assignment.rhs = rhs
+		}
+		assignments[obj] = assignment
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				var rhs ast.Expr
+				if (node.Tok == token.ASSIGN || node.Tok == token.DEFINE) && len(node.Lhs) == len(node.Rhs) {
+					rhs = node.Rhs[i]
+				}
+				add(lhs, rhs)
+			}
+		case *ast.ValueSpec:
+			for i, name := range node.Names {
+				if i < len(node.Values) {
+					add(name, node.Values[i])
+				}
+			}
+		case *ast.IncDecStmt:
+			add(node.X, nil)
+		case *ast.RangeStmt:
+			if node.Tok == token.ASSIGN || node.Tok == token.DEFINE {
+				add(node.Key, nil)
+				add(node.Value, nil)
+			}
 		}
 		return true
 	})
-	if len(rounds) == 0 {
+	return assignments
+}
+
+func isDecimalSignificantRound(info *types.Info, call *ast.CallExpr, assignments map[types.Object]spreadsheetVariableAssignment) bool {
+	fn := patternkit.StaticFunc(info, call)
+	if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != patternkit.ShopspringDecimalPath || len(call.Args) != 1 {
 		return false
 	}
-	for changed := true; changed; {
-		changed = false
-		assign := func(lhs ast.Expr, rhs ast.Expr) {
-			id, ok := ast.Unparen(lhs).(*ast.Ident)
-			if !ok {
-				return
-			}
-			obj := info.Defs[id]
-			if obj == nil {
-				obj = info.Uses[id]
-			}
-			if obj == nil {
-				return
-			}
-			props := decimalSignificantExpr(info, rhs, digitValues, precisionValues)
-			if props.digits && !digitValues[obj] {
-				digitValues[obj], changed = true, true
-			}
-			if props.precision && !precisionValues[obj] {
-				precisionValues[obj], changed = true, true
-			}
-		}
-		ast.Inspect(body, func(n ast.Node) bool {
-			switch node := n.(type) {
-			case *ast.AssignStmt:
-				for i, rhs := range node.Rhs {
-					if i < len(node.Lhs) {
-						assign(node.Lhs[i], rhs)
-					}
-				}
-			case *ast.ValueSpec:
-				for i, rhs := range node.Values {
-					if i < len(node.Names) {
-						assign(node.Names[i], rhs)
-					}
-				}
-			}
-			return true
-		})
+	switch fn.Name() {
+	case "Round", "RoundBank":
+	default:
+		return false
 	}
-	for _, call := range rounds {
-		for _, arg := range call.Args {
-			props := decimalSignificantExpr(info, arg, digitValues, precisionValues)
-			if props.digits && props.precision {
-				return true
-			}
-		}
+	receiver, ok := decimalMethodReceiver(info, call)
+	if !ok {
+		return false
 	}
-	return false
+	arg := expandSpreadsheetValue(info, call.Args[0], assignments, make(map[types.Object]bool), 8)
+	return arg != nil && isSignificantPlaces(info, arg, receiver)
 }
 
-type decimalSignificantExprProps struct {
-	digits    bool
-	precision bool
+func decimalMethodReceiver(info *types.Info, call *ast.CallExpr) (types.Object, bool) {
+	selector, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return nil, false
+	}
+	id, ok := ast.Unparen(selector.X).(*ast.Ident)
+	if !ok {
+		return nil, false
+	}
+	obj := info.Uses[id]
+	if obj == nil {
+		obj = info.Defs[id]
+	}
+	return obj, obj != nil
 }
 
-func decimalSignificantExpr(info *types.Info, expr ast.Expr, digitValues, precisionValues map[types.Object]bool) decimalSignificantExprProps {
-	if value, ok := patternkit.ConstantInt(info, expr); ok {
-		return decimalSignificantExprProps{precision: value > 0 && value <= 15}
+func expandSpreadsheetValue(info *types.Info, expr ast.Expr, assignments map[types.Object]spreadsheetVariableAssignment, seen map[types.Object]bool, depth int) ast.Expr {
+	if expr == nil || depth < 0 {
+		return nil
 	}
-	switch node := ast.Unparen(expr).(type) {
+	expr = ast.Unparen(expr)
+	if call, ok := expr.(*ast.CallExpr); ok && isTypeConversion(info, call) {
+		return expandSpreadsheetValue(info, call.Args[0], assignments, seen, depth)
+	}
+	switch node := expr.(type) {
 	case *ast.Ident:
 		obj := info.Uses[node]
 		if obj == nil {
 			obj = info.Defs[node]
 		}
-		return decimalSignificantExprProps{digits: digitValues[obj], precision: precisionValues[obj]}
-	case *ast.CallExpr:
-		fn := patternkit.StaticFunc(info, node)
-		if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == patternkit.ShopspringDecimalPath && fn.Name() == "NumDigits" {
-			return decimalSignificantExprProps{digits: true}
+		assignment, ok := assignments[obj]
+		if !ok {
+			return expr
 		}
-		var props decimalSignificantExprProps
-		for _, arg := range node.Args {
-			child := decimalSignificantExpr(info, arg, digitValues, precisionValues)
-			props.digits = props.digits || child.digits
-			props.precision = props.precision || child.precision
+		_, constantRHS := patternkit.ConstantInt(info, assignment.rhs)
+		if assignment.count != 1 || assignment.rhs == nil || seen[obj] || constantRHS {
+			return nil
 		}
-		return props
+		seen[obj] = true
+		expanded := expandSpreadsheetValue(info, assignment.rhs, assignments, seen, depth-1)
+		delete(seen, obj)
+		return expanded
 	case *ast.BinaryExpr:
-		x := decimalSignificantExpr(info, node.X, digitValues, precisionValues)
-		y := decimalSignificantExpr(info, node.Y, digitValues, precisionValues)
-		return decimalSignificantExprProps{
-			digits:    x.digits || y.digits,
-			precision: x.precision || y.precision,
+		x := expandSpreadsheetValue(info, node.X, assignments, seen, depth)
+		y := expandSpreadsheetValue(info, node.Y, assignments, seen, depth)
+		if x == nil || y == nil {
+			return nil
 		}
-	case *ast.UnaryExpr:
-		return decimalSignificantExpr(info, node.X, digitValues, precisionValues)
-	case *ast.SelectorExpr:
-		return decimalSignificantExpr(info, node.X, digitValues, precisionValues)
+		if x == node.X && y == node.Y {
+			return node
+		}
+		return &ast.BinaryExpr{X: x, Op: node.Op, Y: y}
 	}
-	return decimalSignificantExprProps{}
+	return expr
 }
 
-func isDecimalRoundingCall(info *types.Info, call *ast.CallExpr) bool {
-	fn := patternkit.StaticFunc(info, call)
-	if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != patternkit.ShopspringDecimalPath {
+func isTypeConversion(info *types.Info, call *ast.CallExpr) bool {
+	if len(call.Args) != 1 {
 		return false
 	}
-	switch fn.Name() {
-	case "Round", "RoundCeil", "RoundFloor", "RoundUp", "RoundDown", "RoundBank", "Truncate":
+	tv, ok := info.Types[call.Fun]
+	return ok && tv.IsType()
+}
+
+func isSignificantPlaces(info *types.Info, expr ast.Expr, receiver types.Object) bool {
+	expr = ast.Unparen(expr)
+	outer, ok := expr.(*ast.BinaryExpr)
+	if !ok || outer.Op != token.SUB {
+		return false
+	}
+	if isSignificantDigitConstant(info, outer.X) && isExponentAndDigits(info, outer.Y, receiver) {
 		return true
-	default:
+	}
+	first, ok := ast.Unparen(outer.X).(*ast.BinaryExpr)
+	if !ok || first.Op != token.SUB || !isSignificantDigitConstant(info, first.X) {
 		return false
 	}
+	return isDecimalValueMethod(info, first.Y, receiver, "Exponent") && isDecimalValueMethod(info, outer.Y, receiver, "NumDigits") ||
+		isDecimalValueMethod(info, first.Y, receiver, "NumDigits") && isDecimalValueMethod(info, outer.Y, receiver, "Exponent")
+}
+
+func isExponentAndDigits(info *types.Info, expr ast.Expr, receiver types.Object) bool {
+	pair, ok := ast.Unparen(expr).(*ast.BinaryExpr)
+	if !ok || pair.Op != token.ADD {
+		return false
+	}
+	return isDecimalValueMethod(info, pair.X, receiver, "Exponent") && isDecimalValueMethod(info, pair.Y, receiver, "NumDigits") ||
+		isDecimalValueMethod(info, pair.X, receiver, "NumDigits") && isDecimalValueMethod(info, pair.Y, receiver, "Exponent")
+}
+
+func isDecimalValueMethod(info *types.Info, expr ast.Expr, receiver types.Object, name string) bool {
+	call, ok := ast.Unparen(expr).(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 || !patternkit.IsPkgFunc(info, call, patternkit.ShopspringDecimalPath, name) {
+		return false
+	}
+	methodReceiver, ok := decimalMethodReceiver(info, call)
+	return ok && methodReceiver == receiver
+}
+
+func isSignificantDigitConstant(info *types.Info, expr ast.Expr) bool {
+	value, ok := patternkit.ConstantInt(info, ast.Unparen(expr))
+	return ok && value == 15
 }
 
 func reachesNormalizer(decl patternkit.TypedFuncDecl, direct map[*types.Func]bool, functions map[*types.Func]patternkit.TypedFuncDecl, depth int, seen map[*types.Func]bool) bool {

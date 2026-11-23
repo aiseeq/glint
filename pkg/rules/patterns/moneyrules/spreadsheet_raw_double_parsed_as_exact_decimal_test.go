@@ -548,6 +548,92 @@ func trimDoubleNoise(value decimal.Decimal) decimal.Decimal {
 	}))
 }
 
+func TestSpreadsheetRawDoubleSignificantExactFormsNormalize(t *testing.T) {
+	for name, body := range map[string]string{
+		"real form through variables": `digits := x.NumDigits()
+	places := 15 - (int(x.Exponent()) + digits)
+	return x.Round(int32(places))`,
+		"direct calls":                `return x.Round(int32(15 - (int(x.Exponent()) + x.NumDigits())))`,
+		"addition terms reordered":    `return x.Round(int32(15 - (x.NumDigits() + int(x.Exponent()))))`,
+		"subtraction terms reordered": `return x.Round(int32(15 - x.NumDigits() - int(x.Exponent())))`,
+		"named constant":              `return x.Round(int32(significantDigits - (int(x.Exponent()) + x.NumDigits())))`,
+		"RoundBank":                   `return x.RoundBank(int32(15 - (int(x.Exponent()) + x.NumDigits())))`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			decls := ""
+			if name == "named constant" {
+				decls = "const significantDigits = 15\n"
+			}
+			assert.Empty(t, spreadsheetSignificantRoundFindings(t, decls, body))
+		})
+	}
+}
+
+func TestSpreadsheetRawDoubleSignificantNearMatchesStillFind(t *testing.T) {
+	tests := []struct {
+		name  string
+		decls string
+		body  string
+	}{
+		{name: "Truncate", body: `return x.Truncate(int32(15 - (int(x.Exponent()) + x.NumDigits())))`},
+		{name: "RoundFloor", body: `return x.RoundFloor(int32(15 - (int(x.Exponent()) + x.NumDigits())))`},
+		{name: "StringFixed", body: `_ = x.StringFixed(int32(15 - (int(x.Exponent()) + x.NumDigits())))
+	return x`},
+		{name: "extra one", body: `return x.Round(int32(15 - (int(x.Exponent()) + x.NumDigits()) + 1))`},
+		{name: "missing exponent", body: `return x.Round(int32(15 - x.NumDigits()))`},
+		{name: "different value", body: `scale := decimal.NewFromInt(1)
+	return x.Round(int32(15 - (int(scale.Exponent()) + scale.NumDigits())))`},
+		{name: "constant 14", body: `return x.Round(int32(14 - (int(x.Exponent()) + x.NumDigits())))`},
+		{name: "constant 16", body: `return x.Round(int32(16 - (int(x.Exponent()) + x.NumDigits())))`},
+		{name: "variable is not a constant", body: `limit := 15
+	return x.Round(int32(limit - (int(x.Exponent()) + x.NumDigits())))`},
+		{name: "wrong operator between terms", body: `return x.Round(int32(15 - (int(x.Exponent()) - x.NumDigits())))`},
+		{name: "min", body: `return x.Round(int32(min(x.NumDigits(), 2)))`},
+		{name: "second assignment", body: `places := 15 - (int(x.Exponent()) + x.NumDigits())
+	places = 2
+	return x.Round(int32(places))`},
+		{name: "Round(2) beside digit count", body: `_ = x.NumDigits()
+	return x.Round(2)`},
+		{name: "digits minus one", body: `return x.Round(int32(x.NumDigits() - 1))`},
+		{name: "remainder", body: `return x.Round(int32(x.NumDigits() % 2))`},
+		{name: "digits times two", body: `return x.Round(int32(x.NumDigits() * 2))`},
+		{name: "other round receiver", body: `scale := decimal.NewFromInt(1)
+	return scale.Round(int32(15 - (int(x.Exponent()) + x.NumDigits())))`},
+		{name: "precision four suppresses no package findings", decls: "const significantDigits = 4\n", body: `return x.Round(int32(significantDigits - (int(x.Exponent()) + x.NumDigits())))`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			want := "sheet/read.go:8"
+			if test.name == "precision four suppresses no package findings" {
+				want = "sheet/read.go:9"
+			}
+			assert.Equal(t, []string{want}, spreadsheetSignificantRoundFindings(t, test.decls, test.body))
+		})
+	}
+}
+
+func spreadsheetSignificantRoundFindings(t *testing.T, declarations, roundBody string) []string {
+	t.Helper()
+	return spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+` + declarations + `
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	value, _ := decimal.NewFromString(cells[0])
+	_ = roundAmount(value)
+}
+func roundAmount(x decimal.Decimal) decimal.Decimal {
+	` + roundBody + `
+}
+`,
+		"third_party/decimal/decimal.go": spreadsheetDecimalStub(),
+	})
+}
+
 func spreadsheetDecimalStub() string {
 	return patterntest.DecimalStub + `
 func (d Decimal) NumDigits() int { return 1 }
