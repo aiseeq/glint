@@ -256,6 +256,7 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 	}
 	violations := make([]*core.Violation, 0, len(judged))
 	for _, exception := range judged {
+		// The configuration refuses an exception that names none of these.
 		var target []string
 		if exception.Exception.File != "" {
 			target = append(target, fmt.Sprintf("file %q", exception.Exception.File))
@@ -269,9 +270,10 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 		if exception.Exception.Pattern != "" {
 			target = append(target, fmt.Sprintf("pattern %q", exception.Exception.Pattern))
 		}
-		if len(target) == 0 {
-			target = append(target, "without a file, function, or pattern")
+		if exception.Exception.Line > 0 {
+			target = append(target, fmt.Sprintf("line %d", exception.Exception.Line))
 		}
+
 		v := r.CreateViolation(exception.place.File, exception.place.Line,
 			fmt.Sprintf("Exception of %s for %s matched no finding of this run — it silences nothing and waits for the next real one", exception.Rule, strings.Join(target, ", ")))
 		v.WithSuggestion("Delete the exception, or narrow it to the finding it was written for")

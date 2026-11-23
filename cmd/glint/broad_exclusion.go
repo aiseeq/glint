@@ -41,11 +41,16 @@ type broadEntry struct {
 	// glob: one line of one file when the project holds at most one file
 	// they name; nil for other entries.
 	oneLine *core.Exception
-	// excepts is the exception declaration whose matched findings determine
-	// this entry's severity by its node column; nil when the entry has none.
+	// excepts is the exception of an exception entry: coversBroadly judges
+	// an exception of another rule by the files it covers
+	// (core.Exception.CoversFile), and the severity of what it silenced is
+	// found by its line and column (silencedSeverities.exceptionAt); nil for
+	// other entries.
 	excepts *core.Exception
-	// declaredAt is the line of an exception's entry that declares it, in
-	// origin when set and in file otherwise; the reported finding stays here.
+	// declaredAt is the line of an exception's entry that declares the
+	// exception, in origin when it is set and in file otherwise: with the
+	// column of excepts it finds what the exception silenced. The finding
+	// itself is reported at line.
 	declaredAt int
 	// file is the configuration file, absolute, the entry is reported in and
 	// whose marker keeps it.
