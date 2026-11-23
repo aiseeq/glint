@@ -81,3 +81,58 @@ func (r *SQLCharColumnPadsValueRule) CacheInputs(root string) (string, error) {
 func (r *DeltaExportMissesUnlinkRule) CacheInputs(root string) (string, error) {
 	return patternkit.SchemaInputsHash(root, r.BaseRule)
 }
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *SQLCheckConstraintInputUnvalidatedRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *SQLConstraintViolationUnmappedRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *SQLDateStringParsedAsDateRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *SQLModelFieldSkippedRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *SQLScanArgCountRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *SQLScanNullableRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *SQLSessionTimeZoneRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *SQLXColumnWithoutFieldRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *StringLiteralExceedsColumnWidthRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *SyncNewerWinsOnStampedTableRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}
+
+// CacheInputs identifies the migration bytes used by the rule.
+func (r *TruncatedRandomIDAsUniqueNumberRule) CacheInputs(root string) (string, error) {
+	return patternkit.SchemaInputsHash(root, r.BaseRule)
+}

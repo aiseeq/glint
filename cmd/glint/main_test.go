@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
+	"github.com/aiseeq/glint/pkg/output"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/deadcode"
 	"github.com/aiseeq/glint/pkg/rules/duplication"
@@ -391,6 +392,80 @@ func TestMainChangesDirectoryBeforeLoadingConfigAndPaths(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "interface-any") || !strings.Contains(string(output), "sample.go") {
 		t.Fatalf("expected finding from -C project, got:\n%s", output)
+	}
+}
+
+func TestProjectCacheExcludedConfiguredMigrationMatchesNoCache(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
+	write := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module example.com/project\n\ngo 1.24\n")
+	write(".glint.yaml", `version: 1
+settings:
+  exclude:
+    - "testdata/**"
+categories:
+  patterns:
+    rules:
+      sql-scan-nullable-into-value:
+        settings:
+          migrations: "testdata/migrations"
+`)
+	write("check.go", `package project
+import (
+	"context"
+	"database/sql"
+)
+func Lookup(ctx context.Context, db *sql.DB) (string, error) {
+	var nickname string
+	err := db.QueryRowContext(ctx, "SELECT nickname FROM accounts").Scan(&nickname)
+	return nickname, err
+}
+`)
+	write("testdata/migrations/001_init.up.sql", "CREATE TABLE accounts (id INTEGER PRIMARY KEY, nickname TEXT);\n")
+	run := func(noCache bool) output.JSONReport {
+		t.Helper()
+		args := []string{"check", "--rule", "sql-scan-nullable-into-value", "-o", "json"}
+		if noCache {
+			args = append(args, "--no-cache")
+		}
+		args = append(args, ".")
+		cmd := mainSubprocess(t, args)
+		cmd.Dir = root
+		data, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("glint check failed: %v\n%s", err, data)
+		}
+		if pass := strings.Index(string(data), "\nPASS\n"); pass >= 0 {
+			data = data[:pass]
+		}
+		var report output.JSONReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			t.Fatalf("decode glint report: %v\n%s", err, data)
+		}
+		return report
+	}
+	before := run(false)
+	if before.Stats.FilesSkipped == 0 || len(before.Issues) != 1 || before.Issues[0].Rule != "sql-scan-nullable-into-value" {
+		t.Fatalf("migration was not excluded or expected finding missing: %+v", before)
+	}
+	write("testdata/migrations/001_init.up.sql", "CREATE TABLE accounts (id INTEGER PRIMARY KEY, nickname TEXT NOT NULL);\n")
+	cached := run(false)
+	fresh := run(true)
+	if len(fresh.Issues) != 0 {
+		t.Fatalf("no-cache run still found the nullable column: %+v", fresh.Issues)
+	}
+	if !reflect.DeepEqual(cached.Issues, fresh.Issues) {
+		t.Fatalf("cached findings differ from --no-cache: cached=%+v fresh=%+v", cached.Issues, fresh.Issues)
 	}
 }
 
