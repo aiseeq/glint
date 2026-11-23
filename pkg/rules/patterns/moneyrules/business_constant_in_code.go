@@ -113,7 +113,7 @@ func (r *BusinessConstantInCodeRule) AnalyzeGoProject(ctx *core.GoProjectContext
 	var violations []*core.Violation
 	for obj, use := range index.uses {
 		declFile, declaredLine, err := ctx.DeclaredAt(obj)
-		if errors.Is(err, core.ErrNotProjectObject) {
+		if errors.Is(err, core.ErrObjectNotInRun) {
 			continue
 		}
 		if err != nil {

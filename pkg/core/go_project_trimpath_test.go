@@ -108,14 +108,14 @@ func Use(day time.Time) (time.Time, bool) {
 	assert.Equal(t, "time/time.go", project.FileSet.PositionFor(saturday.Pos(), false).Filename)
 	_, err = project.FileForObject(saturday)
 	require.ErrorContains(t, err, "not loaded from project sources")
-	require.ErrorIs(t, err, ErrNotProjectObject, "a standard library object lies outside the project, which is no failure")
+	require.ErrorIs(t, err, ErrObjectNotInRun, "a standard library object lies outside the project, which is no failure")
 	_, _, err = project.DeclaredAt(saturday)
-	require.ErrorIs(t, err, ErrNotProjectObject)
+	require.ErrorIs(t, err, ErrObjectNotInRun)
 	_, err = project.FileForObject(nil)
 	require.Error(t, err)
-	require.NotErrorIs(t, err, ErrNotProjectObject, "a nil object is a failure of the caller")
+	require.NotErrorIs(t, err, ErrObjectNotInRun, "a nil object is a failure of the caller")
 	_, err = project.FileForObject(types.NewVar(token.NoPos, saturday.Pkg(), "Synthetic", saturday.Type()))
-	require.ErrorIs(t, err, ErrNotProjectObject, "an object without a position is declared in no project file")
+	require.ErrorIs(t, err, ErrObjectNotInRun, "an object without a position is declared in no project file")
 	_, _, err = project.DeclarationForObject(saturday)
 	require.Error(t, err)
 	assert.Equal(t, []any{projectSyntaxPackagesKey{}}, loadSharedKeys(project), "a standard library object maps no directory and indexes no package")
@@ -147,7 +147,7 @@ func Use(day time.Time) (time.Time, bool) {
 	stranger := types.NewVar(trimmedFile.Pos(strings.Index(string(source), "Codes")), types.NewPackage("example.com/shared/lib", "lib"), "Codes", codes.Type())
 	_, err = project.FileForObject(stranger)
 	require.ErrorContains(t, err, "not among the loaded packages")
-	require.ErrorIs(t, err, ErrNotProjectObject)
+	require.ErrorIs(t, err, ErrObjectNotInRun)
 }
 
 // A module nested under the path of the root module, taken by a replace, is
@@ -314,6 +314,7 @@ func Seven() int { return int(C.seven()) }
 	assert.Equal(t, "shared/request.go", file.RelPath)
 	_, _, err = project.DeclarationForObject(field)
 	require.ErrorContains(t, err, "no declaration at that source position")
+	require.ErrorIs(t, err, ErrObjectNotInRun, "a declaration missing from the syntax of the run is skipped as an object outside it")
 }
 
 // A //line directive tells another file and line for a declaration.
