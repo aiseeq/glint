@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // A dispatch that records "email" as the delivery and returns false, so that
@@ -74,4 +76,37 @@ func (s *Service) AlertHonest(id, text string) error {
 }
 `,
 	}))
+}
+
+func TestDeliveryRecordedBeforeAttemptNamesFirstCaller(t *testing.T) {
+	files := map[string]string{
+		"base.go": `package alerts
+
+type Service struct{}
+func (s *Service) setDelivery(channel string, delivered int) {}
+func (s *Service) sendEmail() {}
+func (s *Service) dispatch() bool {
+	s.setDelivery("email", 0)
+	return false
+}
+`,
+		"a.go": `package alerts
+func (s *Service) Able() {
+	if s.dispatch() { return }
+	s.sendEmail()
+}
+`,
+		"z.go": `package alerts
+func (s *Service) Zed() {
+	if s.dispatch() { return }
+	s.sendEmail()
+}
+`,
+	}
+	for range 20 {
+		violations, err := NewDeliveryRecordedBeforeAttemptRule().AnalyzeGoProject(rulestest.Project(t, files))
+		require.NoError(t, err)
+		require.Len(t, violations, 1)
+		assert.Contains(t, violations[0].Message, "Able attempts it")
+	}
 }
