@@ -45,16 +45,17 @@ func TestEveryMigrationsRuleKeysItsCacheByMigrationBytes(t *testing.T) {
 		after, err := input.CacheInputs(notNull)
 		require.NoError(t, err, rule.Name())
 		assert.NotEqual(t, before, after, "%s keeps one cache key across a migration change", rule.Name())
-		// The cache that keeps the findings of the rule reads CacheInputs.
-		switch rule.(type) {
-		case rules.GoProjectRule:
-			// keyProject adds the CacheInputs of every project rule.
-		case rules.ProjectFilesRule:
-			if rootProjectRuleCacheable(rule) {
-				_, keyed := rule.(rules.RootFilesAndCacheInputs)
-				assert.True(t, keyed, "%s keeps root findings in the cache without its CacheInputs: declare RootFilesAndCacheInputs", rule.Name())
-			}
-		default:
+		// Each cache that keeps findings of the rule reads CacheInputs:
+		// keyProject adds them for every project rule, the root files cache
+		// only for RootFilesAndCacheInputs, the file cache only for a rule
+		// that reads other files. A project rule can be a root files rule too.
+		_, project := rule.(rules.GoProjectRule)
+		_, rootFiles := rule.(rules.ProjectFilesRule)
+		if rootFiles && rootProjectRuleCacheable(rule) {
+			_, keyed := rule.(rules.RootFilesAndCacheInputs)
+			assert.True(t, keyed, "%s keeps root findings in the cache without its CacheInputs: declare RootFilesAndCacheInputs", rule.Name())
+		}
+		if !project && !rootFiles {
 			cachedBefore, keyBefore := fileKey(rule, nullable)
 			cachedAfter, keyAfter := fileKey(rule, notNull)
 			if cachedBefore || cachedAfter {
