@@ -3,6 +3,7 @@ package dbrules
 import (
 	"go/ast"
 	"go/types"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
@@ -289,6 +290,23 @@ func TestStatusWriteSkipsStageTimestamp(t *testing.T) {
 	violations, err := NewStatusWriteSkipsStageTimestampRule().AnalyzeGoProject(rulestest.Project(t, files))
 	require.NoError(t, err)
 	assert.Equal(t, patterntest.WantedLines(files, "status-write-skips-stage-timestamp"), patterntest.FoundLines(violations))
+}
+
+func TestStatusWriteSkipsStageTimestampNamesFirstWriterDeterministically(t *testing.T) {
+	files := stageFiles()
+	for range 20 {
+		violations, err := NewStatusWriteSkipsStageTimestampRule().AnalyzeGoProject(rulestest.Project(t, files))
+		require.NoError(t, err)
+		var message string
+		for _, violation := range violations {
+			if strings.Contains(violation.Message, "while ") {
+				message = violation.Message
+				break
+			}
+		}
+		require.NotEmpty(t, message)
+		assert.Contains(t, message, "while UpdateStatus sets")
+	}
 }
 
 // A webhook write setting completed_at straight from its parameter
