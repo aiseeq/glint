@@ -274,7 +274,7 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 		}
 		if len(target) == 0 {
 			// The configuration refuses an exception that names none of these,
-			// but a line of 0 or less passes it and narrows nothing.
+			// but a negative line passes it and narrows nothing.
 			target = append(target, "every finding")
 		}
 
