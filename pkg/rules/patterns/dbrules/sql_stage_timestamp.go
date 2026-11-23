@@ -179,7 +179,8 @@ func newStageIndex(decls map[*types.Func]patternkit.TypedFuncDecl) *stageIndex {
 		calls:    patternkit.CollectCallSites(decls),
 	}
 	packages := make(map[*types.Package]bool)
-	for fn, decl := range decls {
+	for _, fn := range patternkit.OrderedFuncObjects(decls) {
+		decl := decls[fn]
 		if fn.Pkg() != nil && !packages[fn.Pkg()] {
 			packages[fn.Pkg()] = true
 			index.addConstants(fn.Pkg())

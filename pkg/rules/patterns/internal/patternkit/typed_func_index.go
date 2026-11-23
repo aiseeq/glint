@@ -68,10 +68,16 @@ func FuncCallSites(ctx *core.GoProjectContext, decls map[*types.Func]TypedFuncDe
 	})
 }
 
-// CollectCallSites indexes the static calls of the loaded bodies by callee.
-// The calls of one callee come in file and offset order: decls is a map, so
-// without the sort a rule that names the first caller names a random one.
-func CollectCallSites(decls map[*types.Func]TypedFuncDecl) map[*types.Func][]FuncCallSite {
+// OrderedFuncObjects returns declarations in file-name and source-position
+// order. This lets callers build ordered indexes without depending on map
+// iteration order.
+func OrderedFuncObjects(decls map[*types.Func]TypedFuncDecl) []*types.Func {
+	type orderedDecl struct {
+		fn       *types.Func
+		pos      token.Pos
+		filename string
+		offset   int
+	}
 	var fset *token.FileSet
 	for _, decl := range decls {
 		if decl.FileSet != nil {
@@ -79,8 +85,38 @@ func CollectCallSites(decls map[*types.Func]TypedFuncDecl) map[*types.Func][]Fun
 			break
 		}
 	}
+	ordered := make([]orderedDecl, 0, len(decls))
+	for fn, decl := range decls {
+		entry := orderedDecl{fn: fn, pos: decl.Decl.Pos()}
+		if fset != nil {
+			position := fset.PositionFor(entry.pos, false)
+			entry.filename, entry.offset = position.Filename, position.Offset
+		}
+		ordered = append(ordered, entry)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if fset == nil {
+			return ordered[i].pos < ordered[j].pos
+		}
+		if ordered[i].filename != ordered[j].filename {
+			return ordered[i].filename < ordered[j].filename
+		}
+		return ordered[i].offset < ordered[j].offset
+	})
+	functions := make([]*types.Func, len(ordered))
+	for i, entry := range ordered {
+		functions[i] = entry.fn
+	}
+	return functions
+}
+
+// CollectCallSites indexes the static calls of the loaded bodies by callee.
+// The calls of one callee come in file and offset order: decls is a map, so
+// callers are visited in source order instead of sorting every call list.
+func CollectCallSites(decls map[*types.Func]TypedFuncDecl) map[*types.Func][]FuncCallSite {
 	sites := make(map[*types.Func][]FuncCallSite)
-	for _, caller := range decls {
+	for _, fn := range OrderedFuncObjects(decls) {
+		caller := decls[fn]
 		ast.Inspect(caller.Decl.Body, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
 				if fn := StaticFunc(caller.Info, call); fn != nil {
@@ -88,19 +124,6 @@ func CollectCallSites(decls map[*types.Func]TypedFuncDecl) map[*types.Func][]Fun
 				}
 			}
 			return true
-		})
-	}
-	for _, calls := range sites {
-		sort.SliceStable(calls, func(i, j int) bool {
-			if fset == nil {
-				return calls[i].Call.Pos() < calls[j].Call.Pos()
-			}
-			left := fset.PositionFor(calls[i].Call.Pos(), false)
-			right := fset.PositionFor(calls[j].Call.Pos(), false)
-			if left.Filename != right.Filename {
-				return left.Filename < right.Filename
-			}
-			return left.Offset < right.Offset
 		})
 	}
 	return sites
