@@ -32,7 +32,7 @@ func NewSolidISPRule() *SolidISPRule {
 			"solid-isp",
 			"architecture",
 			"Detects interfaces with too many methods (Interface Segregation Principle)",
-			core.SeverityHigh,
+			core.SeverityMedium,
 		).DeclareSettings(rules.NewSettingSpec("max_methods", "int", defaultMaxInterfaceMethods, "Maximum number of methods allowed in an interface.", 30)),
 		maxMethods: defaultMaxInterfaceMethods,
 	}

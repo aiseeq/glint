@@ -15,7 +15,7 @@ func TestSolidISPRule_Metadata(t *testing.T) {
 
 	assert.Equal(t, "solid-isp", rule.Name())
 	assert.Equal(t, "architecture", rule.Category())
-	assert.Equal(t, core.SeverityHigh, rule.DefaultSeverity())
+	assert.Equal(t, core.SeverityMedium, rule.DefaultSeverity())
 }
 
 func TestSolidISPRule_LargeInterfaceFlagged(t *testing.T) {
@@ -38,6 +38,7 @@ type UserAPI interface {
 
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "UserAPI interface has 4 methods (max 3)")
+	assert.Equal(t, core.SeverityMedium, violations[0].Severity)
 }
 
 func TestSolidISPRule_SmallInterfaceOK(t *testing.T) {

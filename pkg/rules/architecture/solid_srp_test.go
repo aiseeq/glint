@@ -14,7 +14,7 @@ func TestSolidSRPRule_Metadata(t *testing.T) {
 
 	assert.Equal(t, "solid-srp", rule.Name())
 	assert.Equal(t, "architecture", rule.Category())
-	assert.Equal(t, core.SeverityHigh, rule.DefaultSeverity())
+	assert.Equal(t, core.SeverityMedium, rule.DefaultSeverity())
 }
 
 func TestSolidSRPRule_TooManyResponsibilities(t *testing.T) {
@@ -40,6 +40,7 @@ func (u *User) ExportCSV() error        { return nil }
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, "User has")
 	assert.Contains(t, violations[0].Message, "business responsibility areas")
+	assert.Equal(t, core.SeverityMedium, violations[0].Severity)
 }
 
 func TestSolidSRPRule_FewResponsibilitiesOK(t *testing.T) {
