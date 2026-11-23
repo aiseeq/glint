@@ -2082,3 +2082,453 @@ func (t *Tree) adopt(p, name string) {
 	assert.Equal(t, 15, violations[0].Line)
 	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
 }
+
+// A counter that counts the repeats in the taken branch and leaves: the
+// first owner is kept after the guard, where the counter starts.
+func TestMapIterationOrderReportsDedupWinnerAfterCountedRepeat(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type book struct {
+	count map[int]int
+	first map[int]string
+}
+
+func (b *book) note(line int, who string) {
+	if b.count[line] > 0 {
+		b.count[line]++
+		return
+	}
+	b.count[line] = 1
+	b.first[line] = who
+}
+
+func Owners(owners map[string][]int) *book {
+	b := &book{count: map[int]int{}, first: map[int]string{}}
+	for who, lines := range owners {
+		for _, l := range lines {
+			b.note(l, who)
+		}
+	}
+	return b
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 21, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The branch that claims the slot keeps the value and leaves; nothing after
+// the guard fills the slot, so the branch is the free one.
+func TestMapIterationOrderReportsDedupWinnerInFreeBranchThatLeaves(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+func Collect(owners map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(line int, who string) {
+		if !seen[line] {
+			seen[line] = true
+			out = append(out, who)
+			return
+		}
+		out = append(out[:0:0], out...)
+	}
+	for who, lines := range owners {
+		for _, line := range lines {
+			add(line, who)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 18, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// continue leaves only the callee's own loop: the append after the loop runs
+// on every call.
+func TestMapIterationOrderAcceptsWriteAfterCalleeLoopContinue(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Site struct{ Line int }
+
+type book struct {
+	seen   map[int]bool
+	owners []string
+}
+
+func (b *book) claim(sites []Site, who string) {
+	for _, s := range sites {
+		if b.seen[s.Line] {
+			continue
+		}
+		b.seen[s.Line] = true
+	}
+	b.owners = append(b.owners, who)
+}
+
+func Claim(bySource map[string][]Site) []string {
+	b := &book{seen: map[int]bool{}}
+	for who, sites := range bySource {
+		b.claim(sites, who)
+	}
+	return b.owners
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// break leaves only the closure's own loop: the write after the loop runs on
+// every call.
+func TestMapIterationOrderAcceptsWriteAfterCalleeLoopBreak(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Collect(src map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(lines []int, who string) {
+		for _, l := range lines {
+			if seen[l] {
+				break
+			}
+			seen[l] = true
+		}
+		out = append(out, who)
+	}
+	for who, lines := range src {
+		add(lines, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// break stops the callee's loop at a claimed slot; the write after the guard
+// in the same loop runs only while the slot is free.
+func TestMapIterationOrderReportsDedupWinnerInCalleeLoopAfterBreak(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Collect(src map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(lines []int, who string) {
+		for _, l := range lines {
+			if seen[l] {
+				break
+			}
+			seen[l] = true
+			out = append(out, who)
+		}
+	}
+	for who, lines := range src {
+		add(lines, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 18, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// break in a switch leaves the switch, not the loop: the write after the
+// switch runs for every line.
+func TestMapIterationOrderAcceptsWriteAfterSwitchBreak(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Collect(src map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(lines []int, who string) {
+		for _, l := range lines {
+			switch {
+			case l > 0:
+				if seen[l] {
+					break
+				}
+				seen[l] = true
+			}
+			out = append(out, who)
+		}
+	}
+	for who, lines := range src {
+		add(lines, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A slot looked up by the key (owner[f]) is a value of the key, which keys
+// may share: the first file of each owner wins.
+func TestMapIterationOrderReportsDedupWinnerOnSlotLookedUpByKey(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(owner map[string]string, files map[string]int) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(slot, who string) {
+		if seen[slot] {
+			return
+		}
+		seen[slot] = true
+		out = append(out, who)
+	}
+	for f := range files {
+		add(owner[f], f)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 16, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The seen map handed in is the entry's own (perOwner[who]): no two entries
+// meet in it.
+func TestMapIterationOrderAcceptsSeenMapParameterOfTheEntry(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func remember(seen map[int]bool, firsts map[int]string, pos int, who string) {
+	if seen[pos] {
+		return
+	}
+	seen[pos] = true
+	firsts[pos] = who
+}
+
+func Claim(claims map[string][]int, perOwner map[string]map[int]bool, firsts map[int]string) {
+	for who, lines := range claims {
+		for _, pos := range lines {
+			remember(perOwner[who], firsts, pos, who)
+		}
+	}
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// Seen maps handed in as a variadic list hold more than the entry's own map:
+// the shared one decides the winner.
+func TestMapIterationOrderReportsDedupWinnerOnVariadicSeenMaps(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func remember(firsts map[int]string, pos int, who string, seen ...map[int]bool) {
+	if seen[0][pos] {
+		return
+	}
+	seen[0][pos] = true
+	firsts[pos] = who
+}
+
+func Claim(claims map[string][]int, perOwner map[string]map[int]bool, shared map[int]bool, firsts map[int]string) {
+	for who, lines := range claims {
+		for _, pos := range lines {
+			remember(firsts, pos, who, perOwner[who], shared)
+		}
+	}
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 14, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A guard with an empty branch stops nothing: every entry is kept.
+func TestMapIterationOrderAcceptsGuardWithEmptyBranch(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+func Collect(owners map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(line int, who string) {
+		if seen[line] {
+		}
+		seen[line] = true
+		out = append(out, who)
+	}
+	for who, lines := range owners {
+		for _, line := range lines {
+			add(line, who)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A return in a function literal inside the callee leaves only that literal:
+// the write after its call runs on every call.
+func TestMapIterationOrderAcceptsWriteAfterNestedFuncReturn(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+func Collect(owners map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(lines []int, who string) {
+		claim := func(line int) {
+			if seen[line] {
+				return
+			}
+			seen[line] = true
+		}
+		for _, line := range lines {
+			claim(line)
+		}
+		out = append(out, who)
+	}
+	for who, lines := range owners {
+		add(lines, who)
+	}
+	slices.Sort(out)
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// continue in a switch leaves the loop body, not the case: the write after
+// the switch runs only for a free slot.
+func TestMapIterationOrderReportsDedupWinnerAfterContinueInSwitch(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Collect(src map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(lines []int, who string) {
+		for _, l := range lines {
+			switch {
+			case l > 0:
+				if seen[l] {
+					continue
+				}
+				seen[l] = true
+			}
+			out = append(out, who)
+		}
+	}
+	for who, lines := range src {
+		add(lines, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 21, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// continue Outer from the inner loop skips the rest of the outer body: the
+// write after the inner loop runs only when every slot was free.
+func TestMapIterationOrderReportsDedupWinnerAfterLabeledContinue(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Collect(src map[string][][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(groups [][]int, who string) {
+	Outer:
+		for i := 0; i < len(groups); i++ {
+		Inner:
+			for _, l := range groups[i] {
+				if l < 0 {
+					break Inner
+				}
+				if seen[l] {
+					continue Outer
+				}
+				seen[l] = true
+			}
+			out = append(out, who)
+		}
+	}
+	for who, groups := range src {
+		add(groups, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 25, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A function literal before the guard does not hold it: the return leaves
+// the callee, and the write after the guard runs only for a free slot.
+func TestMapIterationOrderReportsDedupWinnerAfterSiblingFuncLiteral(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"slices"
+	"strings"
+)
+
+func Collect(owners map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(line int, who string) {
+		clean := func(s string) string { return strings.TrimSpace(s) }
+		if seen[line] {
+			return
+		}
+		seen[line] = true
+		out = append(out, clean(who))
+	}
+	for who, lines := range owners {
+		for _, line := range lines {
+			add(line, who)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 21, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}

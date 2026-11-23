@@ -424,41 +424,118 @@ type dedupGuard struct {
 }
 
 // freeSpan returns where the statements that run while the slot is still
-// free sit: the branch of the guard that fills the slot, or - after a guard
-// whose branch leaves (return, continue, break) - the rest of the body. A
-// guard whose taken branch only overwrites (t.again[slot] = name) lets the
-// last entry win, and is no claim; one that neither leaves nor fills the slot
-// in a branch keeps every entry.
+// free sit. A guard whose branch leaves (return, or continue or break of a
+// loop of the callee) and is followed by a write of the slot lets past it
+// only a free slot: the span runs from the guard to where the branch resumes
+// - the end of the function, or of the loop it leaves - and the branch only
+// counts the repeat (b.count[line]++). Otherwise the free span is the branch
+// that fills the slot. A guard whose taken branch only overwrites
+// (t.again[slot] = name) lets the last entry win, and is no claim; one that
+// neither leaves nor fills the slot in a branch keeps every entry.
 func (g dedupGuard) freeSpan(body *ast.BlockStmt) (from, to token.Pos, ok bool) {
-	within := func(branch ast.Node) bool {
+	marked := func(from, to token.Pos) bool {
 		for _, mark := range g.marks {
-			if mark.Pos() >= branch.Pos() && mark.End() <= branch.End() {
+			if mark.Pos() >= from && mark.End() <= to {
 				return true
 			}
 		}
 		return false
 	}
+	if resume, ok := leftTo(body, g.test); ok && marked(g.test.End(), resume) {
+		return g.test.End(), resume, true
+	}
 	switch {
-	case within(g.test.Body):
+	case marked(g.test.Body.Pos(), g.test.Body.End()):
 		return g.test.Body.Pos(), g.test.Body.End(), true
-	case g.test.Else != nil && within(g.test.Else):
+	case g.test.Else != nil && marked(g.test.Else.Pos(), g.test.Else.End()):
 		return g.test.Else.Pos(), g.test.Else.End(), true
-	case leaves(g.test.Body):
-		return g.test.End(), body.End(), true
 	}
 	return token.NoPos, token.NoPos, false
 }
 
-// leaves reports whether a block ends with a return, continue or break.
-func leaves(block *ast.BlockStmt) bool {
-	if len(block.List) == 0 {
-		return false
+// leftTo returns the end of what the branch of the guard leaves when it ends
+// with a return - the function - or with a continue or break - the loop, or
+// for a break the case of a switch or select. Code up to there does not run
+// after the branch. A goto to a label of an enclosing loop starts it over,
+// which leaves the rest of its body as a continue does.
+func leftTo(body *ast.BlockStmt, guard *ast.IfStmt) (token.Pos, bool) {
+	list := guard.Body.List
+	if len(list) == 0 {
+		return token.NoPos, false
 	}
-	switch block.List[len(block.List)-1].(type) {
-	case *ast.ReturnStmt, *ast.BranchStmt:
+	path := pathTo(body, guard)
+	switch last := list[len(list)-1].(type) {
+	case *ast.ReturnStmt:
+		for i := len(path) - 1; i >= 0; i-- {
+			if lit, ok := path[i].(*ast.FuncLit); ok {
+				return lit.Body.End(), true
+			}
+		}
+		return body.End(), true
+	case *ast.BranchStmt:
+		return branchEnd(path, last)
+	}
+	return token.NoPos, false
+}
+
+// branchEnd returns the end of the loop, or of the case of the switch or
+// select, a break or continue on the path to it leaves. Its target is always
+// on the path, inside any function literal around it.
+func branchEnd(path []ast.Node, branch *ast.BranchStmt) (token.Pos, bool) {
+	for i := len(path) - 1; i >= 0; i-- {
+		node := path[i]
+		if branch.Label != nil {
+			labeled, ok := node.(*ast.LabeledStmt)
+			if !ok || labeled.Label.Name != branch.Label.Name {
+				continue
+			}
+			node = labeled.Stmt
+		}
+		switch target := node.(type) {
+		case *ast.ForStmt:
+			return target.Body.End(), true
+		case *ast.RangeStmt:
+			return target.Body.End(), true
+		case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+			if branch.Tok == token.BREAK {
+				return clauseEnd(path[i:])
+			}
+		}
+	}
+	return token.NoPos, false
+}
+
+// clauseEnd returns the end of the first case clause on the path.
+func clauseEnd(path []ast.Node) (token.Pos, bool) {
+	for _, node := range path {
+		switch clause := node.(type) {
+		case *ast.CaseClause, *ast.CommClause:
+			return clause.End(), true
+		}
+	}
+	return token.NoPos, false
+}
+
+// pathTo returns the nodes from root down to the parent of target.
+func pathTo(root, target ast.Node) []ast.Node {
+	var stack, path []ast.Node
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		if n == target {
+			path, found = append([]ast.Node{}, stack...), true
+			return false
+		}
+		stack = append(stack, n)
 		return true
-	}
-	return false
+	})
+	return path
 }
 
 // guards returns the ifs that test seen[slot] - in the condition or in the
@@ -543,11 +620,14 @@ func (c *dedupCallee) slotMarks(index *ast.IndexExpr) []ast.Node {
 
 // slotOfKey reports whether the caller builds the slot from the loop key or a
 // local of the loop computed from it: a map holds a key once, so no two
-// entries share such a slot.
+// entries share such a slot. A lookup by the key (owner[f]) reads a value,
+// which keys may share, and does not count.
 func (c *dedupCallee) slotOfKey(index ast.Expr, keyed map[string]bool, info *types.Info) bool {
 	for param := range c.paramsIn(index, info) {
-		if argsMention(c.bound[param], keyed) {
-			return true
+		for _, arg := range c.bound[param] {
+			if mentionsOutsideIndex(arg, keyed) {
+				return true
+			}
 		}
 	}
 	return false
