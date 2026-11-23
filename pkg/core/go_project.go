@@ -298,8 +298,9 @@ func (ctx *GoProjectContext) DeclarationForObject(object types.Object) (*FileCon
 // ErrObjectNotInRun marks an object declared in no file of this run: outside
 // the project (the standard library, a dependency, a package the load does not
 // hold, an object without a position, a //line directive to a file elsewhere)
-// or in a project file the run does not analyze. A rule skips such an object;
-// other errors are failures.
+// or in a project file the run does not analyze; or a declaration the syntax
+// of the run lacks, as a cgo package type-checked from generated files. A
+// rule skips such an object; other errors are failures.
 var ErrObjectNotInRun = errors.New("the object is declared in no file of this run")
 
 // trimmedObject is an object whose position export data gave under -trimpath:
