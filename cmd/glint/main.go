@@ -2621,7 +2621,8 @@ func runGuide(cmd *cobra.Command, args []string) error {
 	for _, section := range sections[1:] {
 		name, body, _ := strings.Cut(section, "\n")
 		names = append(names, name)
-		if strings.EqualFold(args[0], name) {
+		// A section is named as printed or with hyphens for spaces.
+		if strings.EqualFold(strings.ReplaceAll(args[0], "-", " "), name) {
 			_, err := fmt.Fprintf(cmd.OutOrStdout(), "## %s\n%s", name, body)
 			return err
 		}

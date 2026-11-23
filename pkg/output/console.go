@@ -224,6 +224,25 @@ func (c *ConsoleOutput) printSummary(out *ReportWriter, violations core.Violatio
 	}
 
 	out.Line()
+	printFindingNextSteps(out)
+}
+
+// FindingNextSteps closes a report with findings: what to do with a finding
+// of each level, as the Finding section of the guide says, and the commands
+// for a finding that is wrong or a design that is intentional.
+var FindingNextSteps = []string{
+	"What to do next:",
+	"  Critical, high: fix in this task.",
+	"  Medium, low: fix before the ticket is done, or record the remaining work on an open ticket.",
+	"  Rule details: glint explain <rule>",
+	"  Finding is wrong: glint guide false-positive",
+	"  Design is intentional: glint guide exceptions",
+}
+
+func printFindingNextSteps(out *ReportWriter) {
+	for _, line := range FindingNextSteps {
+		out.Line(line)
+	}
 }
 
 // Stats contains analysis statistics
@@ -269,6 +288,10 @@ func (s *SummaryOutput) Write(violations core.ViolationList, stats Stats) error 
 	out.Printf("Files analyzed: %d | Duration: %.2fs\n", stats.FilesAnalyzed, stats.Duration)
 	if len(stats.RulesPanicked) > 0 {
 		out.Line(panickedLine(stats))
+	}
+	if len(violations) > 0 {
+		out.Line()
+		printFindingNextSteps(out)
 	}
 
 	return out.Err()

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/output"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/spf13/cobra"
 )
@@ -108,6 +109,49 @@ func TestGuideReferencesCLIAndRegisteredRules(t *testing.T) {
 	for _, match := range ruleMatches {
 		if _, ok := rules.Get(match[1]); !ok {
 			t.Errorf("guide rule %q is absent from the registry", match[1])
+		}
+	}
+}
+
+// Every command the next steps after a report with findings name runs: a
+// guide section named with hyphens is found, and the level advice says what
+// the Finding section of the guide says.
+func TestFindingNextStepsCommandsRun(t *testing.T) {
+	command := regexp.MustCompile(`glint ([a-z]+)(?: ([a-z-]+))?`)
+	var guides int
+	for _, line := range output.FindingNextSteps {
+		match := command.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		found, args, err := rootCmd.Find(strings.Fields(strings.TrimPrefix(match[0], "glint ")))
+		if err != nil || found.Name() != match[1] {
+			t.Fatalf("%q: command not found: %v %v", line, found, err)
+		}
+		if found != guideCmd {
+			continue
+		}
+		guides++
+		var out bytes.Buffer
+		guideCmd.SetOut(&out)
+		if err := runGuide(guideCmd, args); err != nil {
+			t.Fatalf("%q: %v", line, err)
+		}
+		if !strings.HasPrefix(out.String(), "## ") {
+			t.Fatalf("%q printed no section: %q", line, out.String())
+		}
+	}
+	if guides != 2 {
+		t.Fatalf("next steps name %d guide sections, want 2", guides)
+	}
+	var finding bytes.Buffer
+	guideCmd.SetOut(&finding)
+	if err := runGuide(guideCmd, []string{"finding"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, advice := range []string{"Handle high and critical findings in your task", "resolve lower findings, including Low, before the ticket is done", "record the remaining work on an open ticket"} {
+		if !strings.Contains(finding.String(), advice) {
+			t.Fatalf("the Finding section no longer says %q: update output.FindingNextSteps with it", advice)
 		}
 	}
 }

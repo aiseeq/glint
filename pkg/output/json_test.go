@@ -20,6 +20,8 @@ func TestJSONOutputWritesMachineReadableResults(t *testing.T) {
 	var buf bytes.Buffer
 	err := NewJSONOutput().WithWriter(&buf).Write(violations, stats)
 	require.NoError(t, err)
+	require.NotContains(t, buf.String(), "glint explain")
+	require.NotContains(t, buf.String(), "glint guide")
 
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &payload))

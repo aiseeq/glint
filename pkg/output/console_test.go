@@ -65,6 +65,8 @@ func TestConsoleOutputWithViolations(t *testing.T) {
 	assert.Contains(t, got, "Medium: 1")
 	assert.Contains(t, got, "Low: 1")
 	assert.NotContains(t, got, "No issues found")
+	assert.True(t, strings.HasSuffix(got, "  Design is intentional: glint guide exceptions\n"))
+	assert.Contains(t, got, "\n"+strings.Join(FindingNextSteps, "\n")+"\n")
 }
 
 func TestConsoleOutputGroupsAndSortsViolations(t *testing.T) {
@@ -101,6 +103,7 @@ func TestConsoleOutputNoIssues(t *testing.T) {
 	assert.Contains(t, got, "Files analyzed: 5")
 	assert.NotContains(t, got, "GLINT ANALYSIS RESULTS")
 	assert.NotContains(t, got, "SUMMARY")
+	assert.NotContains(t, got, "What to do next:")
 }
 
 func TestConsoleOutputSkippedFilesHiddenWhenZero(t *testing.T) {

@@ -34,6 +34,8 @@ func TestSummaryOutputCountsBySeverity(t *testing.T) {
 	assert.Contains(t, got, "1. [CRITICAL] r-crit: 1 violations")
 	assert.Contains(t, got, "2. [HIGH] r-high: 2 violations")
 	assert.Contains(t, got, "3. [LOW] r-low: 1 violations")
+	assert.True(t, strings.HasSuffix(got, "  Design is intentional: glint guide exceptions\n"))
+	assert.Contains(t, got, "\n"+strings.Join(FindingNextSteps, "\n")+"\n")
 }
 
 func TestSummaryOutputEmptyList(t *testing.T) {
@@ -45,6 +47,7 @@ func TestSummaryOutputEmptyList(t *testing.T) {
 	assert.Contains(t, got, "Critical: 0 | High: 0 | Medium: 0 | Low: 0")
 	assert.NotContains(t, got, "TOP ISSUES", "empty run must not print a top-issues section")
 	assert.Contains(t, got, "Files analyzed: 4 | Duration: 1.00s")
+	assert.NotContains(t, got, "What to do next:")
 }
 
 func TestSummaryOutputTopIssuesLimitedToFive(t *testing.T) {
