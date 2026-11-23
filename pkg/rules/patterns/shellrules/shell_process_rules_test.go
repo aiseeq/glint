@@ -60,11 +60,33 @@ mv -f "$rep" "$dst"
 run > "$log" 2>&1
 stamp=$(date +%H%M%S)-$$
 other="$logs/other-$stamp.log"
+hh=$(date +%H)
+pid="$logs/pid-$hh-$$.log"
+when=$(date +%Y%m%d-%H%M%S)
+dated="$logs/dated-$when.log"
 day="$logs/day-$(date +%Y%m%d-%H%M%S).log"
 echo "started at $(date +%H:%M:%S)"
 dst="$replays/${mark}_$(bot_name "$ver")_vs_cpu_$(date +%H%M%S).rep" # want
 log="$logs/cpu-$ver$([ "$build" = random ] || echo "-$build")-$(date +%H%M%S).log" # want
 `)
+}
+
+// Two time-of-day stamps in one name give one finding, and it names the
+// stamp that comes first in the name: the stamps were walked as a map, so
+// the message named either from run to run.
+func TestShellFileNameFromTimeOfDayNamesFirstStamp(t *testing.T) {
+	rule, ok := rules.Get("shell-file-name-from-time-of-day")
+	require.True(t, ok)
+	source := `#!/bin/bash
+mm=$(date +%M)
+hh=$(date +%H)
+log="$logs/run-$hh-$mm.log"
+`
+	for run := range 32 {
+		violations := rule.AnalyzeFile(rulestest.TextFile(t, "run.sh", source))
+		require.Len(t, violations, 1)
+		assert.Contains(t, violations[0].Message, "time of day ($hh)", "run %d", run)
+	}
 }
 
 // Repro from a real project: a script took the time twice for the log and

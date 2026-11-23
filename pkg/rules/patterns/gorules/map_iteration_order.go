@@ -32,6 +32,11 @@ func init() {
 // a report or a caller, the output stops being reproducible: golden tests flap,
 // CI diffs show phantom changes, and findings swap places between runs.
 //
+// A deduplication inside the walk is the same dependence even when the output
+// is sorted: a closure or a function of the file that keeps only the first
+// value written for a slot (if taken[line] { return }) keeps, of the entries
+// that share a slot, the one the walk meets first.
+//
 // Not flagged: order-independent aggregation (sums, counters), collecting into
 // another map, values that never leave the function, slices sorted before
 // they are used, and slices handed to a call other than a writer - a batch
@@ -127,6 +132,11 @@ func (r *MapIterationOrderRule) analyzeBody(fileCtx *core.FileContext, fn *ast.F
 			elsewhere = append(elsewhere, r.reportTie(fileCtx, assign, "map_iteration_grouped", groups,
 				fmt.Sprintf("Groups of %s are filled inside a map loop and never sorted — each group lists its members in map iteration order, which Go randomizes", groups),
 				"Sort each group after the loop (slices.Sort), or walk the keys in a defined order"))
+		}
+		if call, callee, ok := dedupWinner(fn, fileCtx.GoAST, rangeStmt, info); ok {
+			elsewhere = append(elsewhere, r.reportTie(fileCtx, call, "map_iteration_dedup_winner", callee,
+				fmt.Sprintf("%s keeps only the first value written for a slot, and this map loop hands it entries that can share a slot — of those, the one Go's randomized walk meets first wins, so the kept value changes from run to run even when the result is sorted", callee),
+				"Walk the entries in a defined order (slices.Sorted(maps.Keys(m)), or by a field of the entry), or build the slot from the map key"))
 		}
 		violations = append(violations, elsewhere...)
 		if len(found) == 0 {

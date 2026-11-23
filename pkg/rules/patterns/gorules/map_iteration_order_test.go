@@ -724,3 +724,833 @@ func Describe(hooks map[string]map[string]bool, out map[string]*entry) {
 	assert.Equal(t, 10, violations[0].Line)
 	assert.Contains(t, violations[0].Message, "cmds")
 }
+
+// Repro of a real finding: a closure keeps the first report for each line and
+// the loop over a map of owners feeds it messages naming the owner. Two owners
+// sharing a line race for it, and the walk decides whose name the report
+// carries - the order of the reports is sorted, their text is not stable.
+func TestMapIterationOrderReportsDedupWinnerInClosure(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"cmp"
+	"slices"
+)
+
+type Report struct {
+	Line int
+	Text string
+}
+
+func Collect(owners map[string][]int) []Report {
+	taken := make(map[int]bool)
+	var out []Report
+	add := func(line int, text string) {
+		if taken[line] {
+			return
+		}
+		taken[line] = true
+		out = append(out, Report{Line: line, Text: text})
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, "line is written by "+owner)
+		}
+	}
+	slices.SortFunc(out, func(a, b Report) int { return cmp.Compare(a.Line, b.Line) })
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 25, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+	assert.Equal(t, "add", violations[0].Context["variable"])
+}
+
+// The same race through a method: the first owner noted at a position keeps it.
+func TestMapIterationOrderReportsDedupWinnerInMethod(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type collector struct {
+	byPos map[string]string
+}
+
+func (c *collector) note(pos, owner string) {
+	if _, ok := c.byPos[pos]; ok {
+		return
+	}
+	c.byPos[pos] = owner
+}
+
+func Owners(files map[string]string) map[string]string {
+	c := &collector{byPos: map[string]string{}}
+	for name, pos := range files {
+		c.note(pos, name)
+	}
+	return c.byPos
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 17, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A guard that only lets the first value in, written into a map the caller
+// passed: the caller sees the winner.
+func TestMapIterationOrderReportsDedupWinnerInFunctionOnParameter(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func remember(seen map[int]string, pos int, who string) {
+	if seen[pos] == "" {
+		seen[pos] = who
+	}
+}
+
+func Claim(claims map[string]int, seen map[int]string) {
+	for who, pos := range claims {
+		remember(seen, pos, who)
+	}
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 11, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// Deduplicating on the map key itself: a map holds a key once, so no two
+// entries race for the same slot.
+func TestMapIterationOrderAcceptsDedupOnMapKey(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Report struct {
+	Owner string
+	Text  string
+}
+
+func Collect(owners map[string]string) []Report {
+	taken := make(map[string]bool)
+	var out []Report
+	add := func(owner, text string) {
+		if taken[owner] {
+			return
+		}
+		taken[owner] = true
+		out = append(out, Report{Owner: owner, Text: text})
+	}
+	for owner, text := range owners {
+		add(owner, text)
+	}
+	return out
+}
+`)
+
+	for _, v := range violations {
+		assert.NotEqual(t, "map_iteration_dedup_winner", v.Context["pattern"])
+	}
+}
+
+// Walking the keys in a defined order makes the first one the same every run.
+func TestMapIterationOrderAcceptsDedupOverSortedKeys(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"maps"
+	"slices"
+)
+
+type Report struct {
+	Line int
+	Text string
+}
+
+func Collect(owners map[string][]int) []Report {
+	taken := make(map[int]bool)
+	var out []Report
+	add := func(line int, text string) {
+		if taken[line] {
+			return
+		}
+		taken[line] = true
+		out = append(out, Report{Line: line, Text: text})
+	}
+	for _, owner := range slices.Sorted(maps.Keys(owners)) {
+		for _, line := range owners[owner] {
+			add(line, "line is written by "+owner)
+		}
+	}
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// The kept value carries nothing of the entry beyond the deduplication key:
+// whichever entry wins, the report reads the same.
+func TestMapIterationOrderAcceptsDedupWithoutEntryInValue(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"cmp"
+	"slices"
+)
+
+type Report struct {
+	Line int
+	Text string
+}
+
+type Site struct{ Line int }
+
+func Collect(sites map[string]Site) []Report {
+	taken := make(map[int]bool)
+	var out []Report
+	add := func(line int, text string) {
+		if taken[line] {
+			return
+		}
+		taken[line] = true
+		out = append(out, Report{Line: line, Text: text})
+	}
+	for _, site := range sites {
+		add(site.Line, "line is written twice")
+	}
+	slices.SortFunc(out, func(a, b Report) int { return cmp.Compare(a.Line, b.Line) })
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// Without a deduplication every entry lands in the result, and a sort on the
+// whole value leaves nothing to the walk.
+func TestMapIterationOrderAcceptsSortedCollectWithoutDedup(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"cmp"
+	"slices"
+)
+
+type Report struct {
+	Line int
+	Text string
+}
+
+func Collect(owners map[string][]int) []Report {
+	var out []Report
+	add := func(line int, text string) {
+		out = append(out, Report{Line: line, Text: text})
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, "line is written by "+owner)
+		}
+	}
+	slices.SortFunc(out, func(a, b Report) int {
+		return cmp.Or(cmp.Compare(a.Line, b.Line), cmp.Compare(a.Text, b.Text))
+	})
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A winner nobody reads after the loop is not output.
+func TestMapIterationOrderAcceptsDedupThatStaysLocal(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func Count(owners map[string][]int) int {
+	taken := make(map[int]string)
+	n := 0
+	add := func(line int, text string) {
+		if _, ok := taken[line]; ok {
+			return
+		}
+		taken[line] = text
+		n++
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, owner)
+		}
+	}
+	return n
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A lookup in a map the callee never fills is a filter, not a claim: every
+// entry that passes it is kept.
+func TestMapIterationOrderAcceptsLookupWithoutClaim(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+func Collect(owners map[string][]int, allowed map[int]bool) []string {
+	var out []string
+	add := func(line int, text string) {
+		if allowed[line] {
+			out = append(out, text)
+		}
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, owner)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A seen map the callee makes itself starts empty on every call: no entry
+// claims a slot another one could want.
+func TestMapIterationOrderAcceptsSeenMapOfOneCall(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type pair struct {
+	line  int
+	owner string
+}
+
+type book struct {
+	pairs map[pair]bool
+}
+
+func (b *book) record(lines []int, owner string) {
+	seen := map[int]bool{}
+	for _, line := range lines {
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		b.pairs[pair{line, owner}] = true
+	}
+}
+
+func Record(owners map[string][]int) map[pair]bool {
+	b := &book{pairs: map[pair]bool{}}
+	for owner, lines := range owners {
+		b.record(lines, owner)
+	}
+	return b.pairs
+}
+`)
+
+	for _, v := range violations {
+		assert.NotEqual(t, "map_iteration_dedup_winner", v.Context["pattern"])
+	}
+}
+
+// A seen map of one iteration only deduplicates the entry's own values: the
+// entries of the map never meet in it.
+func TestMapIterationOrderAcceptsDedupWithinOneIteration(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "fmt"
+
+func remember(seen map[int]string, pos int, who string) {
+	if seen[pos] == "" {
+		seen[pos] = who
+	}
+}
+
+func Claim(claims map[string][]int) {
+	for who, positions := range claims {
+		seen := map[int]string{}
+		for _, pos := range positions {
+			remember(seen, pos, who)
+		}
+		fmt.Println(who, seen)
+	}
+}
+`)
+
+	for _, v := range violations {
+		assert.NotEqual(t, "map_iteration_dedup_winner", v.Context["pattern"])
+	}
+}
+
+// The winner kept in package state outlives the call that chose it.
+func TestMapIterationOrderReportsDedupWinnerInPackageState(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+var claimed = map[int]string{}
+
+func Load(claims map[string]int) {
+	for who, pos := range claims {
+		claim(pos, who)
+	}
+}
+
+func claim(pos int, who string) {
+	if _, ok := claimed[pos]; ok {
+		return
+	}
+	claimed[pos] = who
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 7, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A slot claimed by a counter: the first call raises it, the later ones
+// return.
+func TestMapIterationOrderReportsDedupWinnerOnCounterClaim(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+func Collect(owners map[string][]int) []string {
+	counts := map[int]int{}
+	var out []string
+	add := func(line int, text string) {
+		if counts[line] > 0 {
+			return
+		}
+		counts[line]++
+		out = append(out, text)
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, owner)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 17, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The slot is computed inside the callee from what the call passes, and the
+// value is built in a local first.
+func TestMapIterationOrderReportsDedupWinnerThroughDerivedSlot(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Site struct{ Line int }
+
+type Report struct {
+	Line int
+	Text string
+}
+
+func Collect(owners map[string][]Site) []Report {
+	taken := map[int]bool{}
+	var out []Report
+	add := func(at Site, text string) {
+		line := at.Line
+		if taken[line] {
+			return
+		}
+		taken[line] = true
+		report := Report{Line: line, Text: text}
+		out = append(out, report)
+	}
+	for owner, sites := range owners {
+		for _, site := range sites {
+			add(site, "written by "+owner)
+		}
+	}
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 24, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// Keeping the largest value of a slot is a comparison, not a claim: the
+// result is the same in any order.
+func TestMapIterationOrderAcceptsBestPerSlot(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type File struct{ Line, Size int }
+
+func keep(best map[int]int, line, size int) {
+	if best[line] < size {
+		best[line] = size
+	}
+}
+
+func Largest(files map[string]File) map[int]int {
+	best := map[int]int{}
+	for _, f := range files {
+		keep(best, f.Line, f.Size)
+	}
+	return best
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A test of the slot that does not stop the write - here it counts the
+// repeats - keeps every entry.
+func TestMapIterationOrderAcceptsCountedDuplicates(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"cmp"
+	"slices"
+)
+
+type Report struct {
+	Line int
+	Text string
+}
+
+func Collect(owners map[string][]int) ([]Report, int) {
+	seen := map[int]bool{}
+	dups := 0
+	var out []Report
+	add := func(line int, text string) {
+		if seen[line] {
+			dups++
+		}
+		seen[line] = true
+		out = append(out, Report{Line: line, Text: text})
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, owner)
+		}
+	}
+	slices.SortFunc(out, func(a, b Report) int {
+		return cmp.Or(cmp.Compare(a.Line, b.Line), cmp.Compare(a.Text, b.Text))
+	})
+	return out, dups
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A callee's own variable that happens to share a name with an escaping one
+// of the caller is not the caller's.
+func TestMapIterationOrderAcceptsCalleeLocalTarget(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func note(seen map[int]bool, line int, who string) {
+	if seen[line] {
+		return
+	}
+	seen[line] = true
+	var out string
+	out = who
+	_ = out
+}
+
+func Collect(claims map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	for who, line := range claims {
+		note(seen, line, who)
+	}
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// The entry reaches the kept value through a variadic parameter.
+func TestMapIterationOrderReportsDedupWinnerThroughVariadic(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "strings"
+
+func Collect(owners map[string][]int) map[int]string {
+	taken := map[int]string{}
+	add := func(line int, parts ...string) {
+		if _, ok := taken[line]; ok {
+			return
+		}
+		taken[line] = strings.Join(parts, "")
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, "written by ", owner)
+		}
+	}
+	return taken
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 15, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The winner is kept as a key: which owners make it into the set is the walk.
+func TestMapIterationOrderReportsDedupWinnerKeptAsIndex(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+func Winners(owners map[string][]int) map[string]bool {
+	claimed := map[int]bool{}
+	winners := map[string]bool{}
+	claim := func(line int, owner string) {
+		if claimed[line] {
+			return
+		}
+		claimed[line] = true
+		winners[owner] = true
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			claim(line, owner)
+		}
+	}
+	return winners
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 15, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The callee walks what it is given and skips a claimed slot with continue;
+// the entry reaches the kept value only through that walk.
+func TestMapIterationOrderReportsDedupWinnerInCalleeLoop(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Site struct {
+	Line  int
+	Owner string
+}
+
+type book struct {
+	seen   map[int]bool
+	owners map[int]string
+}
+
+func (b *book) claim(sites []Site) {
+	for _, s := range sites {
+		if b.seen[s.Line] {
+			continue
+		}
+		b.seen[s.Line] = true
+		b.owners[s.Line] = s.Owner
+	}
+}
+
+func Claim(bySource map[string][]Site) map[int]string {
+	b := &book{seen: map[int]bool{}, owners: map[int]string{}}
+	for _, sites := range bySource {
+		b.claim(sites)
+	}
+	return b.owners
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 26, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A method of the entry claims a slot in shared state: the slot is one field
+// of the entry, the kept value another.
+func TestMapIterationOrderReportsDedupWinnerInEntryMethod(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type File struct {
+	Line int
+	Name string
+}
+
+func (f *File) claim(owners map[int]string) {
+	if _, ok := owners[f.Line]; ok {
+		return
+	}
+	owners[f.Line] = f.Name
+}
+
+func Owners(files map[string]*File) map[int]string {
+	owners := map[int]string{}
+	for _, f := range files {
+		f.claim(owners)
+	}
+	return owners
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 18, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// State of the entry itself is claimed only by that entry: the entries of the
+// map never meet in it.
+func TestMapIterationOrderAcceptsPerEntryState(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "fmt"
+
+type File struct {
+	firsts map[int]string
+}
+
+func (f *File) note(line int, who string) {
+	if _, ok := f.firsts[line]; ok {
+		return
+	}
+	f.firsts[line] = who
+}
+
+func Note(files map[string]*File, hits map[string][]int) {
+	for name, f := range files {
+		for _, line := range hits[name] {
+			f.note(line, name)
+		}
+		fmt.Println(f.firsts)
+	}
+}
+`)
+
+	for _, v := range violations {
+		assert.NotEqual(t, "map_iteration_dedup_winner", v.Context["pattern"])
+	}
+}
+
+// A write before the test of the slot runs on every call.
+func TestMapIterationOrderAcceptsWriteBeforeGuard(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+func Collect(owners map[string][]int) ([]string, int) {
+	seen := map[int]bool{}
+	unique := 0
+	var all []string
+	add := func(line int, text string) {
+		all = append(all, text)
+		if seen[line] {
+			return
+		}
+		seen[line] = true
+		unique++
+	}
+	for owner, lines := range owners {
+		for _, line := range lines {
+			add(line, owner)
+		}
+	}
+	slices.Sort(all)
+	return all, unique
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// The kept value is the field the slot is built from: whoever wins, the same
+// value is kept.
+func TestMapIterationOrderAcceptsValueOfTheSlotField(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "slices"
+
+type Site struct {
+	Line  int
+	Owner string
+}
+
+func Lines(bySource map[string][]Site) []int {
+	taken := map[int]bool{}
+	var out []int
+	add := func(site Site) {
+		if taken[site.Line] {
+			return
+		}
+		taken[site.Line] = true
+		out = append(out, site.Line)
+	}
+	for _, sites := range bySource {
+		for _, site := range sites {
+			add(site)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// The seen map is the entry's group, shared by every entry of that group: the
+// comma-ok test reads the group's slot, and the entries of one group race.
+func TestMapIterationOrderReportsDedupWinnerInSharedGroupMap(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type Hit struct {
+	Group string
+	Line  int
+}
+
+func claim(seen map[int]string, line int, who string) {
+	if _, ok := seen[line]; ok {
+		return
+	}
+	seen[line] = who
+}
+
+func Claim(hits map[string]Hit, index map[string]map[int]string) {
+	for who, h := range hits {
+		claim(index[h.Group], h.Line, who)
+	}
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 17, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The seen map is picked by the loop key: each entry fills a map of its own,
+// and no two entries meet in one.
+func TestMapIterationOrderAcceptsSeenMapOfTheKey(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+type pkgState struct {
+	firsts map[string]string
+}
+
+func resolve(firsts map[string]string, byName map[string][]string) {
+	for name, callees := range byName {
+		if _, done := firsts[name]; done {
+			continue
+		}
+		firsts[name] = callees[0]
+	}
+}
+
+func Resolve(dirs map[string]*pkgState, decls map[string]map[string][]string) {
+	for dir, byName := range decls {
+		resolve(dirs[dir].firsts, byName)
+	}
+}
+`)
+
+	for _, v := range violations {
+		assert.NotEqual(t, "map_iteration_dedup_winner", v.Context["pattern"])
+	}
+}

@@ -182,10 +182,19 @@ func checkTimeOfDayNames(r *shellRule, src *patternkit.ShellSource) []*core.Viol
 				report(l.LineAt(0), "The file name is unique only by the time of day — parallel runs within one second (or runs on two days) get the same name")
 			}
 		}
+		// The stamp named is the first one in the name: one line gives
+		// one finding, and the stamps are a map.
+		first, at := "", len(m[1])
 		for name, timeOnly := range stamps {
-			if timeOnly && !unique && regexp.MustCompile(`\$\{?`+name+`\b`).MatchString(m[1]) {
-				report(l.LineAt(0), "The file name is unique only by the time of day ($"+name+") — parallel runs within one second (or runs on two days) get the same name")
+			if !timeOnly || unique {
+				continue
 			}
+			if loc := regexp.MustCompile(`\$\{?` + name + `\b`).FindStringIndex(m[1]); loc != nil && (loc[0] < at || loc[0] == at && name < first) {
+				first, at = name, loc[0]
+			}
+		}
+		if first != "" {
+			report(l.LineAt(0), "The file name is unique only by the time of day ($"+first+") — parallel runs within one second (or runs on two days) get the same name")
 		}
 	}
 	return out
