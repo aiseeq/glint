@@ -248,16 +248,15 @@ func (r *NilSliceRule) isStatedSlice(ctx *core.FileContext, info *types.Info, pr
 		return false
 	}
 	file, declaration := declarationFile(ctx, project, obj)
-	return file != nil && declaration != nil && declarationStatesSlice(file, declaration.Pos())
+	return file != nil && declarationStatesSlice(file, declaration.Pos())
 }
 
-// declarationFile returns the syntax of the file that holds pos: the analyzed
-// file or another file of the project; nil when pos lies outside the analyzed
-// files, where the declaration is unknown.
+// declarationFile returns the syntax of the file that declares object - the
+// analyzed file or another file of the project - and the object of the
+// declaration in it: an object of another module comes from export data and
+// is declared by an object of that package's syntax. The file is nil when the
+// declaration lies outside the analyzed files, where it is unknown.
 func declarationFile(ctx *core.FileContext, project *core.GoProjectContext, object types.Object) (*ast.File, types.Object) {
-	if object == nil {
-		return nil, nil
-	}
 	pos := object.Pos()
 	file := ctx.GoAST
 	if pos >= file.FileStart && pos < file.FileEnd {
@@ -278,11 +277,11 @@ func (r *NilSliceRule) nilMeansUnset(ctx *core.FileContext, info *types.Info, pr
 	if obj == nil {
 		return false
 	}
-	file, declaration := declarationFile(ctx, project, obj)
-	if file == nil || declaration == nil {
+	file, _ := declarationFile(ctx, project, obj)
+	if file == nil {
 		return false
 	}
-	path, _ := astutil.PathEnclosingInterval(file, declaration.Pos(), declaration.Pos())
+	path, _ := astutil.PathEnclosingInterval(file, obj.Pos(), obj.Pos())
 	if len(path) < 2 {
 		return false
 	}

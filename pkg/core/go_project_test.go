@@ -107,12 +107,12 @@ func use(v shared.Values, box shared.Box[string], a shared.ValueReceiver, b *sha
 	require.NotNil(t, app)
 	local := app.TypesInfo.Defs[findIdent(app, "LocalOnly")]
 	require.NotNil(t, local)
-	assert.Nil(t, project.declarations, "loading a project must leave the fallback declaration index unbuilt")
+	assert.False(t, builtDeclarationIndex(project, "example.com/shared"), "loading a project must leave the declaration index unbuilt")
 	localFile, localDeclaration, err := project.DeclarationForObject(local)
 	require.NoError(t, err)
 	assert.Equal(t, "app.go", localFile.RelPath)
 	assert.Same(t, local, localDeclaration)
-	assert.Nil(t, project.declarations, "an absolute project definition must use the fast path")
+	assert.Empty(t, loadSharedKeys(project), "an object of the project syntax resolves by its own position")
 	want := map[string]int{"At": 1, "S": 1, "Inner": 1, "Cfg": 1, "Port": 1, "Val": 1, "Same": 2, "ValueMethod": 1, "PointerMethod": 1, "OnLine": 2}
 	got := make(map[string]int)
 	for _, file := range app.Syntax {
@@ -144,7 +144,7 @@ func use(v shared.Values, box shared.Box[string], a shared.ValueReceiver, b *sha
 		})
 	}
 	assert.Equal(t, want, got)
-	assert.NotEmpty(t, project.declarations, "the trimpath fallback builds its index on demand")
+	assert.True(t, builtDeclarationIndex(project, "example.com/shared"), "a trimmed position builds the index of its package on demand")
 }
 
 func findIdent(pkg *packages.Package, name string) *ast.Ident {

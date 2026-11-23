@@ -131,3 +131,47 @@ func TestRequestJSONTagCase_TrimpathNestedReplaceModule(t *testing.T) {
 	assert.Equal(t, "shared/request.go", violations[0].File)
 	assert.Equal(t, 6, violations[0].Line)
 }
+
+// The request type of a nested module that imports "C" is reported in its
+// file: cgo type-checks generated files, the trimmed position still names the
+// source file.
+func TestRequestJSONTagCase_CgoNestedReplaceModule(t *testing.T) {
+	rulestest.RequireCgo(t)
+	root, contexts := rulestest.Module(t, map[string]string{
+		"go.mod":        "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod": "module example.com/shared\n\ngo 1.24\n",
+		"shared/request.go": "package shared\n\n/*\nstatic int seven(void) { return 7; }\n*/\nimport \"C\"\n\n" +
+			"type Input struct {\n\tStrategyID string `json:\"StrategyID\"`\n}\n\nfunc Seven() int { return int(C.seven()) }\n",
+		"shared/style.go": "package shared\n\ntype Style struct {\n" +
+			"A string `json:\"a\"`\nB string `json:\"b\"`\nC string `json:\"c\"`\nD string `json:\"d\"`\nE string `json:\"e\"`\n" +
+			"F string `json:\"f\"`\nG string `json:\"g\"`\nH string `json:\"h\"`\nI string `json:\"i\"`\nJ string `json:\"j\"`\n}\n",
+		"handler.go": "package app\n\nimport (\"encoding/json\"; \"net/http\"; \"example.com/shared\")\n\n" +
+			"func Handle(w http.ResponseWriter, r *http.Request) { var input shared.Input; _ = json.NewDecoder(r.Body).Decode(&input) }\n",
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	require.NoError(t, err)
+	violations, err := NewRequestJSONTagCaseRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "shared/request.go", violations[0].File)
+}
+
+// Two fields of one name and type on one line - one of an anonymous struct -
+// do not stop the run: the capitalized one is reported on its line.
+func TestRequestJSONTagCase_NamesakeFieldsOnOneLine(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"go.mod":        "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod": "module example.com/shared\n\ngo 1.24\n",
+		"shared/request.go": "package shared\n\ntype Input struct {\n" +
+			"\tMeta struct{ Name string `json:\"name\"` } `json:\"meta\"`; Name string `json:\"Name\"`\n}\n\ntype Style struct {\n" +
+			"A string `json:\"a\"`\nB string `json:\"b\"`\nC string `json:\"c\"`\nD string `json:\"d\"`\nE string `json:\"e\"`\n" +
+			"F string `json:\"f\"`\nG string `json:\"g\"`\nH string `json:\"h\"`\nI string `json:\"i\"`\nJ string `json:\"j\"`\n}\n",
+		"handler.go": "package app\n\nimport (\"encoding/json\"; \"net/http\"; \"example.com/shared\")\n\n" +
+			"func Handle(w http.ResponseWriter, r *http.Request) { var input shared.Input; _ = json.NewDecoder(r.Body).Decode(&input) }\n",
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	require.NoError(t, err)
+	violations, err := NewRequestJSONTagCaseRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"shared/request.go:4"}, patterntest.FoundLines(violations))
+}

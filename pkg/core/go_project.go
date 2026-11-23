@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -63,14 +64,10 @@ type GoProjectContext struct {
 	// TypeScript generated from Go types (GeneratedTSImports).
 	GeneratedTSImports map[string]bool
 
-	filesByPath        map[string]*FileContext
-	trimpathModules    []trimpathModule
-	declarations       map[declarationPosition]types.Object
-	declarationsAtLine map[declarationLine][]types.Object
-	declarationIndex   sync.Once
-	reportFiles        map[*FileContext]struct{}
-	reportFileList     []*FileContext
-	reportTypesInfo    map[*FileContext]*types.Info
+	filesByPath     map[string]*FileContext
+	reportFiles     map[*FileContext]struct{}
+	reportFileList  []*FileContext
+	reportTypesInfo map[*FileContext]*types.Info
 
 	// shared holds values built once for this project; loadShared holds
 	// values built once for the load behind it, which other roots of the same
@@ -235,85 +232,119 @@ func (ctx *GoProjectContext) FileForPosition(pos token.Pos) (*FileContext, error
 	return fileCtx, nil
 }
 
-// FileForObject resolves an object's declaration to a file in this project.
-// Export data can retain a module-relative filename under -trimpath, in which
-// case the position cannot be joined to ProjectRoot. Match that object against
-// declarations in the loaded project packages instead.
+// FileForObject resolves the file that declares an object to its file in this
+// project. Under -trimpath export data names the file of an object of another
+// package by a trimmed path — the import path of the package, or
+// module@version and the package's path in the module — instead of an
+// absolute one. Such a name is resolved through the project package of the
+// object, as the go command trimmed it; an object of the standard library or
+// of a dependency outside the project resolves to no file. Only the file is
+// resolved: a cgo package type-checks files the go command generated, so the
+// declaration need not be found in the file, see DeclarationForObject.
 func (ctx *GoProjectContext) FileForObject(object types.Object) (*FileContext, error) {
-	file, _, err := ctx.DeclarationForObject(object)
+	file, _, err := ctx.fileForObject(object)
 	return file, err
 }
 
-// DeclarationForObject resolves an object's declaration to its project file
-// and the corresponding object from that file's type information.
+// DeclarationForObject resolves an object to its project file and to the
+// object of the same declaration in the syntax of that file: an object of
+// another package comes from export data, its position lies outside the
+// parsed files. The declaration of a trimmed position is looked up among the
+// package-level objects, fields and methods of the object's package, built
+// for each package on first use and shared by the roots of one load. When
+// the declaration is not found there - a cgo package was type-checked from
+// generated files - an error is returned, as for an object outside the
+// project.
 func (ctx *GoProjectContext) DeclarationForObject(object types.Object) (*FileContext, types.Object, error) {
-	if ctx == nil || ctx.FileSet == nil || object == nil {
-		return nil, nil, errors.New("map Go object: project or object is nil")
+	file, trimmed, err := ctx.fileForObject(object)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !trimmed.valid {
+		return file, object, nil
+	}
+	declarations, err := SharedLoad(ctx, packageDeclarationsKey{pkgPath: trimmed.pkgPath}, func() (map[declarationLine][]types.Object, error) {
+		return indexPackageDeclarations(ctx.FileSet, trimmed.packages), nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 	position := ctx.FileSet.PositionFor(object.Pos(), false)
-	if position.IsValid() && filepath.IsAbs(position.Filename) {
-		if file, err := ctx.File(position.Filename); err == nil {
-			return file, object, nil
+	shape := declarationShape(object)
+	// Export data keeps no column: of namesakes of one shape on one line the
+	// first is taken.
+	for _, candidate := range declarations[declarationLine{filename: trimmed.filename, line: position.Line, name: object.Name()}] {
+		if declarationShape(candidate) == shape {
+			return file, candidate, nil
 		}
-		return nil, nil, fmt.Errorf("map Go object %s.%s at %s: declaration is not in project files", objectPkgPath(object), object.Name(), position)
 	}
-	ctx.declarationIndex.Do(ctx.indexProjectDeclarations)
-	file, err := ctx.fileForProjectPosition(position)
+	return nil, nil, fmt.Errorf("map Go object %s.%s at %s: no declaration at that source position", trimmed.pkgPath, object.Name(), position)
+}
+
+// trimmedObject is an object whose position export data gave under -trimpath:
+// the project packages of its package path and its file.
+type trimmedObject struct {
+	valid    bool
+	pkgPath  string
+	packages []*packages.Package
+	filename string
+}
+
+func (ctx *GoProjectContext) fileForObject(object types.Object) (*FileContext, trimmedObject, error) {
+	if ctx == nil || ctx.FileSet == nil || object == nil {
+		return nil, trimmedObject{}, errors.New("map Go object: project or object is nil")
+	}
+	pkgPath := objectPkgPath(object)
+	position := ctx.FileSet.PositionFor(object.Pos(), false)
+	if !position.IsValid() || position.Filename == "" {
+		return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s: invalid or unknown position", pkgPath, object.Name())
+	}
+	if filepath.IsAbs(position.Filename) {
+		file, err := ctx.File(position.Filename)
+		if err != nil {
+			return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: %w", pkgPath, object.Name(), position, err)
+		}
+		return file, trimmedObject{}, nil
+	}
+	syntax, err := SharedLoad(ctx, projectSyntaxPackagesKey{}, func() (map[string][]*packages.Package, error) {
+		return projectSyntaxPackages(ctx.Packages), nil
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("map Go object %s.%s at %s: %w", objectPkgPath(object), object.Name(), position, err)
+		return nil, trimmedObject{}, err
 	}
-	key := declarationPosition{pkgPath: objectPkgPath(object), filename: file.Path, line: position.Line, column: position.Column, name: object.Name()}
-	if declaration := ctx.declarations[key]; declaration != nil {
-		return file, declaration, nil
-	}
-	lineKey := declarationLine{pkgPath: key.pkgPath, filename: key.filename, line: key.line, name: key.name}
-	candidates := ctx.declarationsAtLine[lineKey]
-	if len(candidates) == 1 {
-		return file, candidates[0], nil
-	}
-	var match types.Object
-	for _, candidate := range candidates {
-		if declarationShape(candidate) != declarationShape(object) {
-			continue
-		}
-		if match != nil {
-			return nil, nil, fmt.Errorf("map Go object %s.%s at %s: multiple declarations match that source position", key.pkgPath, key.name, position)
-		}
-		match = candidate
-	}
-	if match != nil {
-		return file, match, nil
-	}
-	return nil, nil, fmt.Errorf("map Go object %s.%s at %s: no declaration at that source position", key.pkgPath, key.name, position)
-}
-
-func (ctx *GoProjectContext) fileForProjectPosition(position token.Position) (*FileContext, error) {
-	filename, ok := ctx.projectFilename(position.Filename)
+	sources, ok := syntax[pkgPath]
 	if !ok {
-		return nil, fmt.Errorf("filename is not in a loaded project module")
+		return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: the package is not loaded from project sources", pkgPath, object.Name(), position)
 	}
-	fileCtx, ok := ctx.filesByPath[filename]
+	views, err := SharedLoad(ctx, projectPackageViewsKey{}, func() (map[*types.Package]*packages.Package, error) {
+		return projectPackageViews(syntax), nil
+	})
+	if err != nil {
+		return nil, trimmedObject{}, err
+	}
+	view, ok := views[object.Pkg()]
 	if !ok {
-		return nil, fmt.Errorf("no file context for %q", filename)
+		return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: the package of the object is not among the loaded packages", pkgPath, object.Name(), position)
 	}
-	return fileCtx, nil
+	// The go command trims the directory of the package to trimmedImportDir.
+	rel := strings.TrimPrefix(filepath.ToSlash(position.Filename), trimmedImportDir(view)+"/")
+	filename := filepath.Join(view.Dir, filepath.FromSlash(rel))
+	if file, ok := ctx.filesByPath[filename]; ok {
+		return file, trimmedObject{valid: true, pkgPath: pkgPath, packages: sources, filename: filename}, nil
+	}
+	return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s at %s: %q is not a project file", pkgPath, object.Name(), position, filename)
 }
 
-type trimpathModule struct {
-	prefix string
-	dir    string
-}
+type projectSyntaxPackagesKey struct{}
 
-type declarationPosition struct {
-	pkgPath, filename string
-	line, column      int
-	name              string
-}
+type projectPackageViewsKey struct{}
+
+type packageDeclarationsKey struct{ pkgPath string }
 
 type declarationLine struct {
-	pkgPath, filename string
-	line              int
-	name              string
+	filename string
+	line     int
+	name     string
 }
 
 func objectPkgPath(object types.Object) string {
@@ -323,111 +354,106 @@ func objectPkgPath(object types.Object) string {
 	return ""
 }
 
-func declarationShape(object types.Object) string {
-	qualifier := func(pkg *types.Package) string {
-		if pkg == nil {
-			return ""
-		}
-		return pkg.Path()
+// projectSyntaxPackages groups the packages loaded from project sources by
+// package path.
+func projectSyntaxPackages(loaded []*GoPackageContext) map[string][]*packages.Package {
+	syntax := make(map[string][]*packages.Package)
+	for _, pkgCtx := range loaded {
+		syntax[pkgCtx.Package.PkgPath] = append(syntax[pkgCtx.Package.PkgPath], pkgCtx.Package)
 	}
-	shape := fmt.Sprintf("%T:%s", object, types.TypeString(object.Type(), qualifier))
+	return syntax
+}
+
+// projectPackageViews maps each package of a project package path that the
+// load holds - the syntax of a root, or the export data another module of the
+// project imports it from through a replace - by its types to itself. An
+// object of export data belongs to the types of the importing load, so this
+// names the module version and directory the go command trimmed its file
+// from; a package of the same path built from another directory, as from the
+// module cache, maps to files outside the project.
+func projectPackageViews(syntax map[string][]*packages.Package) map[*types.Package]*packages.Package {
+	var roots []*packages.Package
+	for _, pkgs := range syntax {
+		roots = append(roots, pkgs...)
+	}
+	views := make(map[*types.Package]*packages.Package)
+	packages.Visit(roots, nil, func(pkg *packages.Package) {
+		if _, project := syntax[pkg.PkgPath]; project {
+			views[pkg.Types] = pkg
+		}
+	})
+	return views
+}
+
+// trimmedImportDir is the directory the go command gives the files of a
+// package under -trimpath: module@version and the package's path in the
+// module for a module with a version, the import path otherwise.
+func trimmedImportDir(pkg *packages.Package) string {
+	if module := pkg.Module; module != nil && module.Version != "" {
+		return module.Path + "@" + module.Version + strings.TrimPrefix(pkg.PkgPath, module.Path)
+	}
+	return pkg.PkgPath
+}
+
+// indexPackageDeclarations indexes the package-level objects, fields and
+// methods of the packages by file, line and name, each list in source order.
+func indexPackageDeclarations(fset *token.FileSet, pkgs []*packages.Package) map[declarationLine][]types.Object {
+	declarations := make(map[declarationLine][]types.Object)
+	for _, pkg := range pkgs {
+		scope := pkg.Types.Scope()
+		for _, object := range pkg.TypesInfo.Defs {
+			if object == nil || !declaredByPackage(object, scope) {
+				continue
+			}
+			position := fset.PositionFor(object.Pos(), false)
+			key := declarationLine{filename: position.Filename, line: position.Line, name: object.Name()}
+			declarations[key] = append(declarations[key], object)
+		}
+	}
+	for _, list := range declarations {
+		slices.SortFunc(list, func(a, b types.Object) int { return cmp.Compare(a.Pos(), b.Pos()) })
+	}
+	return declarations
+}
+
+// declaredByPackage reports an object another package can see: a
+// package-level object, a field or a method.
+func declaredByPackage(object types.Object, scope *types.Scope) bool {
+	switch object := object.(type) {
+	case *types.Var:
+		if object.IsField() {
+			return true
+		}
+	case *types.Func:
+		if signature, ok := object.Type().(*types.Signature); ok && signature.Recv() != nil {
+			return true
+		}
+	}
+	return object.Parent() == scope
+}
+
+// declarationShape tells apart namesakes on one line, which a package can
+// only hold as a package-level object, fields and methods: by type, by being
+// a field, and by the receiver of a method. An object of an instantiated type
+// is compared by its generic origin.
+func declarationShape(object types.Object) string {
+	switch origin := object.(type) {
+	case *types.Var:
+		object = origin.Origin()
+	case *types.Func:
+		object = origin.Origin()
+	}
+	qualifier := func(pkg *types.Package) string { return pkg.Path() }
+	shape := types.TypeString(object.Type(), qualifier)
+	if field, ok := object.(*types.Var); ok && field.IsField() {
+		shape += ":field"
+	}
 	if method, ok := object.(*types.Func); ok {
 		if signature, ok := method.Type().(*types.Signature); ok && signature.Recv() != nil {
 			shape += ":receiver=" + types.TypeString(signature.Recv().Type(), qualifier)
 		}
 	}
-	if constant, ok := object.(*types.Const); ok {
-		shape += ":value=" + constant.Val().ExactString()
-	}
 	return shape
-}
-
-func (ctx *GoProjectContext) projectFilename(filename string) (string, bool) {
-	if filepath.IsAbs(filename) {
-		return filepath.Clean(filename), true
-	}
-	name := filepath.ToSlash(filepath.Clean(filename))
-	for _, module := range ctx.trimpathModules {
-		prefix := module.prefix + "/"
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		rel := filepath.FromSlash(strings.TrimPrefix(name, prefix))
-		full := filepath.Clean(filepath.Join(module.dir, rel))
-		under, err := filepath.Rel(module.dir, full)
-		if err != nil || under == ".." || strings.HasPrefix(under, ".."+string(filepath.Separator)) {
-			return "", false
-		}
-		return full, true
-	}
-	full := filepath.Clean(filepath.Join(ctx.ProjectRoot, filepath.FromSlash(name)))
-	under, err := filepath.Rel(ctx.ProjectRoot, full)
-	if err != nil || under == ".." || strings.HasPrefix(under, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	return full, true
-}
-
-func (ctx *GoProjectContext) indexProjectDeclarations() {
-	ctx.declarations = make(map[declarationPosition]types.Object)
-	ctx.declarationsAtLine = make(map[declarationLine][]types.Object)
-	moduleDirs := make(map[string]string)
-	roots := make([]*packages.Package, 0, len(ctx.Packages))
-	for _, pkgCtx := range ctx.Packages {
-		if pkgCtx != nil && pkgCtx.Package != nil {
-			roots = append(roots, pkgCtx.Package)
-		}
-	}
-	packages.Visit(roots, nil, func(pkg *packages.Package) {
-		if pkg == nil {
-			return
-		}
-		module := pkg.Module
-		if module == nil {
-			return
-		}
-		if module.Path == "" || module.Dir == "" {
-			return
-		}
-		dir, err := filepath.Abs(module.Dir)
-		if err != nil {
-			return
-		}
-		dir = filepath.Clean(dir)
-		prefix := module.Path
-		if module.Version != "" {
-			prefix += "@" + module.Version
-		}
-		moduleDirs[prefix] = dir
-	})
-	ctx.trimpathModules = ctx.trimpathModules[:0]
-	for prefix, dir := range moduleDirs {
-		ctx.trimpathModules = append(ctx.trimpathModules, trimpathModule{prefix: prefix, dir: dir})
-	}
-	sort.Slice(ctx.trimpathModules, func(i, j int) bool {
-		return len(ctx.trimpathModules[i].prefix) > len(ctx.trimpathModules[j].prefix)
-	})
-
-	for _, pkgCtx := range ctx.Packages {
-		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil || pkgCtx.Package.Types == nil {
-			continue
-		}
-		pkgPath := pkgCtx.Package.Types.Path()
-		for _, object := range pkgCtx.Package.TypesInfo.Defs {
-			if object == nil || !object.Pos().IsValid() || object.Pkg() == nil {
-				continue
-			}
-			position := ctx.FileSet.PositionFor(object.Pos(), false)
-			filename, ok := ctx.projectFilename(position.Filename)
-			if !ok {
-				continue
-			}
-			key := declarationPosition{pkgPath: pkgPath, filename: filename, line: position.Line, column: position.Column, name: object.Name()}
-			ctx.declarations[key] = object
-			lineKey := declarationLine{pkgPath: pkgPath, filename: filename, line: position.Line, name: object.Name()}
-			ctx.declarationsAtLine[lineKey] = append(ctx.declarationsAtLine[lineKey], object)
-		}
-	}
 }
 
 type parsedProjectFile struct {

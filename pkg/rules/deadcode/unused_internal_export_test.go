@@ -1,9 +1,6 @@
 package deadcode
 
 import (
-	"go/constant"
-	"go/types"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,43 +9,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
-	"golang.org/x/tools/go/packages"
 )
-
-func TestUnusedInternalExportTrimpathDeclarationPath(t *testing.T) {
-	root, contexts := rulestest.Module(t, map[string]string{
-		"go.mod":                           "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
-		"shared/go.mod":                    "module example.com/shared\n\ngo 1.24\n",
-		"shared/internal/config/config.go": "package config\n\nconst Dormant = 1\n",
-		"shared/client/client.go":          "package client\n\nimport \"example.com/shared/internal/config\"\n\nvar Value = config.Dormant\n",
-		"app.go":                           "package app\n\nimport \"example.com/shared/client\"\n\nvar _ = client.Value\n",
-	})
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
-		cfg.BuildFlags = []string{"-trimpath"}
-		return packages.Load(cfg, patterns...)
-	}})
-	require.NoError(t, err)
-	var client *packages.Package
-	for _, pkg := range project.Packages {
-		if pkg.Package.PkgPath == "example.com/shared/client" {
-			client = pkg.Package
-		}
-	}
-	require.NotNil(t, client)
-	configPkg := client.Imports["example.com/shared/internal/config"].Types
-	dead := configPkg.Scope().Lookup("Dormant")
-	require.IsType(t, (*types.Const)(nil), dead)
-	source := []byte("package config\n\nconst Dormant = 1\n")
-	trimmedFile := project.FileSet.AddFile("example.com/shared@v0.0.0/internal/config/config.go", -1, len(source))
-	trimmedFile.SetLinesForContent(source)
-	trimmedPos := trimmedFile.Pos(strings.Index(string(source), "Dormant"))
-	trimmed := types.NewConst(trimmedPos, dead.Pkg(), dead.Name(), dead.Type(), constant.MakeInt64(1))
-	assert.Equal(t, "example.com/shared@v0.0.0/internal/config/config.go", filepath.ToSlash(project.FileSet.PositionFor(trimmed.Pos(), false).Filename))
-	usage := &exportUsage{object: trimmed, kind: "constant"}
-	violation := NewUnusedInternalExportRule().violationFor(project, usage)
-	assert.Equal(t, "shared/internal/config/config.go", violation.File)
-	assert.Equal(t, filepath.Join(root, "shared/internal/config"), declaredDir(project, usage))
-}
 
 func TestUnusedInternalExportRule_Metadata(t *testing.T) {
 	rule := NewUnusedInternalExportRule()

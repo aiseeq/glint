@@ -1,6 +1,7 @@
 package gorules
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -8,25 +9,36 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/tools/go/packages"
 )
 
+// A slice variable of a nested module seen through a dot import is judged by
+// its declaration, as when the package is in the same module: Items is
+// declared a slice and reported. Unset is set to a part of another slice only
+// in its own package, which the check of the importing package does not see,
+// so it is reported in both layouts alike.
 func TestNilSliceRule_TrimpathImportedDotVariableUsesMatchedDeclaration(t *testing.T) {
-	root, contexts := rulestest.Module(t, map[string]string{
-		"go.mod":           "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
-		"shared/go.mod":    "module example.com/shared\n\ngo 1.24\n",
-		"shared/slices.go": "package shared\n\nvar Items []string\n",
-		"app.go":           "package app\n\nimport . \"example.com/shared\"\n\nfunc Check() { if Items == nil {} }\n",
-	})
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
-		cfg.BuildFlags = []string{"-trimpath"}
-		return packages.Load(cfg, patterns...)
-	}})
-	require.NoError(t, err)
-	violations, err := NewNilSliceRule().AnalyzeGoProject(project)
-	require.NoError(t, err)
-	require.Len(t, violations, 1)
-	assert.Equal(t, "app.go", violations[0].File)
+	const slices = "package shared\n\nvar Items []string\n\nvar Unset []string\n\nfunc Fill(src []string) { Unset = src[1:] }\n"
+	const app = "package app\n\nimport . \"%s\"\n\nfunc Check() { if Items == nil {} }\n\nfunc CheckUnset() { if Unset == nil {} }\n"
+	for name, files := range map[string]map[string]string{
+		"nested module": {
+			"go.mod":           "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+			"shared/go.mod":    "module example.com/shared\n\ngo 1.24\n",
+			"shared/slices.go": slices,
+			"app.go":           fmt.Sprintf(app, "example.com/shared"),
+		},
+		"one module": {
+			"go.mod":           "module example.com/app\n\ngo 1.24\n",
+			"shared/slices.go": slices,
+			"app.go":           fmt.Sprintf(app, "example.com/app/shared"),
+		},
+	} {
+		root, contexts := rulestest.Module(t, files)
+		project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+		require.NoError(t, err, name)
+		violations, err := NewNilSliceRule().AnalyzeGoProject(project)
+		require.NoError(t, err, name)
+		assert.Equal(t, []string{"app.go:5", "app.go:7"}, patterntest.FoundLines(violations), name)
+	}
 }
 
 func TestNilSliceRule_Metadata(t *testing.T) {

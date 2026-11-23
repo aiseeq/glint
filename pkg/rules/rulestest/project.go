@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -329,4 +330,14 @@ func SplitLines(source string) []string {
 		lines = append(lines, source[start:])
 	}
 	return lines
+}
+
+// RequireCgo skips a test whose module imports "C" when cgo is disabled.
+func RequireCgo(t *testing.T) {
+	t.Helper()
+	out, err := exec.Command("go", "env", "CGO_ENABLED").Output()
+	require.NoError(t, err)
+	if strings.TrimSpace(string(out)) != "1" {
+		t.Skip("cgo is disabled")
+	}
 }

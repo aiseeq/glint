@@ -335,3 +335,36 @@ func TestSQLScanArgCountMismatch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, patterntest.WantedLines(files, "sql-scan-arg-count-mismatch"), patterntest.FoundLines(violations))
 }
+
+// The untagged field of a nested module that imports "C" is reported in its
+// file, as without -trimpath, not on the query.
+func TestSQLXColumnWithoutField_CgoNestedReplaceModule(t *testing.T) {
+	rulestest.RequireCgo(t)
+	root, contexts := rulestest.Module(t, map[string]string{
+		"go.mod":        "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod": "module example.com/shared\n\ngo 1.24\n",
+		"shared/model.go": "package shared\n\n/*\nstatic int seven(void) { return 7; }\n*/\nimport \"C\"\n\nimport \"time\"\n\n" +
+			"type Request struct {\n\tCreatedAt time.Time\n}\n\nfunc Seven() int { return int(C.seven()) }\n",
+		"db/migrations/001_create.sql": "CREATE TABLE requests (created_at TIMESTAMPTZ NOT NULL);\n",
+		"repo.go": `package app
+
+import (
+	"context"
+	"example.com/shared"
+)
+
+type DB interface { GetContext(context.Context, any, string, ...any) error }
+
+func Read(ctx context.Context, db DB) error {
+	var request shared.Request
+	return db.GetContext(ctx, &request, "SELECT created_at FROM requests")
+}
+`,
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	require.NoError(t, err)
+	violations, err := NewSQLXColumnWithoutFieldRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "shared/model.go", violations[0].File)
+}

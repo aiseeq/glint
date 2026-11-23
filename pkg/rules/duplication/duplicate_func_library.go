@@ -1128,9 +1128,15 @@ func loadPeerFunctionKeys(dir string) (libraryCacheEntry, error) {
 	return loadFunctionKeys(dir, true)
 }
 
+// libraryLoadConfig lists a library as the project load does, with -trimpath:
+// the build cache entries it leaves do not depend on the directory of the copy.
+func libraryLoadConfig(dir string, fset *token.FileSet) *packages.Config {
+	return &packages.Config{Mode: packages.LoadSyntax | packages.NeedModule, Dir: dir, Fset: fset, Tests: false, BuildFlags: []string{"-trimpath"}}
+}
+
 func loadFunctionKeys(dir string, includeUnexported bool) (libraryCacheEntry, error) {
 	fset := token.NewFileSet()
-	pkgs, err := packages.Load(&packages.Config{Mode: packages.LoadSyntax | packages.NeedModule, Dir: dir, Fset: fset, Tests: false, BuildFlags: []string{"-trimpath"}}, "./...")
+	pkgs, err := packages.Load(libraryLoadConfig(dir, fset), "./...")
 	if err != nil {
 		return libraryCacheEntry{}, fmt.Errorf("load packages from %s: %w", dir, err)
 	}

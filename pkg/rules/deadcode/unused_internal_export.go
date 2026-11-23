@@ -589,9 +589,6 @@ func (r *UnusedInternalExportRule) violationFor(ctx *core.GoProjectContext, usag
 	pos := ctx.FileSet.Position(usage.object.Pos())
 	// cmd/glint maps the absolute path to the project-relative one.
 	rel := pos.Filename
-	if file, err := ctx.FileForObject(usage.object); err == nil {
-		rel = file.RelPath
-	}
 
 	name := usage.object.Name()
 	message := "Exported " + usage.kind + " '" + name + "' in internal package is never used — the internal/ boundary makes it dead code"
@@ -702,9 +699,6 @@ func (u *exportUsage) importedAs(imported map[string]string, name string) bool {
 
 // declaredDir returns the directory of the file that declares a symbol.
 func declaredDir(ctx *core.GoProjectContext, usage *exportUsage) string {
-	if file, err := ctx.FileForObject(usage.object); err == nil {
-		return filepath.Dir(file.Path)
-	}
 	return filepath.Dir(ctx.FileSet.Position(usage.object.Pos()).Filename)
 }
 
