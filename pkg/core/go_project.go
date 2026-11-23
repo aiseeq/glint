@@ -63,10 +63,14 @@ type GoProjectContext struct {
 	// TypeScript generated from Go types (GeneratedTSImports).
 	GeneratedTSImports map[string]bool
 
-	filesByPath     map[string]*FileContext
-	reportFiles     map[*FileContext]struct{}
-	reportFileList  []*FileContext
-	reportTypesInfo map[*FileContext]*types.Info
+	filesByPath        map[string]*FileContext
+	trimpathModules    []trimpathModule
+	declarations       map[declarationPosition]types.Object
+	declarationsAtLine map[declarationLine][]types.Object
+	declarationIndex   sync.Once
+	reportFiles        map[*FileContext]struct{}
+	reportFileList     []*FileContext
+	reportTypesInfo    map[*FileContext]*types.Info
 
 	// shared holds values built once for this project; loadShared holds
 	// values built once for the load behind it, which other roots of the same
@@ -251,105 +255,179 @@ func (ctx *GoProjectContext) DeclarationForObject(object types.Object) (*FileCon
 		if file, err := ctx.File(position.Filename); err == nil {
 			return file, object, nil
 		}
+		return nil, nil, fmt.Errorf("map Go object %s.%s at %s: declaration is not in project files", objectPkgPath(object), object.Name(), position)
 	}
-	want := objectKey(object)
-	for _, pkg := range ctx.Packages {
-		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil || pkg.Package.Types == nil || pkg.Package.Types.Path() != want.pkgPath {
+	ctx.declarationIndex.Do(ctx.indexProjectDeclarations)
+	file, err := ctx.fileForProjectPosition(position)
+	if err != nil {
+		return nil, nil, fmt.Errorf("map Go object %s.%s at %s: %w", objectPkgPath(object), object.Name(), position, err)
+	}
+	key := declarationPosition{pkgPath: objectPkgPath(object), filename: file.Path, line: position.Line, column: position.Column, name: object.Name()}
+	if declaration := ctx.declarations[key]; declaration != nil {
+		return file, declaration, nil
+	}
+	lineKey := declarationLine{pkgPath: key.pkgPath, filename: key.filename, line: key.line, name: key.name}
+	candidates := ctx.declarationsAtLine[lineKey]
+	if len(candidates) == 1 {
+		return file, candidates[0], nil
+	}
+	var match types.Object
+	for _, candidate := range candidates {
+		if declarationShape(candidate) != declarationShape(object) {
 			continue
 		}
-		if field, ok := object.(*types.Var); ok && field.IsField() {
-			want.owner = fieldOwnerName(pkg.Package, field)
-			if want.owner == "" {
-				continue
-			}
+		if match != nil {
+			return nil, nil, fmt.Errorf("map Go object %s.%s at %s: multiple declarations match that source position", key.pkgPath, key.name, position)
 		}
-		for _, declared := range pkg.Package.TypesInfo.Defs {
-			if declared == nil {
-				continue
-			}
-			candidate := objectKey(declared)
-			if field, ok := declared.(*types.Var); ok && field.IsField() {
-				candidate.owner = fieldOwnerName(pkg.Package, field)
-			}
-			if candidate != want {
-				continue
-			}
-			file, err := ctx.FileForPosition(declared.Pos())
-			if err == nil {
-				return file, declared, nil
-			}
-		}
+		match = candidate
 	}
-	return nil, nil, fmt.Errorf("map Go object %s.%s: declaration is not in project files", want.pkgPath, want.name)
+	if match != nil {
+		return file, match, nil
+	}
+	return nil, nil, fmt.Errorf("map Go object %s.%s at %s: no declaration at that source position", key.pkgPath, key.name, position)
 }
 
-func fieldOwnerName(pkg *packages.Package, field *types.Var) string {
-	if pkg == nil || pkg.Types == nil || pkg.Fset == nil || field == nil {
-		return ""
+func (ctx *GoProjectContext) fileForProjectPosition(position token.Position) (*FileContext, error) {
+	filename, ok := ctx.projectFilename(position.Filename)
+	if !ok {
+		return nil, fmt.Errorf("filename is not in a loaded project module")
 	}
-	position := pkg.Fset.PositionFor(field.Pos(), false)
-	owner := ""
-	for _, name := range pkg.Types.Scope().Names() {
-		typeName, ok := pkg.Types.Scope().Lookup(name).(*types.TypeName)
-		if !ok {
-			continue
-		}
-		named, ok := typeName.Type().(*types.Named)
-		if !ok {
-			continue
-		}
-		structure, ok := named.Underlying().(*types.Struct)
-		if !ok {
-			continue
-		}
-		for candidate := range structure.Fields() {
-			if candidate.Name() != field.Name() || !types.Identical(candidate.Type(), field.Type()) {
-				continue
-			}
-			candidatePosition := pkg.Fset.PositionFor(candidate.Pos(), false)
-			if position.Line != 0 && candidatePosition.Line != position.Line {
-				continue
-			}
-			if owner != "" && owner != name {
-				return ""
-			}
-			owner = name
-		}
+	fileCtx, ok := ctx.filesByPath[filename]
+	if !ok {
+		return nil, fmt.Errorf("no file context for %q", filename)
 	}
-	return owner
+	return fileCtx, nil
 }
 
-type goObjectKey struct{ pkgPath, name, kind, owner string }
+type trimpathModule struct {
+	prefix string
+	dir    string
+}
 
-func objectKey(object types.Object) goObjectKey {
-	key := goObjectKey{name: object.Name()}
+type declarationPosition struct {
+	pkgPath, filename string
+	line, column      int
+	name              string
+}
+
+type declarationLine struct {
+	pkgPath, filename string
+	line              int
+	name              string
+}
+
+func objectPkgPath(object types.Object) string {
 	if object.Pkg() != nil {
-		key.pkgPath = object.Pkg().Path()
-	}
-	switch object.(type) {
-	case *types.Const:
-		key.kind = "const"
-	case *types.Func:
-		key.kind = "func"
-		if sig, ok := object.Type().(*types.Signature); ok && sig.Recv() != nil {
-			key.owner = receiverName(sig.Recv().Type())
-		}
-	case *types.TypeName:
-		key.kind = "type"
-	case *types.Var:
-		key.kind = "var"
-	}
-	return key
-}
-
-func receiverName(typ types.Type) string {
-	if ptr, ok := typ.(*types.Pointer); ok {
-		typ = ptr.Elem()
-	}
-	if named, ok := typ.(*types.Named); ok {
-		return named.Obj().Name()
+		return object.Pkg().Path()
 	}
 	return ""
+}
+
+func declarationShape(object types.Object) string {
+	qualifier := func(pkg *types.Package) string {
+		if pkg == nil {
+			return ""
+		}
+		return pkg.Path()
+	}
+	shape := fmt.Sprintf("%T:%s", object, types.TypeString(object.Type(), qualifier))
+	if method, ok := object.(*types.Func); ok {
+		if signature, ok := method.Type().(*types.Signature); ok && signature.Recv() != nil {
+			shape += ":receiver=" + types.TypeString(signature.Recv().Type(), qualifier)
+		}
+	}
+	if constant, ok := object.(*types.Const); ok {
+		shape += ":value=" + constant.Val().ExactString()
+	}
+	return shape
+}
+
+func (ctx *GoProjectContext) projectFilename(filename string) (string, bool) {
+	if filepath.IsAbs(filename) {
+		return filepath.Clean(filename), true
+	}
+	name := filepath.ToSlash(filepath.Clean(filename))
+	for _, module := range ctx.trimpathModules {
+		prefix := module.prefix + "/"
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		rel := filepath.FromSlash(strings.TrimPrefix(name, prefix))
+		full := filepath.Clean(filepath.Join(module.dir, rel))
+		under, err := filepath.Rel(module.dir, full)
+		if err != nil || under == ".." || strings.HasPrefix(under, ".."+string(filepath.Separator)) {
+			return "", false
+		}
+		return full, true
+	}
+	full := filepath.Clean(filepath.Join(ctx.ProjectRoot, filepath.FromSlash(name)))
+	under, err := filepath.Rel(ctx.ProjectRoot, full)
+	if err != nil || under == ".." || strings.HasPrefix(under, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return full, true
+}
+
+func (ctx *GoProjectContext) indexProjectDeclarations() {
+	ctx.declarations = make(map[declarationPosition]types.Object)
+	ctx.declarationsAtLine = make(map[declarationLine][]types.Object)
+	moduleDirs := make(map[string]string)
+	roots := make([]*packages.Package, 0, len(ctx.Packages))
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx != nil && pkgCtx.Package != nil {
+			roots = append(roots, pkgCtx.Package)
+		}
+	}
+	packages.Visit(roots, nil, func(pkg *packages.Package) {
+		if pkg == nil {
+			return
+		}
+		module := pkg.Module
+		if module == nil {
+			return
+		}
+		if module.Path == "" || module.Dir == "" {
+			return
+		}
+		dir, err := filepath.Abs(module.Dir)
+		if err != nil {
+			return
+		}
+		dir = filepath.Clean(dir)
+		prefix := module.Path
+		if module.Version != "" {
+			prefix += "@" + module.Version
+		}
+		moduleDirs[prefix] = dir
+	})
+	ctx.trimpathModules = ctx.trimpathModules[:0]
+	for prefix, dir := range moduleDirs {
+		ctx.trimpathModules = append(ctx.trimpathModules, trimpathModule{prefix: prefix, dir: dir})
+	}
+	sort.Slice(ctx.trimpathModules, func(i, j int) bool {
+		return len(ctx.trimpathModules[i].prefix) > len(ctx.trimpathModules[j].prefix)
+	})
+
+	for _, pkgCtx := range ctx.Packages {
+		if pkgCtx == nil || pkgCtx.Package == nil || pkgCtx.Package.TypesInfo == nil || pkgCtx.Package.Types == nil {
+			continue
+		}
+		pkgPath := pkgCtx.Package.Types.Path()
+		for _, object := range pkgCtx.Package.TypesInfo.Defs {
+			if object == nil || !object.Pos().IsValid() || object.Pkg() == nil {
+				continue
+			}
+			position := ctx.FileSet.PositionFor(object.Pos(), false)
+			filename, ok := ctx.projectFilename(position.Filename)
+			if !ok {
+				continue
+			}
+			key := declarationPosition{pkgPath: pkgPath, filename: filename, line: position.Line, column: position.Column, name: object.Name()}
+			ctx.declarations[key] = object
+			lineKey := declarationLine{pkgPath: pkgPath, filename: filename, line: position.Line, name: object.Name()}
+			ctx.declarationsAtLine[lineKey] = append(ctx.declarationsAtLine[lineKey], object)
+		}
+	}
 }
 
 type parsedProjectFile struct {

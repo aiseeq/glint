@@ -8,7 +8,26 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
+
+func TestNilSliceRule_TrimpathImportedDotVariableUsesMatchedDeclaration(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"go.mod":           "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod":    "module example.com/shared\n\ngo 1.24\n",
+		"shared/slices.go": "package shared\n\nvar Items []string\n",
+		"app.go":           "package app\n\nimport . \"example.com/shared\"\n\nfunc Check() { if Items == nil {} }\n",
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+		cfg.BuildFlags = []string{"-trimpath"}
+		return packages.Load(cfg, patterns...)
+	}})
+	require.NoError(t, err)
+	violations, err := NewNilSliceRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "app.go", violations[0].File)
+}
 
 func TestNilSliceRule_Metadata(t *testing.T) {
 	rule := NewNilSliceRule()

@@ -113,8 +113,8 @@ func TestRequestJSONTagCase_TrimpathNestedReplaceModule(t *testing.T) {
 	root, contexts := rulestest.Module(t, map[string]string{
 		"go.mod":        "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
 		"shared/go.mod": "module example.com/shared\n\ngo 1.24\n",
-		"shared/request.go": "package shared\n\ntype Input struct {\n" +
-			"StrategyID string `json:\"StrategyID\"`\n" +
+		"shared/request.go": "package shared\n\ntype ID string\n\ntype Input struct {\n" +
+			"StrategyID ID `json:\"StrategyID\"`\n" +
 			"A string `json:\"a\"`\nB string `json:\"b\"`\nC string `json:\"c\"`\nD string `json:\"d\"`\n" +
 			"E string `json:\"e\"`\nF string `json:\"f\"`\nG string `json:\"g\"`\nH string `json:\"h\"`\nI string `json:\"i\"`\n}\n",
 		"handler.go": "package app\n\nimport (\"encoding/json\"; \"net/http\"; \"example.com/shared\")\n\n" +
@@ -129,5 +129,5 @@ func TestRequestJSONTagCase_TrimpathNestedReplaceModule(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, violations, 1)
 	assert.Equal(t, "shared/request.go", violations[0].File)
-	assert.Equal(t, 4, violations[0].Line)
+	assert.Equal(t, 6, violations[0].Line)
 }

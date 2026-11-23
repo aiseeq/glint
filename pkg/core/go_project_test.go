@@ -2,17 +2,214 @@ package core
 
 import (
 	"errors"
+	"fmt"
+	"go/ast"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
+
+func writeNestedTrimpathProject(t *testing.T, files map[string]string) (string, []*FileContext) {
+	t.Helper()
+	root := t.TempDir()
+	var contexts []*FileContext
+	for name, content := range files {
+		path := filepath.Join(root, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+		if filepath.Ext(name) != ".go" {
+			continue
+		}
+		file, err := NewFileContextChecked(path, root, []byte(content), DefaultConfig())
+		require.NoError(t, err)
+		contexts = append(contexts, file)
+	}
+	return root, contexts
+}
+
+func loadNestedTrimpathProject(t *testing.T, root string, files []*FileContext) *GoProjectContext {
+	t.Helper()
+	project, err := LoadGoProject(root, files, GoProjectOptions{ListPackages: func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+		cfg.BuildFlags = []string{"-trimpath"}
+		return packages.Load(cfg, patterns...)
+	}})
+	require.NoError(t, err)
+	return project
+}
+
+func TestDeclarationForObjectTrimpathUsesSourcePosition(t *testing.T) {
+	root, contexts := writeNestedTrimpathProject(t, map[string]string{
+		"go.mod":        "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod": "module example.com/shared\n\ngo 1.24\n",
+		"shared/types.go": `package shared
+
+import "time"
+
+type Status string
+type Inner struct { Code int }
+type Box[T any] struct { Val T }
+type Values struct {
+	At time.Time
+	S Status
+	Inner
+	Cfg struct { Port int }
+}
+`,
+		"shared/methods.go": `package shared
+
+type ValueReceiver struct{}
+func (ValueReceiver) Same() {}
+func (ValueReceiver) ValueMethod() {}
+func (ValueReceiver) OnLine() {}; func (*PointerReceiver) OnLine() {}
+
+type PointerReceiver struct{}
+func (*PointerReceiver) Same() {}
+func (*PointerReceiver) PointerMethod() {}
+`,
+		"app.go": `package app
+
+import "example.com/shared"
+
+const LocalOnly = 1
+
+func use(v shared.Values, box shared.Box[string], a shared.ValueReceiver, b *shared.PointerReceiver) {
+	_ = v.At
+	_ = v.S
+	_ = v.Inner
+	_ = v.Cfg.Port
+	_ = box.Val
+	a.Same()
+	a.OnLine()
+	b.Same()
+	b.OnLine()
+	a.ValueMethod()
+	b.PointerMethod()
+}
+`,
+	})
+	project := loadNestedTrimpathProject(t, root, contexts)
+	var app *packages.Package
+	for _, pkg := range project.Packages {
+		if pkg.Package.PkgPath == "example.com/app" {
+			app = pkg.Package
+		}
+	}
+	require.NotNil(t, app)
+	local := app.TypesInfo.Defs[findIdent(app, "LocalOnly")]
+	require.NotNil(t, local)
+	assert.Nil(t, project.declarations, "loading a project must leave the fallback declaration index unbuilt")
+	localFile, localDeclaration, err := project.DeclarationForObject(local)
+	require.NoError(t, err)
+	assert.Equal(t, "app.go", localFile.RelPath)
+	assert.Same(t, local, localDeclaration)
+	assert.Nil(t, project.declarations, "an absolute project definition must use the fast path")
+	want := map[string]int{"At": 1, "S": 1, "Inner": 1, "Cfg": 1, "Port": 1, "Val": 1, "Same": 2, "ValueMethod": 1, "PointerMethod": 1, "OnLine": 2}
+	got := make(map[string]int)
+	for _, file := range app.Syntax {
+		ast.Inspect(file, func(node ast.Node) bool {
+			selector, ok := node.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			selection := app.TypesInfo.Selections[selector]
+			if selection == nil || selection.Obj().Pkg() == nil || selection.Obj().Pkg().Path() != "example.com/shared" {
+				return true
+			}
+			object := selection.Obj()
+			file, declaration, err := project.DeclarationForObject(object)
+			require.NoError(t, err, "resolve %s", object.Name())
+			got[object.Name()]++
+			wantFile := "shared/types.go"
+			if object.Name() == "Same" || object.Name() == "ValueMethod" || object.Name() == "PointerMethod" || object.Name() == "OnLine" {
+				wantFile = "shared/methods.go"
+			}
+			assert.Equal(t, wantFile, file.RelPath, object.Name())
+			assert.Equal(t, object.Name(), declaration.Name())
+			if method, ok := declaration.(*types.Func); ok && (method.Name() == "Same" || method.Name() == "OnLine") {
+				wantReceiver := types.TypeString(object.Type().(*types.Signature).Recv().Type(), func(pkg *types.Package) string { return pkg.Name() })
+				gotReceiver := types.TypeString(method.Type().(*types.Signature).Recv().Type(), func(pkg *types.Package) string { return pkg.Name() })
+				assert.Equal(t, wantReceiver, gotReceiver)
+			}
+			return true
+		})
+	}
+	assert.Equal(t, want, got)
+	assert.NotEmpty(t, project.declarations, "the trimpath fallback builds its index on demand")
+}
+
+func findIdent(pkg *packages.Package, name string) *ast.Ident {
+	for _, file := range pkg.Syntax {
+		var found *ast.Ident
+		ast.Inspect(file, func(node ast.Node) bool {
+			ident, ok := node.(*ast.Ident)
+			if ok && ident.Name == name {
+				found = ident
+				return false
+			}
+			return found == nil
+		})
+		if found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func TestDeclarationForObjectTrimpathLookupScalesWithDeclarations(t *testing.T) {
+	const fieldCount = 4800
+	var source strings.Builder
+	source.WriteString("package shared\n\ntype Many struct {\n")
+	for i := range fieldCount {
+		fmt.Fprintf(&source, "Field%04d int\n", i)
+	}
+	source.WriteString("}\n")
+	root, contexts := writeNestedTrimpathProject(t, map[string]string{
+		"go.mod":         "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod":  "module example.com/shared\n\ngo 1.24\n",
+		"shared/many.go": source.String(),
+		"app.go":         "package app\n\nimport \"example.com/shared\"\n\nfunc use(x shared.Many) { _ = x.Field4799 }\n",
+	})
+	project := loadNestedTrimpathProject(t, root, contexts)
+	var field types.Object
+	for _, pkg := range project.Packages {
+		if pkg.Package.PkgPath != "example.com/app" {
+			continue
+		}
+		for _, file := range pkg.Package.Syntax {
+			ast.Inspect(file, func(node ast.Node) bool {
+				selector, ok := node.(*ast.SelectorExpr)
+				if ok && selector.Sel.Name == "Field4799" {
+					field = pkg.Package.TypesInfo.Selections[selector].Obj()
+				}
+				return true
+			})
+		}
+	}
+	require.NotNil(t, field)
+	started := time.Now()
+	var resolvedFile *FileContext
+	var resolved types.Object
+	for range 1000 {
+		var err error
+		resolvedFile, resolved, err = project.DeclarationForObject(field)
+		require.NoError(t, err)
+	}
+	elapsed := time.Since(started)
+	t.Logf("%d declarations, 1000 lookups: %s", fieldCount, elapsed)
+	assert.Equal(t, "shared/many.go", resolvedFile.RelPath)
+	assert.Equal(t, "Field4799", resolved.Name())
+	assert.Less(t, elapsed, time.Second)
+}
 
 func writeGoModule(t *testing.T, files map[string]string) (string, []*FileContext) {
 	t.Helper()

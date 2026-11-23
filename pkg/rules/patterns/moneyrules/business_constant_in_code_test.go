@@ -27,18 +27,29 @@ func TestBusinessConstantInCode_TrimpathNestedReplaceModule(t *testing.T) {
 		"go.mod":           "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
 		"shared/go.mod":    "module example.com/shared\n\ngo 1.24\n",
 		"shared/limits.go": "package shared\n\nconst MaxDays = 5\n",
-		"app.go":           "package app\n\nimport (\"time\"; \"example.com/shared\")\n\nfunc F(now time.Time) time.Time { return now.AddDate(0, 0, shared.MaxDays) }\n",
+		"shared/other.go": `package shared
+
+func localConst() { const MaxDays = 9; _ = MaxDays }
+func localVar() { var MaxDays = 9; _ = MaxDays }
+func localType() { type MaxDays int; var _ MaxDays }
+func parameter(MaxDays int) { _ = MaxDays }
+func identity[MaxDays any](value MaxDays) MaxDays { return value }
+`,
+		"app.go": "package app\n\nimport (\"time\"; \"example.com/shared\")\n\nfunc F(now time.Time) time.Time { return now.AddDate(0, 0, shared.MaxDays) }\n",
 	})
-	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+	list := func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
 		cfg.BuildFlags = []string{"-trimpath"}
 		return packages.Load(cfg, patterns...)
-	}})
-	require.NoError(t, err)
-	violations, err := NewBusinessConstantInCodeRule().AnalyzeGoProject(project)
-	require.NoError(t, err)
-	require.Len(t, violations, 1)
-	assert.Equal(t, "shared/limits.go", violations[0].File)
-	assert.Equal(t, 3, violations[0].Line)
+	}
+	for range 8 {
+		project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: list})
+		require.NoError(t, err)
+		violations, err := NewBusinessConstantInCodeRule().AnalyzeGoProject(project)
+		require.NoError(t, err)
+		require.Len(t, violations, 1)
+		assert.Equal(t, "shared/limits.go", violations[0].File)
+		assert.Equal(t, 3, violations[0].Line)
+	}
 }
 
 func TestBusinessConstantInCode_CalendarArithmetic(t *testing.T) {

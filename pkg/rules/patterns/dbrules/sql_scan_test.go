@@ -3,10 +3,12 @@ package dbrules
 import (
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
 
 const sqlScanMigration = `
@@ -215,6 +217,39 @@ func TestSQLScanRules(t *testing.T) {
 	violations, err = NewSQLXColumnWithoutFieldRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
 	assert.Equal(t, patterntest.WantedLines(files, "sqlx-column-without-field"), patterntest.FoundLines(violations))
+}
+
+func TestSQLXColumnWithoutField_TrimpathNestedReplaceModule(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"go.mod":                       "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod":                "module example.com/shared\n\ngo 1.24\n",
+		"shared/model.go":              "package shared\n\nimport \"time\"\n\ntype Request struct {\n\tCreatedAt time.Time\n}\n",
+		"db/migrations/001_create.sql": "CREATE TABLE requests (created_at TIMESTAMPTZ NOT NULL);\n",
+		"repo.go": `package app
+
+import (
+	"context"
+	"example.com/shared"
+)
+
+type DB interface { GetContext(context.Context, any, string, ...any) error }
+
+func Read(ctx context.Context, db DB) error {
+	var request shared.Request
+	return db.GetContext(ctx, &request, "SELECT created_at FROM requests")
+}
+`,
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+		cfg.BuildFlags = []string{"-trimpath"}
+		return packages.Load(cfg, patterns...)
+	}})
+	require.NoError(t, err)
+	violations, err := NewSQLXColumnWithoutFieldRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "shared/model.go", violations[0].File)
+	assert.Equal(t, 6, violations[0].Line)
 }
 
 const sqlScanCountRepo = `package storage

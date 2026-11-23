@@ -83,12 +83,10 @@ func readStandardBodies(t *testing.T, project *core.GoProjectContext, sources *D
 	return read
 }
 
-// A position the compiler gave as an absolute path (a module a replace points
-// at, built without -trimpath) names the file on disk: a listed file of the
-// same base name elsewhere, another copy of the package, is not read in its
-// place.
-func TestDependencySourcesAbsolutePositionNamesTheFile(t *testing.T) {
-	t.Setenv("GOFLAGS", "")
+// A trimmed module position resolves to the file the go command listed for
+// the package, even when another file has the same base name.
+func TestDependencySourcesTrimpathPositionUsesListedFile(t *testing.T) {
+	t.Setenv("GOFLAGS", "-trimpath")
 	t.Setenv("GOWORK", "off")
 	t.Setenv("GOTOOLCHAIN", "local")
 	root, contexts := rulestest.Module(t, map[string]string{
@@ -115,13 +113,14 @@ func TestDependencySourcesAbsolutePositionNamesTheFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(copied, []byte("package lib\n\nfunc Ready() bool { return false }\n"), 0o600))
 	sources = NewDependencySources(project)
 	assert.NotEqual(t, filepath.Clean(copied), sources.packageFiles[libPkg]["lib.go"])
-	if filepath.IsAbs(project.FileSet.PositionFor(ready.Pos(), false).Filename) {
-		sources.packageFiles[libPkg]["lib.go"] = copied
-		assert.Nil(t, sources.FuncDecl(ready))
-	} else {
-		_, ok := sources.sourcePath(libPkg, copied)
-		assert.False(t, ok, "an absolute compiler path must name the listed file exactly")
-	}
+	position := project.FileSet.PositionFor(ready.Pos(), false)
+	assert.Equal(t, "example.com/lib@v0.0.0/lib.go", filepath.ToSlash(position.Filename))
+	listed := filepath.Clean(sources.packageFiles[libPkg]["lib.go"])
+	assert.Equal(t, filepath.Join(root, "third_party/lib/lib.go"), listed)
+	source, ok := sources.sourcePath(libPkg, position.Filename)
+	require.True(t, ok)
+	assert.Equal(t, listed, source)
+	assert.NotEqual(t, copied, source)
 }
 
 // GOPATH mode (GO111MODULE=off over a go.mod) loads every package without a
