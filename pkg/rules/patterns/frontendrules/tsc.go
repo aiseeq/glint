@@ -77,7 +77,7 @@ type TscRule struct {
 func NewTscRule() *TscRule {
 	r := &TscRule{
 		BaseRule: rules.NewBaseRule("tsc", "patterns",
-			"Type-checks TypeScript with tsc: by its tsconfig with the project's tsc, or strictly with the global tsc 7 when no tsconfig compiles the file. Type errors and a tsconfig without strict are high, a tsconfig tsc 7 does not build is medium. Set compiler: global to check every program with the global tsc 7.",
+			"Type-checks TypeScript with tsc: by its tsconfig with the project's tsc, or strictly with the global tsc 7 when no tsconfig compiles the file. Type errors, including global tsc 7 errors in compiler: global mode, and a tsconfig without strict are high; tsc 7 errors that the project tsc accepts are medium. Set compiler: global to check every program with the global tsc 7.",
 			core.SeverityHigh).DeclareSettings(rules.NewSettingSpec("compiler", "string", "project", "Compiler used for tsconfig programs: project or global.", "global")),
 		global: "tsc",
 	}
@@ -89,6 +89,11 @@ func NewTscRule() *TscRule {
 func (r *TscRule) Configure(settings map[string]any) error {
 	if err := r.BaseRule.Configure(settings); err != nil {
 		return err
+	}
+	if value, ok := r.GetSetting("compiler"); ok {
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("tsc compiler must be a string, got %T", value)
+		}
 	}
 	compiler := r.GetStringSetting("compiler", "project")
 	if compiler != "project" && compiler != "global" {

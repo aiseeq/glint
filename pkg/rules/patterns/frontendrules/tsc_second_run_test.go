@@ -26,7 +26,7 @@ for arg in "$@"; do
   if [ "$previous" = --tsBuildInfoFile ]; then printf '{}\n' > "$arg"; fi
   previous="$arg"
 done
-printf '%%s\n' %q
+printf '%%b\n' %q
 `, version, log, source)
 	require.NoError(t, os.WriteFile(compiler, []byte(script), 0o755))
 	return compiler, log
