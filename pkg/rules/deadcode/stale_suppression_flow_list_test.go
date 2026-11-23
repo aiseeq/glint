@@ -62,6 +62,7 @@ func TestStaleSuppressionFlowListNamesTheDeadException(t *testing.T) {
 	for _, tc := range []struct{ name, exceptions, want, not string }{
 		{"line", `[{file: a.go, line: 1, reason: silences a finding}, {file: a.go, line: 2, reason: stale}]`, `file "a.go", line 2 `, "line 1"},
 		{"pattern", `[{file: a.go, line: 1, reason: silences a finding}, {pattern: "never here", reason: stale}]`, `for pattern "never here" `, "line 1"},
+		{"negative line", `[{file: a.go, line: 1, reason: silences a finding}, {line: -1, reason: stale}]`, "for every finding ", "line 1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()

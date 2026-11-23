@@ -256,7 +256,6 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 	}
 	violations := make([]*core.Violation, 0, len(judged))
 	for _, exception := range judged {
-		// The configuration refuses an exception that names none of these.
 		var target []string
 		if exception.Exception.File != "" {
 			target = append(target, fmt.Sprintf("file %q", exception.Exception.File))
@@ -272,6 +271,11 @@ func (r *StaleSuppressionRule) staleExceptions(run StaleSuppressionRun, used map
 		}
 		if exception.Exception.Line > 0 {
 			target = append(target, fmt.Sprintf("line %d", exception.Exception.Line))
+		}
+		if len(target) == 0 {
+			// The configuration refuses an exception that names none of these,
+			// but a line of 0 or less passes it and narrows nothing.
+			target = append(target, "every finding")
 		}
 
 		v := r.CreateViolation(exception.place.File, exception.place.Line,
