@@ -23,10 +23,10 @@ func NewSpreadsheetRawDoubleParsedAsExactDecimalRule() *patternkit.TypedFuncRule
 		BaseRule: rules.NewBaseRule(
 			"spreadsheet-raw-double-parsed-as-exact-decimal",
 			"patterns",
-			"Detects raw spreadsheet values that reach exact decimal parsing without type checks or 15 digit normalization",
+			"Detects raw spreadsheet values that reach exact decimal parsing without type checks or normalization to 15 significant digits",
 			core.SeverityMedium,
 		),
-		Suggestion: "Check GetCellType for numeric cells and round with strconv.FormatFloat(..., 'G', 15, 64) before exact decimal parsing",
+		Suggestion: "Check GetCellType for numeric cells and normalize to at most 15 significant digits with strconv.FormatFloat(..., 'G', 15, 64) or decimal rounding before exact decimal parsing",
 	}
 	r.ForProject = func(decls map[*types.Func]patternkit.TypedFuncDecl) func(scope patternkit.FuncScope, fn *ast.FuncDecl) []patternkit.FuncFinding {
 		decimalPackages := make(map[*types.Package]bool)
@@ -531,7 +531,7 @@ func isExactDecimalStringParse(info *types.Info, call *ast.CallExpr) bool {
 }
 
 func hasSpreadsheetNormalization(info *types.Info, body *ast.BlockStmt) bool {
-	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+	return hasDecimalSignificantRounding(info, body) || helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
 		return isSpreadsheetCellTypeCall(info, call) || isSpreadsheetPrecisionFormat(info, call)
 	})
 }
@@ -539,7 +539,98 @@ func hasSpreadsheetNormalization(info *types.Info, body *ast.BlockStmt) bool {
 func hasSpreadsheetPrecisionFormat(info *types.Info, body *ast.BlockStmt) bool {
 	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
 		return isSpreadsheetPrecisionFormat(info, call)
+	}) || hasDecimalSignificantRounding(info, body)
+}
+
+func hasDecimalSignificantRounding(info *types.Info, body *ast.BlockStmt) bool {
+	hasRound := false
+	digitCounts := make(map[types.Object]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			fn := patternkit.StaticFunc(info, node)
+			if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == patternkit.ShopspringDecimalPath && fn.Name() == "Round" {
+				hasRound = true
+			}
+		case *ast.AssignStmt:
+			for i, rhs := range node.Rhs {
+				if i >= len(node.Lhs) || !containsDecimalNumDigits(info, rhs) {
+					continue
+				}
+				if id, ok := ast.Unparen(node.Lhs[i]).(*ast.Ident); ok {
+					if obj := info.Defs[id]; obj != nil {
+						digitCounts[obj] = true
+					} else if obj := info.Uses[id]; obj != nil {
+						digitCounts[obj] = true
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for i, rhs := range node.Values {
+				if i < len(node.Names) && containsDecimalNumDigits(info, rhs) {
+					if obj := info.Defs[node.Names[i]]; obj != nil {
+						digitCounts[obj] = true
+					}
+				}
+			}
+		}
+		return true
 	})
+	if !hasRound || len(digitCounts) == 0 {
+		return false
+	}
+	hasSignificantDigitLimit := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		binary, ok := n.(*ast.BinaryExpr)
+		if !ok {
+			return true
+		}
+		if containsDigitCountObject(info, binary.X, digitCounts) && isSignificantDigitLimit(info, binary.Y) ||
+			containsDigitCountObject(info, binary.Y, digitCounts) && isSignificantDigitLimit(info, binary.X) {
+			hasSignificantDigitLimit = true
+			return false
+		}
+		return true
+	})
+	return hasSignificantDigitLimit
+}
+
+func containsDecimalNumDigits(info *types.Info, expr ast.Expr) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return !found
+		}
+		fn := patternkit.StaticFunc(info, call)
+		if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == patternkit.ShopspringDecimalPath && fn.Name() == "NumDigits" {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+func containsDigitCountObject(info *types.Info, expr ast.Expr, digitCounts map[types.Object]bool) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		id, ok := n.(*ast.Ident)
+		if !ok {
+			return !found
+		}
+		obj := info.Uses[id]
+		if obj == nil {
+			obj = info.Defs[id]
+		}
+		found = digitCounts[obj]
+		return !found
+	})
+	return found
+}
+
+func isSignificantDigitLimit(info *types.Info, expr ast.Expr) bool {
+	value, ok := patternkit.ConstantInt(info, expr)
+	return ok && value > 0 && value <= 15
 }
 
 func reachesNormalizer(decl patternkit.TypedFuncDecl, direct map[*types.Func]bool, functions map[*types.Func]patternkit.TypedFuncDecl, depth int, seen map[*types.Func]bool) bool {

@@ -340,3 +340,110 @@ func Number(value string) (decimal.Decimal, error) {
 `,
 	}))
 }
+
+func TestSpreadsheetRawDoubleSignificantRoundingInCalledParserIsNormalization(t *testing.T) {
+	assert.Empty(t, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"strings"
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+const significantDigits = 15
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	_, _ = parseAmount(cells[0])
+}
+func parseAmount(text string) (decimal.Decimal, error) {
+	value, err := decimal.NewFromString(strings.TrimSpace(text))
+	if err != nil { return decimal.Decimal{}, err }
+	return trimDoubleNoise(value), nil
+}
+func trimDoubleNoise(value decimal.Decimal) decimal.Decimal {
+	digits := value.NumDigits()
+	if digits <= significantDigits { return value }
+	places := significantDigits - (int(value.Exponent()) + digits)
+	return value.Round(int32(places))
+}
+`,
+		"third_party/decimal/decimal.go": spreadsheetDecimalStub(),
+	}))
+}
+
+func TestSpreadsheetRawDoubleSignificantRoundingInReadFunctionIsNormalization(t *testing.T) {
+	assert.Empty(t, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+const significantDigits = 15
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	value, _ := decimal.NewFromString(cells[0])
+	digits := value.NumDigits()
+	if digits > significantDigits {
+		places := significantDigits - (int(value.Exponent()) + digits)
+		value = value.Round(int32(places))
+	}
+	_ = value
+}
+`,
+		"third_party/decimal/decimal.go": spreadsheetDecimalStub(),
+	}))
+}
+
+func TestSpreadsheetRawDoubleSignificantParsingWithoutRoundingStillFinds(t *testing.T) {
+	assert.Equal(t, []string{"sheet/read.go:7"}, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	_, _ = decimal.NewFromString(cells[0])
+}
+`,
+	}))
+}
+
+func TestSpreadsheetRawDoubleSignificantDecimalPlacesAreNotNormalization(t *testing.T) {
+	assert.Equal(t, []string{"sheet/read.go:7"}, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	value, _ := decimal.NewFromString(cells[0])
+	_ = value.Round(2)
+}
+`,
+	}))
+}
+
+func TestSpreadsheetRawDoubleSignificantDigitCountWithoutRoundingIsNotNormalization(t *testing.T) {
+	assert.Equal(t, []string{"sheet/read.go:7"}, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	value, _ := decimal.NewFromString(cells[0])
+	_ = value.NumDigits()
+}
+`,
+		"third_party/decimal/decimal.go": spreadsheetDecimalStub(),
+	}))
+}
+
+func spreadsheetDecimalStub() string {
+	return patterntest.DecimalStub + `
+func (d Decimal) NumDigits() int { return 1 }
+func (d Decimal) Exponent() int32 { return 0 }
+`
+}
