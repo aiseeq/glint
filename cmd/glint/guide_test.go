@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -113,45 +114,45 @@ func TestGuideReferencesCLIAndRegisteredRules(t *testing.T) {
 	}
 }
 
-// Every command the next steps after a report with findings name runs: a
-// guide section named with hyphens is found, and the level advice says what
-// the Finding section of the guide says.
+// The next steps after a report with findings repeat the level advice of the
+// Finding section of the guide and name glint explain and the guide sections
+// for a wrong finding and an intentional design; every command they name runs.
 func TestFindingNextStepsCommandsRun(t *testing.T) {
-	command := regexp.MustCompile(`glint ([a-z]+)(?: ([a-z-]+))?`)
-	var guides int
-	for _, line := range output.FindingNextSteps {
-		match := command.FindStringSubmatch(line)
-		if match == nil {
-			continue
-		}
-		found, args, err := rootCmd.Find(strings.Fields(strings.TrimPrefix(match[0], "glint ")))
-		if err != nil || found.Name() != match[1] {
-			t.Fatalf("%q: command not found: %v %v", line, found, err)
-		}
-		if found != guideCmd {
-			continue
-		}
-		guides++
+	want := []string{
+		"What to do next:",
+		"  Critical, high: handle in your task.",
+		"  Medium, low: resolve before the ticket is done; if unfinished, record the remaining work on an open ticket.",
+		"  Rule details: glint explain <rule>",
+		"  Finding is wrong: glint guide false-positive",
+		"  Design is intentional: glint guide exceptions",
+	}
+	if !slices.Equal(output.FindingNextSteps, want) {
+		t.Fatalf("next steps:\n%s\nwant:\n%s", strings.Join(output.FindingNextSteps, "\n"), strings.Join(want, "\n"))
+	}
+	guide := func(args ...string) string {
+		t.Helper()
 		var out bytes.Buffer
 		guideCmd.SetOut(&out)
+		defer guideCmd.SetOut(nil)
 		if err := runGuide(guideCmd, args); err != nil {
-			t.Fatalf("%q: %v", line, err)
+			t.Fatalf("glint guide %s: %v", strings.Join(args, " "), err)
 		}
-		if !strings.HasPrefix(out.String(), "## ") {
-			t.Fatalf("%q printed no section: %q", line, out.String())
+		return out.String()
+	}
+	// The advice says what the Finding section says, in its words.
+	finding := guide("finding")
+	for _, advice := range []string{"Handle high and critical findings in your task", "resolve lower findings, including Low, before the ticket is done", "If unfinished, record the remaining work on an open ticket"} {
+		if !strings.Contains(finding, advice) {
+			t.Fatalf("the Finding section no longer says %q: update output.FindingNextSteps and this test with it", advice)
 		}
 	}
-	if guides != 2 {
-		t.Fatalf("next steps name %d guide sections, want 2", guides)
+	// The commands run: explain is a command, the guide sections print.
+	if found, _, err := rootCmd.Find([]string{"explain"}); err != nil || found.Name() != "explain" {
+		t.Fatalf("glint explain is not a command: %v %v", found, err)
 	}
-	var finding bytes.Buffer
-	guideCmd.SetOut(&finding)
-	if err := runGuide(guideCmd, []string{"finding"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, advice := range []string{"Handle high and critical findings in your task", "resolve lower findings, including Low, before the ticket is done", "record the remaining work on an open ticket"} {
-		if !strings.Contains(finding.String(), advice) {
-			t.Fatalf("the Finding section no longer says %q: update output.FindingNextSteps with it", advice)
+	for section, heading := range map[string]string{"false-positive": "## False positive\n", "exceptions": "## Exceptions\n"} {
+		if out := guide(section); !strings.HasPrefix(out, heading) {
+			t.Fatalf("glint guide %s printed %q", section, out)
 		}
 	}
 }

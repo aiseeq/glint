@@ -232,8 +232,8 @@ func (c *ConsoleOutput) printSummary(out *ReportWriter, violations core.Violatio
 // for a finding that is wrong or a design that is intentional.
 var FindingNextSteps = []string{
 	"What to do next:",
-	"  Critical, high: fix in this task.",
-	"  Medium, low: fix before the ticket is done, or record the remaining work on an open ticket.",
+	"  Critical, high: handle in your task.",
+	"  Medium, low: resolve before the ticket is done; if unfinished, record the remaining work on an open ticket.",
 	"  Rule details: glint explain <rule>",
 	"  Finding is wrong: glint guide false-positive",
 	"  Design is intentional: glint guide exceptions",
