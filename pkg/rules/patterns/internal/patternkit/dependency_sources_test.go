@@ -114,8 +114,14 @@ func TestDependencySourcesAbsolutePositionNamesTheFile(t *testing.T) {
 	copied := filepath.Join(t.TempDir(), "lib.go")
 	require.NoError(t, os.WriteFile(copied, []byte("package lib\n\nfunc Ready() bool { return false }\n"), 0o600))
 	sources = NewDependencySources(project)
-	sources.packageFiles[libPkg]["lib.go"] = copied
-	assert.Nil(t, sources.FuncDecl(ready))
+	assert.NotEqual(t, filepath.Clean(copied), sources.packageFiles[libPkg]["lib.go"])
+	if filepath.IsAbs(project.FileSet.PositionFor(ready.Pos(), false).Filename) {
+		sources.packageFiles[libPkg]["lib.go"] = copied
+		assert.Nil(t, sources.FuncDecl(ready))
+	} else {
+		_, ok := sources.sourcePath(libPkg, copied)
+		assert.False(t, ok, "an absolute compiler path must name the listed file exactly")
+	}
 }
 
 // GOPATH mode (GO111MODULE=off over a go.mod) loads every package without a

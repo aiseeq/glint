@@ -231,6 +231,127 @@ func (ctx *GoProjectContext) FileForPosition(pos token.Pos) (*FileContext, error
 	return fileCtx, nil
 }
 
+// FileForObject resolves an object's declaration to a file in this project.
+// Export data can retain a module-relative filename under -trimpath, in which
+// case the position cannot be joined to ProjectRoot. Match that object against
+// declarations in the loaded project packages instead.
+func (ctx *GoProjectContext) FileForObject(object types.Object) (*FileContext, error) {
+	file, _, err := ctx.DeclarationForObject(object)
+	return file, err
+}
+
+// DeclarationForObject resolves an object's declaration to its project file
+// and the corresponding object from that file's type information.
+func (ctx *GoProjectContext) DeclarationForObject(object types.Object) (*FileContext, types.Object, error) {
+	if ctx == nil || ctx.FileSet == nil || object == nil {
+		return nil, nil, errors.New("map Go object: project or object is nil")
+	}
+	position := ctx.FileSet.PositionFor(object.Pos(), false)
+	if position.IsValid() && filepath.IsAbs(position.Filename) {
+		if file, err := ctx.File(position.Filename); err == nil {
+			return file, object, nil
+		}
+	}
+	want := objectKey(object)
+	for _, pkg := range ctx.Packages {
+		if pkg == nil || pkg.Package == nil || pkg.Package.TypesInfo == nil || pkg.Package.Types == nil || pkg.Package.Types.Path() != want.pkgPath {
+			continue
+		}
+		if field, ok := object.(*types.Var); ok && field.IsField() {
+			want.owner = fieldOwnerName(pkg.Package, field)
+			if want.owner == "" {
+				continue
+			}
+		}
+		for _, declared := range pkg.Package.TypesInfo.Defs {
+			if declared == nil {
+				continue
+			}
+			candidate := objectKey(declared)
+			if field, ok := declared.(*types.Var); ok && field.IsField() {
+				candidate.owner = fieldOwnerName(pkg.Package, field)
+			}
+			if candidate != want {
+				continue
+			}
+			file, err := ctx.FileForPosition(declared.Pos())
+			if err == nil {
+				return file, declared, nil
+			}
+		}
+	}
+	return nil, nil, fmt.Errorf("map Go object %s.%s: declaration is not in project files", want.pkgPath, want.name)
+}
+
+func fieldOwnerName(pkg *packages.Package, field *types.Var) string {
+	if pkg == nil || pkg.Types == nil || pkg.Fset == nil || field == nil {
+		return ""
+	}
+	position := pkg.Fset.PositionFor(field.Pos(), false)
+	owner := ""
+	for _, name := range pkg.Types.Scope().Names() {
+		typeName, ok := pkg.Types.Scope().Lookup(name).(*types.TypeName)
+		if !ok {
+			continue
+		}
+		named, ok := typeName.Type().(*types.Named)
+		if !ok {
+			continue
+		}
+		structure, ok := named.Underlying().(*types.Struct)
+		if !ok {
+			continue
+		}
+		for candidate := range structure.Fields() {
+			if candidate.Name() != field.Name() || !types.Identical(candidate.Type(), field.Type()) {
+				continue
+			}
+			candidatePosition := pkg.Fset.PositionFor(candidate.Pos(), false)
+			if position.Line != 0 && candidatePosition.Line != position.Line {
+				continue
+			}
+			if owner != "" && owner != name {
+				return ""
+			}
+			owner = name
+		}
+	}
+	return owner
+}
+
+type goObjectKey struct{ pkgPath, name, kind, owner string }
+
+func objectKey(object types.Object) goObjectKey {
+	key := goObjectKey{name: object.Name()}
+	if object.Pkg() != nil {
+		key.pkgPath = object.Pkg().Path()
+	}
+	switch object.(type) {
+	case *types.Const:
+		key.kind = "const"
+	case *types.Func:
+		key.kind = "func"
+		if sig, ok := object.Type().(*types.Signature); ok && sig.Recv() != nil {
+			key.owner = receiverName(sig.Recv().Type())
+		}
+	case *types.TypeName:
+		key.kind = "type"
+	case *types.Var:
+		key.kind = "var"
+	}
+	return key
+}
+
+func receiverName(typ types.Type) string {
+	if ptr, ok := typ.(*types.Pointer); ok {
+		typ = ptr.Elem()
+	}
+	if named, ok := typ.(*types.Named); ok {
+		return named.Obj().Name()
+	}
+	return ""
+}
+
 type parsedProjectFile struct {
 	file *ast.File
 	err  error
@@ -501,12 +622,13 @@ func (loader *goProjectLoader) loadPackages(moduleDirs []string, overlay map[str
 	var loaded []*packages.Package
 	for _, moduleDir := range moduleDirs {
 		modulePackages, err := list(&packages.Config{
-			Mode:      packages.LoadSyntax | packages.NeedModule,
-			Dir:       moduleDir,
-			Fset:      loader.fset,
-			ParseFile: loader.parseFile,
-			Tests:     false,
-			Overlay:   overlay,
+			Mode:       packages.LoadSyntax | packages.NeedModule,
+			Dir:        moduleDir,
+			Fset:       loader.fset,
+			ParseFile:  loader.parseFile,
+			Tests:      false,
+			Overlay:    overlay,
+			BuildFlags: []string{"-trimpath"},
 		}, "./...")
 		if err != nil {
 			return nil, fmt.Errorf("load Go packages in module %q: %w", moduleDir, err)

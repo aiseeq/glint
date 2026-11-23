@@ -352,7 +352,7 @@ func (a *scanAnalysis) reportUnmapped(st *types.Struct, elem types.Type, column 
 		if !field.Exported() || reflect.StructTag(st.Tag(i)).Get("db") != "" || patternkit.SnakeCase(field.Name()) != column {
 			continue
 		}
-		fieldCtx, err := a.project.FileForPosition(field.Pos())
+		fieldCtx, err := a.project.FileForObject(field)
 		if err == nil {
 			a.report(fieldCtx, fieldCtx.LineForPos(field.Pos()), fmt.Sprintf(
 				"sqlx reads %s.%s as %s, the query returns %s — the read fails with missing destination name",

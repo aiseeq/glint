@@ -3,10 +3,12 @@ package httprules
 import (
 	"testing"
 
+	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
 
 // The project names every JSON key in lowerCamel; one handler decodes its
@@ -105,4 +107,27 @@ func fetchQuote(client *http.Client) (*ProviderQuote, error) {
 	}))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"api/handlers.go:11", "api/handlers.go:12"}, patterntest.FoundLines(violations))
+}
+
+func TestRequestJSONTagCase_TrimpathNestedReplaceModule(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"go.mod":        "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod": "module example.com/shared\n\ngo 1.24\n",
+		"shared/request.go": "package shared\n\ntype Input struct {\n" +
+			"StrategyID string `json:\"StrategyID\"`\n" +
+			"A string `json:\"a\"`\nB string `json:\"b\"`\nC string `json:\"c\"`\nD string `json:\"d\"`\n" +
+			"E string `json:\"e\"`\nF string `json:\"f\"`\nG string `json:\"g\"`\nH string `json:\"h\"`\nI string `json:\"i\"`\n}\n",
+		"handler.go": "package app\n\nimport (\"encoding/json\"; \"net/http\"; \"example.com/shared\")\n\n" +
+			"func Handle(w http.ResponseWriter, r *http.Request) { var input shared.Input; _ = json.NewDecoder(r.Body).Decode(&input) }\n",
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+		cfg.BuildFlags = []string{"-trimpath"}
+		return packages.Load(cfg, patterns...)
+	}})
+	require.NoError(t, err)
+	violations, err := NewRequestJSONTagCaseRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "shared/request.go", violations[0].File)
+	assert.Equal(t, 4, violations[0].Line)
 }

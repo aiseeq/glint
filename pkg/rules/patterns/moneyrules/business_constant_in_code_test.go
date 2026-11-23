@@ -3,11 +3,13 @@ package moneyrules
 import (
 	"go/constant"
 	"go/token"
+	"golang.org/x/tools/go/packages"
 	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,6 +20,25 @@ func runBusinessConstantRule(t *testing.T, files map[string]string) []*core.Viol
 	violations, err := NewBusinessConstantInCodeRule().AnalyzeGoProject(project)
 	require.NoError(t, err)
 	return violations
+}
+
+func TestBusinessConstantInCode_TrimpathNestedReplaceModule(t *testing.T) {
+	root, contexts := rulestest.Module(t, map[string]string{
+		"go.mod":           "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod":    "module example.com/shared\n\ngo 1.24\n",
+		"shared/limits.go": "package shared\n\nconst MaxDays = 5\n",
+		"app.go":           "package app\n\nimport (\"time\"; \"example.com/shared\")\n\nfunc F(now time.Time) time.Time { return now.AddDate(0, 0, shared.MaxDays) }\n",
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: func(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
+		cfg.BuildFlags = []string{"-trimpath"}
+		return packages.Load(cfg, patterns...)
+	}})
+	require.NoError(t, err)
+	violations, err := NewBusinessConstantInCodeRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "shared/limits.go", violations[0].File)
+	assert.Equal(t, 3, violations[0].Line)
 }
 
 func TestBusinessConstantInCode_CalendarArithmetic(t *testing.T) {

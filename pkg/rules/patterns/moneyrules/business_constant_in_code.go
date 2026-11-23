@@ -113,11 +113,12 @@ func (r *BusinessConstantInCodeRule) AnalyzeGoProject(ctx *core.GoProjectContext
 	var violations []*core.Violation
 	for obj, use := range index.uses {
 		declared := ctx.FileSet.Position(obj.Pos())
-		if !analyzed[declared.Filename] || index.configurable[obj] {
+		declFile, err := ctx.FileForObject(obj)
+		if err != nil || !analyzed[declFile.Path] || index.configurable[obj] {
 			continue
 		}
 		at := ctx.FileSet.Position(use.pos)
-		v := r.CreateViolation(declared.Filename, declared.Line, fmt.Sprintf(
+		v := r.CreateViolation(declFile.RelPath, declared.Line, fmt.Sprintf(
 			"Constant %s = %s is a business rule: it drives %s (%s:%d) — the value belongs in configuration, not in code",
 			obj.Name(), constantText(obj.Val()), use.kind, shortPath(ctx, at.Filename), at.Line))
 		v.WithSuggestion("Move the value into the configuration with a validated default, so it can change per environment without a release")

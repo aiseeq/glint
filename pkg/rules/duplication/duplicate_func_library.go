@@ -1130,7 +1130,7 @@ func loadPeerFunctionKeys(dir string) (libraryCacheEntry, error) {
 
 func loadFunctionKeys(dir string, includeUnexported bool) (libraryCacheEntry, error) {
 	fset := token.NewFileSet()
-	pkgs, err := packages.Load(&packages.Config{Mode: packages.LoadSyntax | packages.NeedModule, Dir: dir, Fset: fset, Tests: false}, "./...")
+	pkgs, err := packages.Load(&packages.Config{Mode: packages.LoadSyntax | packages.NeedModule, Dir: dir, Fset: fset, Tests: false, BuildFlags: []string{"-trimpath"}}, "./...")
 	if err != nil {
 		return libraryCacheEntry{}, fmt.Errorf("load packages from %s: %w", dir, err)
 	}

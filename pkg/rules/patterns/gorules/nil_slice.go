@@ -247,22 +247,26 @@ func (r *NilSliceRule) isStatedSlice(ctx *core.FileContext, info *types.Info, pr
 	if _, isSlice := obj.Type().Underlying().(*types.Slice); !isSlice {
 		return false
 	}
-	file := declarationFile(ctx, project, obj.Pos())
-	return file != nil && declarationStatesSlice(file, obj.Pos())
+	file, declaration := declarationFile(ctx, project, obj)
+	return file != nil && declaration != nil && declarationStatesSlice(file, declaration.Pos())
 }
 
 // declarationFile returns the syntax of the file that holds pos: the analyzed
 // file or another file of the project; nil when pos lies outside the analyzed
 // files, where the declaration is unknown.
-func declarationFile(ctx *core.FileContext, project *core.GoProjectContext, pos token.Pos) *ast.File {
+func declarationFile(ctx *core.FileContext, project *core.GoProjectContext, object types.Object) (*ast.File, types.Object) {
+	if object == nil {
+		return nil, nil
+	}
+	pos := object.Pos()
 	file := ctx.GoAST
 	if pos >= file.FileStart && pos < file.FileEnd {
-		return file
+		return file, object
 	}
-	if declCtx, err := project.FileForPosition(pos); err == nil {
-		return declCtx.GoAST
+	if declCtx, declaration, err := project.DeclarationForObject(object); err == nil {
+		return declCtx.GoAST, declaration
 	}
-	return nil
+	return nil, nil
 }
 
 // nilMeansUnset reports a variable declared without a value and set, on some
@@ -274,11 +278,11 @@ func (r *NilSliceRule) nilMeansUnset(ctx *core.FileContext, info *types.Info, pr
 	if obj == nil {
 		return false
 	}
-	file := declarationFile(ctx, project, obj.Pos())
-	if file == nil {
+	file, declaration := declarationFile(ctx, project, obj)
+	if file == nil || declaration == nil {
 		return false
 	}
-	path, _ := astutil.PathEnclosingInterval(file, obj.Pos(), obj.Pos())
+	path, _ := astutil.PathEnclosingInterval(file, declaration.Pos(), declaration.Pos())
 	if len(path) < 2 {
 		return false
 	}

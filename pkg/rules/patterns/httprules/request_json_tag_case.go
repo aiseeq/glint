@@ -87,7 +87,7 @@ func (r *RequestJSONTagCaseRule) AnalyzeGoProject(ctx *core.GoProjectContext) ([
 					continue
 				}
 				reported[field.Pos()] = true
-				file, err := ctx.FileForPosition(field.Pos())
+				file, err := ctx.FileForObject(field)
 				if err != nil {
 					return nil, fmt.Errorf("request json tag case: %w", err)
 				}
