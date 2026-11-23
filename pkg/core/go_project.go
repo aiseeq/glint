@@ -242,8 +242,22 @@ func (ctx *GoProjectContext) FileForPosition(pos token.Pos) (*FileContext, error
 // resolved: a cgo package type-checks files the go command generated, so the
 // declaration need not be found in the file, see DeclarationForObject.
 func (ctx *GoProjectContext) FileForObject(object types.Object) (*FileContext, error) {
-	file, _, err := ctx.fileForObject(object)
+	file, _, err := ctx.fileForObject(object, false)
 	return file, err
+}
+
+// DeclaredAt resolves the position an object is declared at as the source
+// tells it, //line directives applied - the place FileSet.Position names - to
+// its project file and line: the file and the line come from one position. A
+// directive to a file outside the project, as a grammar the file was
+// generated from, resolves to no file. An object of export data is resolved
+// as by FileForObject: its position holds no directive.
+func (ctx *GoProjectContext) DeclaredAt(object types.Object) (*FileContext, int, error) {
+	file, _, err := ctx.fileForObject(object, true)
+	if err != nil {
+		return nil, 0, err
+	}
+	return file, ctx.FileSet.PositionFor(object.Pos(), true).Line, nil
 }
 
 // DeclarationForObject resolves an object to its project file and to the
@@ -256,7 +270,7 @@ func (ctx *GoProjectContext) FileForObject(object types.Object) (*FileContext, e
 // generated files - an error is returned, as for an object outside the
 // project.
 func (ctx *GoProjectContext) DeclarationForObject(object types.Object) (*FileContext, types.Object, error) {
-	file, trimmed, err := ctx.fileForObject(object)
+	file, trimmed, err := ctx.fileForObject(object, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -290,12 +304,14 @@ type trimmedObject struct {
 	filename string
 }
 
-func (ctx *GoProjectContext) fileForObject(object types.Object) (*FileContext, trimmedObject, error) {
+// fileForObject resolves the file of the position of an object, with //line
+// directives applied when adjusted is set.
+func (ctx *GoProjectContext) fileForObject(object types.Object, adjusted bool) (*FileContext, trimmedObject, error) {
 	if ctx == nil || ctx.FileSet == nil || object == nil {
 		return nil, trimmedObject{}, errors.New("map Go object: project or object is nil")
 	}
 	pkgPath := objectPkgPath(object)
-	position := ctx.FileSet.PositionFor(object.Pos(), false)
+	position := ctx.FileSet.PositionFor(object.Pos(), adjusted)
 	if !position.IsValid() || position.Filename == "" {
 		return nil, trimmedObject{}, fmt.Errorf("map Go object %s.%s: invalid or unknown position", pkgPath, object.Name())
 	}

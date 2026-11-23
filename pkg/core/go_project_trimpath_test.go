@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/types"
 	"maps"
@@ -303,4 +304,88 @@ func Seven() int { return int(C.seven()) }
 	assert.Equal(t, "shared/request.go", file.RelPath)
 	_, _, err = project.DeclarationForObject(field)
 	require.ErrorContains(t, err, "no declaration at that source position")
+}
+
+// A //line directive tells another file and line for a declaration.
+// FileForObject names the file that holds the declaration, as FileForPosition
+// does; DeclaredAt names the file and the line of the directive, both from one
+// position, and a directive to a file outside the project resolves to no file.
+// Export data, as go/packages reads it, keeps the file of the directive and
+// the line in the source file.
+func TestDeclaredAtLineDirective(t *testing.T) {
+	root := t.TempDir()
+	generated := func(pkg string) string {
+		return "package " + pkg + "\n\n//line limits.y:40\nconst MaxDays = 5\n\n//line /elsewhere/rules.y:7\nconst GraceDays = 3\n\n//line " +
+			filepath.Join(root, pkg, "other.go") + ":3\nconst Spare = 2\n"
+	}
+	contexts := writeProjectIn(t, root, map[string]string{
+		"go.mod":          "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"limits/gen.go":   generated("limits"),
+		"limits/other.go": "package limits\n",
+		"shared/go.mod":   "module example.com/shared\n\ngo 1.24\n",
+		"shared/gen.go":   generated("shared"),
+		"shared/other.go": "package shared\n",
+		"app.go":          "package app\n\nimport (\"example.com/app/limits\"; \"example.com/shared\")\n\nvar Sum = shared.MaxDays + shared.GraceDays + shared.Spare + limits.Spare\n",
+	})
+	project, err := LoadGoProject(root, contexts, GoProjectOptions{})
+	require.NoError(t, err)
+	limits := projectPackage(t, project, "example.com/app/limits").Types.Scope()
+	used := usedObjects(projectPackage(t, project, "example.com/app"))
+	for name, want := range map[string]struct {
+		object   types.Object
+		file     string
+		declared string
+	}{
+		"limits.MaxDays":   {limits.Lookup("MaxDays"), "limits/gen.go", ""},
+		"limits.GraceDays": {limits.Lookup("GraceDays"), "limits/gen.go", ""},
+		"limits.Spare":     {limits.Lookup("Spare"), "limits/gen.go", "limits/other.go:3"},
+		"shared.MaxDays":   {used["shared.MaxDays"][0], "", ""},
+		"shared.GraceDays": {used["shared.GraceDays"][0], "", ""},
+		"shared.Spare":     {used["shared.Spare"][0], "shared/other.go", "shared/other.go:10"},
+	} {
+		file, err := project.FileForObject(want.object)
+		if want.file == "" {
+			require.Error(t, err, name)
+		} else {
+			require.NoError(t, err, name)
+			assert.Equal(t, want.file, file.RelPath, name)
+		}
+		file, line, err := project.DeclaredAt(want.object)
+		if want.declared == "" {
+			require.Error(t, err, name)
+			continue
+		}
+		require.NoError(t, err, name)
+		assert.Equal(t, want.declared, fmt.Sprintf("%s:%d", file.RelPath, line), name)
+	}
+}
+
+// Fields of one name on one line whose types differ only by the path of
+// their package, two packages of one name, are two declarations.
+func TestDeclarationForObjectNamesakesOfOnePackageName(t *testing.T) {
+	root, contexts := writeNestedTrimpathProject(t, map[string]string{
+		"go.mod":                 "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod":          "module example.com/shared\n\ngo 1.24\n",
+		"shared/left/item/i.go":  "package item\n\ntype Item struct{}\n",
+		"shared/right/item/i.go": "package item\n\ntype Item struct{}\n",
+		"shared/names.go": `package shared
+
+import (
+	"example.com/shared/left/item"
+	other "example.com/shared/right/item"
+)
+
+type Left struct{ Items []item.Item }; type Right struct{ Items []other.Item }
+`,
+		"app.go": "package app\n\nimport \"example.com/shared\"\n\nfunc Use(left shared.Left, right shared.Right) bool { return left.Items == nil && right.Items == nil }\n",
+	})
+	project, err := LoadGoProject(root, contexts, GoProjectOptions{})
+	require.NoError(t, err)
+	scope := projectPackage(t, project, "example.com/shared").Types.Scope()
+	used := usedObjects(projectPackage(t, project, "example.com/app"))
+	for selector, typeName := range map[string]string{"left.Items": "Left", "right.Items": "Right"} {
+		_, declaration, err := project.DeclarationForObject(used[selector][0])
+		require.NoError(t, err, selector)
+		assert.Same(t, scope.Lookup(typeName).Type().Underlying().(*types.Struct).Field(0), declaration, selector)
+	}
 }

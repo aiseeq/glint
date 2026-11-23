@@ -1,9 +1,12 @@
 package moneyrules
 
 import (
+	"fmt"
 	"go/constant"
 	"go/token"
+	"go/types"
 	"golang.org/x/tools/go/packages"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,6 +53,82 @@ func identity[MaxDays any](value MaxDays) MaxDays { return value }
 		assert.Equal(t, "shared/limits.go", violations[0].File)
 		assert.Equal(t, 3, violations[0].Line)
 	}
+}
+
+// A //line directive moves the declaration of a constant to another file and
+// line: the finding names the position the directive gives, file and line
+// together, and a directive to a file outside the analyzed ones - a grammar,
+// a file outside the project - reports nothing, in the module's own syntax
+// as in the export data of a nested module. Export data, as go/packages
+// reads it, keeps the file of the directive and the line in the source file,
+// so the constant of the nested module is reported at line 10, as it is
+// without -trimpath.
+func TestBusinessConstantInCode_LineDirective(t *testing.T) {
+	root := t.TempDir()
+	contexts := rulestest.ModuleIn(t, root, map[string]string{
+		"go.mod":          "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"limits/other.go": "package limits\n\n// The declaration of Spare is told to be here.\n",
+		"limits/gen.go": "package limits\n\n//line limits.y:40\nconst MaxDays = 5\n\n//line /elsewhere/rules.y:7\nconst GraceDays = 3\n\n//line " +
+			filepath.Join(root, "limits", "other.go") + ":3\nconst Spare = 2\n",
+		"shared/go.mod":   "module example.com/shared\n\ngo 1.24\n",
+		"shared/other.go": "package shared\n\n// The declaration of Spare is told to be here.\n",
+		"shared/gen.go": "package shared\n\n//line limits.y:40\nconst MaxDays = 5\n\n//line /elsewhere/rules.y:7\nconst GraceDays = 3\n\n//line " +
+			filepath.Join(root, "shared", "other.go") + ":3\nconst Spare = 2\n",
+		"app.go": `package app
+
+import (
+	"time"
+
+	"example.com/app/limits"
+	"example.com/shared"
+)
+
+func Due(now time.Time) time.Time {
+	now = now.AddDate(0, 0, limits.MaxDays).AddDate(0, 0, limits.GraceDays).AddDate(0, 0, limits.Spare)
+	return now.AddDate(0, 0, shared.MaxDays).AddDate(0, 0, shared.GraceDays).AddDate(0, 0, shared.Spare)
+}
+`,
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	require.NoError(t, err)
+	violations, err := NewBusinessConstantInCodeRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	var got []string
+	for _, v := range violations {
+		got = append(got, fmt.Sprintf("%s:%d %s", v.File, v.Line, v.Context["constant"]))
+	}
+	assert.Equal(t, []string{"limits/other.go:3 Spare", "shared/other.go:10 Spare"}, got)
+}
+
+// A constant of a cgo package of a nested module is declared, as the export
+// data tells, in the cgo source, which the run analyzes as no package file:
+// the go command type-checks the files it generated from it. Nothing is
+// reported there, as without -trimpath.
+func TestBusinessConstantInCode_CgoNestedModuleNotAnalyzed(t *testing.T) {
+	rulestest.RequireCgo(t)
+	root, contexts := rulestest.Module(t, map[string]string{
+		"go.mod":        "module example.com/app\n\ngo 1.24\n\nrequire example.com/shared v0.0.0\nreplace example.com/shared => ./shared\n",
+		"shared/go.mod": "module example.com/shared\n\ngo 1.24\n",
+		"shared/cgo.go": "package shared\n\n/*\nstatic int seven(void) { return 7; }\n*/\nimport \"C\"\n\nconst CgoDays = 11\n\nfunc Seven() int { return int(C.seven()) }\n",
+		"app.go":        "package app\n\nimport (\"time\"; \"example.com/shared\")\n\nfunc F(now time.Time) time.Time { return now.AddDate(0, 0, shared.CgoDays) }\n",
+	})
+	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
+	require.NoError(t, err)
+	var cgoDays types.Object
+	for _, pkg := range project.Packages {
+		for _, imported := range pkg.Package.Types.Imports() {
+			if imported.Path() == "example.com/shared" {
+				cgoDays = imported.Scope().Lookup("CgoDays")
+			}
+		}
+	}
+	require.NotNil(t, cgoDays)
+	declFile, err := project.FileForObject(cgoDays)
+	require.NoError(t, err, "the cgo source is a project file: only the analyzed set leaves it out")
+	assert.Equal(t, "shared/cgo.go", declFile.RelPath)
+	violations, err := NewBusinessConstantInCodeRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	assert.Empty(t, violations)
 }
 
 func TestBusinessConstantInCode_CalendarArithmetic(t *testing.T) {

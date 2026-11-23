@@ -22,6 +22,13 @@ import (
 func writeNestedTrimpathProject(t *testing.T, files map[string]string) (string, []*FileContext) {
 	t.Helper()
 	root := t.TempDir()
+	return root, writeProjectIn(t, root, files)
+}
+
+// writeProjectIn is writeNestedTrimpathProject in the given directory, for a
+// project whose sources name its own absolute path.
+func writeProjectIn(t *testing.T, root string, files map[string]string) []*FileContext {
+	t.Helper()
 	var contexts []*FileContext
 	for name, content := range files {
 		path := filepath.Join(root, name)
@@ -34,7 +41,7 @@ func writeNestedTrimpathProject(t *testing.T, files map[string]string) (string, 
 		require.NoError(t, err)
 		contexts = append(contexts, file)
 	}
-	return root, contexts
+	return contexts
 }
 
 func loadNestedTrimpathProject(t *testing.T, root string, files []*FileContext) *GoProjectContext {
