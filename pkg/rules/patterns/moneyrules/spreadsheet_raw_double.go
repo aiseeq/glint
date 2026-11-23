@@ -531,7 +531,7 @@ func isExactDecimalStringParse(info *types.Info, call *ast.CallExpr) bool {
 }
 
 func hasSpreadsheetNormalization(info *types.Info, body *ast.BlockStmt) bool {
-	return hasDecimalSignificantRounding(info, body) || helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
+	return helpers.ContainsNode[*ast.CallExpr](body, func(call *ast.CallExpr) bool {
 		return isSpreadsheetCellTypeCall(info, call) || isSpreadsheetPrecisionFormat(info, call)
 	})
 }
@@ -543,94 +543,124 @@ func hasSpreadsheetPrecisionFormat(info *types.Info, body *ast.BlockStmt) bool {
 }
 
 func hasDecimalSignificantRounding(info *types.Info, body *ast.BlockStmt) bool {
-	hasRound := false
-	digitCounts := make(map[types.Object]bool)
+	var rounds []*ast.CallExpr
+	digitValues := make(map[types.Object]bool)
+	precisionValues := make(map[types.Object]bool)
 	ast.Inspect(body, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.CallExpr:
-			fn := patternkit.StaticFunc(info, node)
-			if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == patternkit.ShopspringDecimalPath && fn.Name() == "Round" {
-				hasRound = true
-			}
-		case *ast.AssignStmt:
-			for i, rhs := range node.Rhs {
-				if i >= len(node.Lhs) || !containsDecimalNumDigits(info, rhs) {
-					continue
-				}
-				if id, ok := ast.Unparen(node.Lhs[i]).(*ast.Ident); ok {
-					if obj := info.Defs[id]; obj != nil {
-						digitCounts[obj] = true
-					} else if obj := info.Uses[id]; obj != nil {
-						digitCounts[obj] = true
-					}
-				}
-			}
-		case *ast.ValueSpec:
-			for i, rhs := range node.Values {
-				if i < len(node.Names) && containsDecimalNumDigits(info, rhs) {
-					if obj := info.Defs[node.Names[i]]; obj != nil {
-						digitCounts[obj] = true
-					}
-				}
-			}
+		call, ok := n.(*ast.CallExpr)
+		if ok && isDecimalRoundingCall(info, call) {
+			rounds = append(rounds, call)
 		}
 		return true
 	})
-	if !hasRound || len(digitCounts) == 0 {
+	if len(rounds) == 0 {
 		return false
 	}
-	hasSignificantDigitLimit := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		binary, ok := n.(*ast.BinaryExpr)
-		if !ok {
+	for changed := true; changed; {
+		changed = false
+		assign := func(lhs ast.Expr, rhs ast.Expr) {
+			id, ok := ast.Unparen(lhs).(*ast.Ident)
+			if !ok {
+				return
+			}
+			obj := info.Defs[id]
+			if obj == nil {
+				obj = info.Uses[id]
+			}
+			if obj == nil {
+				return
+			}
+			props := decimalSignificantExpr(info, rhs, digitValues, precisionValues)
+			if props.digits && !digitValues[obj] {
+				digitValues[obj], changed = true, true
+			}
+			if props.precision && !precisionValues[obj] {
+				precisionValues[obj], changed = true, true
+			}
+		}
+		ast.Inspect(body, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.AssignStmt:
+				for i, rhs := range node.Rhs {
+					if i < len(node.Lhs) {
+						assign(node.Lhs[i], rhs)
+					}
+				}
+			case *ast.ValueSpec:
+				for i, rhs := range node.Values {
+					if i < len(node.Names) {
+						assign(node.Names[i], rhs)
+					}
+				}
+			}
 			return true
+		})
+	}
+	for _, call := range rounds {
+		for _, arg := range call.Args {
+			props := decimalSignificantExpr(info, arg, digitValues, precisionValues)
+			if props.digits && props.precision {
+				return true
+			}
 		}
-		if containsDigitCountObject(info, binary.X, digitCounts) && isSignificantDigitLimit(info, binary.Y) ||
-			containsDigitCountObject(info, binary.Y, digitCounts) && isSignificantDigitLimit(info, binary.X) {
-			hasSignificantDigitLimit = true
-			return false
-		}
-		return true
-	})
-	return hasSignificantDigitLimit
+	}
+	return false
 }
 
-func containsDecimalNumDigits(info *types.Info, expr ast.Expr) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return !found
-		}
-		fn := patternkit.StaticFunc(info, call)
-		if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == patternkit.ShopspringDecimalPath && fn.Name() == "NumDigits" {
-			found = true
-		}
-		return !found
-	})
-	return found
+type decimalSignificantExprProps struct {
+	digits    bool
+	precision bool
 }
 
-func containsDigitCountObject(info *types.Info, expr ast.Expr, digitCounts map[types.Object]bool) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		id, ok := n.(*ast.Ident)
-		if !ok {
-			return !found
-		}
-		obj := info.Uses[id]
+func decimalSignificantExpr(info *types.Info, expr ast.Expr, digitValues, precisionValues map[types.Object]bool) decimalSignificantExprProps {
+	if value, ok := patternkit.ConstantInt(info, expr); ok {
+		return decimalSignificantExprProps{precision: value > 0 && value <= 15}
+	}
+	switch node := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		obj := info.Uses[node]
 		if obj == nil {
-			obj = info.Defs[id]
+			obj = info.Defs[node]
 		}
-		found = digitCounts[obj]
-		return !found
-	})
-	return found
+		return decimalSignificantExprProps{digits: digitValues[obj], precision: precisionValues[obj]}
+	case *ast.CallExpr:
+		fn := patternkit.StaticFunc(info, node)
+		if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == patternkit.ShopspringDecimalPath && fn.Name() == "NumDigits" {
+			return decimalSignificantExprProps{digits: true}
+		}
+		var props decimalSignificantExprProps
+		for _, arg := range node.Args {
+			child := decimalSignificantExpr(info, arg, digitValues, precisionValues)
+			props.digits = props.digits || child.digits
+			props.precision = props.precision || child.precision
+		}
+		return props
+	case *ast.BinaryExpr:
+		x := decimalSignificantExpr(info, node.X, digitValues, precisionValues)
+		y := decimalSignificantExpr(info, node.Y, digitValues, precisionValues)
+		return decimalSignificantExprProps{
+			digits:    x.digits || y.digits,
+			precision: x.precision || y.precision,
+		}
+	case *ast.UnaryExpr:
+		return decimalSignificantExpr(info, node.X, digitValues, precisionValues)
+	case *ast.SelectorExpr:
+		return decimalSignificantExpr(info, node.X, digitValues, precisionValues)
+	}
+	return decimalSignificantExprProps{}
 }
 
-func isSignificantDigitLimit(info *types.Info, expr ast.Expr) bool {
-	value, ok := patternkit.ConstantInt(info, expr)
-	return ok && value > 0 && value <= 15
+func isDecimalRoundingCall(info *types.Info, call *ast.CallExpr) bool {
+	fn := patternkit.StaticFunc(info, call)
+	if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != patternkit.ShopspringDecimalPath {
+		return false
+	}
+	switch fn.Name() {
+	case "Round", "RoundCeil", "RoundFloor", "RoundUp", "RoundDown", "RoundBank", "Truncate":
+		return true
+	default:
+		return false
+	}
 }
 
 func reachesNormalizer(decl patternkit.TypedFuncDecl, direct map[*types.Func]bool, functions map[*types.Func]patternkit.TypedFuncDecl, depth int, seen map[*types.Func]bool) bool {

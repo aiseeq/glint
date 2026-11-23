@@ -441,6 +441,113 @@ func read(rows *excelize.Rows) {
 	}))
 }
 
+func TestSpreadsheetRawDoubleSignificantDirectNumDigitsIsNormalization(t *testing.T) {
+	assert.Empty(t, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	value, _ := decimal.NewFromString(cells[0])
+	_ = trimDoubleNoise(value)
+}
+func trimDoubleNoise(value decimal.Decimal) decimal.Decimal {
+	if value.NumDigits() > 15 {
+		return value.Round(int32(15 - int(value.Exponent()) - value.NumDigits()))
+	}
+	return value
+}
+`,
+		"third_party/decimal/decimal.go": spreadsheetDecimalStub(),
+	}))
+}
+
+func TestSpreadsheetRawDoubleSignificantRoundArgumentMustUseDigitCount(t *testing.T) {
+	for name, body := range map[string]string{
+		"L1 comparison only": `digits := value.NumDigits()
+	if digits > 15 { return decimal.Decimal{}, nil }
+	return value.Round(2), nil`,
+		"L3 result only": `width := value.NumDigits()
+	value.Round(2)
+	_ = []int{width + 1}
+	return value, nil`,
+		"L6 return only": `n := value.NumDigits()
+	value.Round(2)
+	_ = n <= 12
+	return value, nil`,
+		"no Round": `digits := value.NumDigits()
+	if digits > 15 { return decimal.Decimal{}, nil }
+	return value, nil`,
+		"unrelated decimal method": `var digits = value.NumDigits()
+	value.StringFixed(int32(15 - digits))
+	return value, nil`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, []string{"sheet/read.go:7"}, spreadsheetFindings(t, map[string]string{
+				"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	_, _ = parseAmount(cells[0])
+}
+func parseAmount(text string) (decimal.Decimal, error) {
+	value, _ := decimal.NewFromString(text)
+	` + body + `
+}
+`,
+				"third_party/decimal/decimal.go": spreadsheetDecimalStub(),
+			}))
+		})
+	}
+}
+
+func TestSpreadsheetRawDoubleSignificantLimitMustNotExceed15(t *testing.T) {
+	assert.Equal(t, []string{"sheet/read.go:8"}, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+const significantDigits = 17
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	value, _ := decimal.NewFromString(cells[0])
+	_ = value.Round(int32(significantDigits - value.NumDigits()))
+}
+`,
+		"third_party/decimal/decimal.go": spreadsheetDecimalStub(),
+	}))
+}
+
+func TestSpreadsheetRawDoubleSignificantVarSpecAndReversedLimit(t *testing.T) {
+	assert.Empty(t, spreadsheetFindings(t, map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	value, _ := decimal.NewFromString(cells[0])
+	_ = trimDoubleNoise(value)
+}
+func trimDoubleNoise(value decimal.Decimal) decimal.Decimal {
+	var digits = value.NumDigits()
+	if 15 > digits {
+		return value.Round(int32(15 - int(value.Exponent()) - digits))
+	}
+	return value
+}
+`,
+		"third_party/decimal/decimal.go": spreadsheetDecimalStub(),
+	}))
+}
+
 func spreadsheetDecimalStub() string {
 	return patterntest.DecimalStub + `
 func (d Decimal) NumDigits() int { return 1 }
