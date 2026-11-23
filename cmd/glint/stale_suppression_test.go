@@ -184,6 +184,43 @@ func TestStaleSuppressionSeesMarkersThroughTheResultCache(t *testing.T) {
 	assert.Positive(t, second.reused)
 }
 
+// Flow-list exceptions share a YAML line but must keep independent keys in
+// suppression entries, including findings reused from the result cache.
+func TestStaleSuppressionFlowListThroughResultCache(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
+	writeModuleFile(t, root, "go.mod", "module example.com/flow\n\ngo 1.24\n")
+	writeModuleFile(t, root, "errs.go", `package flow
+
+import "errors"
+
+func Used() error { return errors.New("Failed to report") }
+func Stale() error { return nil }
+`)
+	config := `version: 1
+categories:
+  patterns:
+    rules:
+      error-string:
+        exceptions: [{file: errs.go, function: Used, reason: known}, {file: errs.go, function: Stale, reason: no finding}]
+`
+	writeModuleFile(t, root, ".glint.yaml", config)
+	cfg, err := core.LoadConfigWithDefaults(root)
+	require.NoError(t, err)
+	cache, err := newRootCache(root, "", cfg, false)
+	require.NoError(t, err)
+	_, uncached := analyzeWithRules(t, root, nil, "error-string", "stale-suppression")
+	require.Equal(t, []string{".glint.yaml:6"}, foundAt(uncached))
+	_, first := analyzeWithRules(t, root, cache, "error-string", "stale-suppression")
+	assert.Equal(t, foundAt(uncached), foundAt(first))
+	require.NoError(t, cache.save())
+	warm, err := newRootCache(root, "", cfg, false)
+	require.NoError(t, err)
+	_, cached := analyzeWithRules(t, root, warm, "error-string", "stale-suppression")
+	assert.Equal(t, foundAt(uncached), foundAt(cached))
+	assert.Positive(t, warm.reused)
+}
+
 // Moving configuration changes exception locations even when its analysis
 // settings remain equivalent. Cached suppression entries must identify the
 // current exception, while an exception that silences nothing stays stale.

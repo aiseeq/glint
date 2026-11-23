@@ -125,10 +125,11 @@ type Exception struct {
 	Function string `yaml:"function,omitempty"` // Function name
 	Reason   string `yaml:"reason,omitempty"`
 
-	// source and at are the configuration file and the line that declare
-	// the exception.
-	source string
-	at     int
+	// source, at and atColumn are the configuration file and node position
+	// that declare the exception.
+	source   string
+	at       int
+	atColumn int
 }
 
 // UnmarshalYAML keeps the line of the exception in its file.
@@ -140,6 +141,7 @@ func (e *Exception) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*e = Exception(decoded)
 	e.at = value.Line
+	e.atColumn = value.Column
 	return nil
 }
 
@@ -787,18 +789,23 @@ func (c *Config) MatchingException(category, rule, filePath string, violation *V
 	return Exception{}, false
 }
 
-// ExceptionKey identifies an exception by the configuration file and the line
-// that declare it. A file under the directory of the configuration is named
+// ExceptionKey identifies an exception by the configuration file and the
+// position that declares it. A file under the directory of the configuration is named
 // relative to it: a worktree's copy of the file declares the same exception,
 // and the result cache it starts from names the main worktree's copy.
 func (c *Config) ExceptionKey(e Exception) string {
-	source := e.source
+	return c.ExceptionKeyAt(e.source, e.at, e.atColumn)
+}
+
+// ExceptionKeyAt identifies an exception declaration at a supplied source
+// position, for readers that decode configuration nodes outside LoadConfig.
+func (c *Config) ExceptionKeyAt(source string, line, column int) string {
 	if c.path != "" {
 		if rel, err := filepath.Rel(filepath.Dir(c.path), source); err == nil && filepath.IsLocal(rel) {
 			source = rel
 		}
 	}
-	return fmt.Sprintf("%s:%d", source, e.at)
+	return fmt.Sprintf("%s:%d:%d", source, line, column)
 }
 
 // Source and DeclaredAt are the configuration file and the line that declare
@@ -807,6 +814,9 @@ func (e Exception) Source() string { return e.source }
 
 // DeclaredAt is the line of the configuration file that declares the exception.
 func (e Exception) DeclaredAt() int { return e.at }
+
+// DeclaredAtColumn is the column of the YAML node that declares the exception.
+func (e Exception) DeclaredAtColumn() int { return e.atColumn }
 
 // RuleException is one exception of a rule's configuration.
 type RuleException struct {

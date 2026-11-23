@@ -300,7 +300,7 @@ func collectBroadExceptions(exceptions *yaml.Node, rule string, entries *[]broad
 // (narrowOversightExceptions). One that names no file names every file, the
 // configuration among them, so it is never one.
 func oversightException(exception *yaml.Node, decoded core.Exception, rule string) (entry broadEntry, wide bool) {
-	entry = broadEntry{line: exception.Line, exception: true, oversight: true, excepted: rule, declaredAt: exception.Line}
+	entry = broadEntry{line: exception.Line, exception: true, oversight: true, excepted: rule, excepts: &decoded, declaredAt: exception.Line}
 	// A line of 0 or less is none (core.Exception.matchesViolation).
 	if decoded.Line <= 0 {
 		return entry, true
@@ -453,7 +453,7 @@ func keepsException(cfg *core.Config, exc oneLineException) bool {
 		return false
 	}
 	return slices.ContainsFunc(cfg.GetRuleExceptions(rule.Category(), exc.rule), func(kept core.Exception) bool {
-		return filepath.Clean(kept.Source()) == filepath.Clean(exc.source) && kept.DeclaredAt() == exc.exception.DeclaredAt()
+		return cfg.ExceptionKey(kept) == cfg.ExceptionKeyAt(exc.source, exc.exception.DeclaredAt(), exc.exception.DeclaredAtColumn())
 	})
 }
 
@@ -926,7 +926,11 @@ func checkBroadEntries(entries []broadEntry, sources broadSources, chain []broad
 			message = fmt.Sprintf("%s:%d, outside the project, through extends: %s", origin, entry.originLine, message)
 		}
 		finding := rule.CreateViolation(name, entry.line, message)
-		finding.Severity = max(finding.Severity, silenced.exception(entry.declaredIn(), entry.declaredAt))
+		column := 0
+		if entry.excepts != nil {
+			column = entry.excepts.DeclaredAtColumn()
+		}
+		finding.Severity = max(finding.Severity, silenced.exceptionAt(entry.declaredIn(), entry.declaredAt, column))
 		findings = append(findings, finding)
 	}
 	return findings, nil

@@ -19,14 +19,15 @@ type silencedSeverities struct {
 	// markers are by the file, relative to the root, the line of the marker
 	// and the rule it silenced: two markers of one line silence each its own.
 	markers map[silencedMarker]core.Severity
-	// exceptions are by the configuration file, absolute, and the line that
-	// declares the exception.
+	// exceptions are by the configuration file, absolute, and the node position
+	// that declares the exception.
 	exceptions map[silencedPlace]core.Severity
 }
 
 type silencedPlace struct {
-	file string
-	line int
+	file   string
+	line   int
+	column int
 }
 
 type silencedMarker struct {
@@ -41,7 +42,7 @@ func newSilencedSeverities(cfg *core.Config, suppressions core.ViolationList) si
 	silenced := silencedSeverities{markers: map[silencedMarker]core.Severity{}, exceptions: map[silencedPlace]core.Severity{}}
 	for _, entry := range suppressions {
 		if entry.Suppression == core.SuppressionInline {
-			at := silencedMarker{silencedPlace{entry.File, entry.Line}, entry.Rule}
+			at := silencedMarker{silencedPlace{file: entry.File, line: entry.Line}, entry.Rule}
 			silenced.markers[at] = max(silenced.markers[at], entry.Severity)
 		}
 	}
@@ -61,7 +62,7 @@ func newSilencedSeverities(cfg *core.Config, suppressions core.ViolationList) si
 	for i := range exceptions {
 		exc := exceptions[i].Exception
 		if severity, ok := byKey[cfg.ExceptionKey(exc)]; ok {
-			raiseSilenced(silenced.exceptions, silencedPlace{filepath.Clean(exc.Source()), exc.DeclaredAt()}, severity)
+			raiseSilenced(silenced.exceptions, silencedPlace{file: filepath.Clean(exc.Source()), line: exc.DeclaredAt(), column: exc.DeclaredAtColumn()}, severity)
 		}
 	}
 	return silenced
@@ -73,11 +74,24 @@ func raiseSilenced(severities map[silencedPlace]core.Severity, place silencedPla
 	severities[place] = max(severities[place], severity)
 }
 
-// exception returns the highest severity of the findings the exception
-// declared at the line of the configuration file silenced; low when it
-// silenced none.
+// exceptionAt returns the highest severity of the findings the exception
+// declared at the node position of the configuration file silenced; low when
+// it silenced none.
+func (s silencedSeverities) exceptionAt(file string, line, column int) core.Severity {
+	return s.exceptions[silencedPlace{file: filepath.Clean(file), line: line, column: column}]
+}
+
+// exception returns the highest severity of exceptions on a line. Callers
+// that have a decoded exception node use exceptionAt to distinguish columns.
 func (s silencedSeverities) exception(file string, line int) core.Severity {
-	return s.exceptions[silencedPlace{filepath.Clean(file), line}]
+	place := silencedPlace{file: filepath.Clean(file), line: line}
+	var severity core.Severity
+	for at, found := range s.exceptions {
+		if at.file == place.file && at.line == line {
+			severity = max(severity, found)
+		}
+	}
+	return severity
 }
 
 // marker returns the highest severity of what the marker a finding of
@@ -86,7 +100,7 @@ func (s silencedSeverities) exception(file string, line int) core.Severity {
 func (s silencedSeverities) marker(finding *core.Violation) core.Severity {
 	var severity core.Severity
 	for _, rule := range finding.MarkerRules {
-		severity = max(severity, s.markers[silencedMarker{silencedPlace{finding.File, finding.Line}, rule}])
+		severity = max(severity, s.markers[silencedMarker{silencedPlace{file: finding.File, line: finding.Line}, rule}])
 	}
 	return severity
 }
