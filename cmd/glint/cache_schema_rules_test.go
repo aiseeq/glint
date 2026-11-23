@@ -24,6 +24,11 @@ func TestEveryMigrationsRuleKeysItsCacheByMigrationBytes(t *testing.T) {
 	}
 	nullable := root("CREATE TABLE accounts (id INTEGER PRIMARY KEY, nickname TEXT);\n")
 	notNull := root("CREATE TABLE accounts (id INTEGER PRIMARY KEY, nickname TEXT NOT NULL);\n")
+	fileKey := func(rule rules.Rule, root string) (bool, string) {
+		cache := &resultCache{build: "build", ruleFingerprints: map[string]string{}, previous: map[string]cacheEntry{}, current: map[string]cacheEntry{}}
+		local, keys := fileCacheRules(cache, []rules.Rule{rule}, root)
+		return local[0], keys[rule.Name()]
+	}
 	var checked []string
 	for _, rule := range rules.All() {
 		settings, ok := rule.(interface{ SettingSpecs() []rules.SettingSpec })
@@ -40,6 +45,22 @@ func TestEveryMigrationsRuleKeysItsCacheByMigrationBytes(t *testing.T) {
 		after, err := input.CacheInputs(notNull)
 		require.NoError(t, err, rule.Name())
 		assert.NotEqual(t, before, after, "%s keeps one cache key across a migration change", rule.Name())
+		// The cache that keeps the findings of the rule reads CacheInputs.
+		switch rule.(type) {
+		case rules.GoProjectRule:
+			// keyProject adds the CacheInputs of every project rule.
+		case rules.ProjectFilesRule:
+			if rootProjectRuleCacheable(rule) {
+				_, keyed := rule.(rules.RootFilesAndCacheInputs)
+				assert.True(t, keyed, "%s keeps root findings in the cache without its CacheInputs: declare RootFilesAndCacheInputs", rule.Name())
+			}
+		default:
+			cachedBefore, keyBefore := fileKey(rule, nullable)
+			cachedAfter, keyAfter := fileKey(rule, notNull)
+			if cachedBefore || cachedAfter {
+				assert.NotEqual(t, keyBefore, keyAfter, "%s keeps file findings in the cache without its CacheInputs: declare ReadsOtherFiles", rule.Name())
+			}
+		}
 	}
 	assert.Contains(t, checked, "sql-scan-nullable-into-value")
 }

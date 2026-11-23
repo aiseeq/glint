@@ -12,5 +12,6 @@ func (*SQLLiteralCopiesConstantRule) RootFilesOnlyProjectFiles() {}
 // RootFilesOnlyProjectFiles declares that SQLSerializableNoRetryRule reads only the root files it is given.
 func (*SQLSerializableNoRetryRule) RootFilesOnlyProjectFiles() {}
 
-// RootFilesOnlyProjectFiles declares that SQLSessionTimeZoneRule reads only the root files it is given.
-func (*SQLSessionTimeZoneRule) RootFilesOnlyProjectFiles() {}
+// RootFilesAndCacheInputs declares that SQLSessionTimeZoneRule reads the root
+// files it is given and the migrations its CacheInputs identify.
+func (*SQLSessionTimeZoneRule) RootFilesAndCacheInputs() {}
