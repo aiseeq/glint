@@ -568,6 +568,18 @@ func TestSpreadsheetRawDoubleSignificantExactFormsNormalize(t *testing.T) {
 		"subtraction terms reordered": `return x.Round(int32(15 - x.NumDigits() - int(x.Exponent())))`,
 		"named constant":              `return x.Round(int32(significantDigits - (int(x.Exponent()) + x.NumDigits())))`,
 		"RoundBank":                   `return x.RoundBank(int32(15 - (int(x.Exponent()) + x.NumDigits())))`,
+		"inner subtraction through a variable": `top := 15 - int(x.Exponent())
+	places := top - x.NumDigits()
+	return x.Round(int32(places))`,
+		"sum through a variable": `magnitude := int(x.Exponent()) + x.NumDigits()
+	places := 15 - magnitude
+	return x.Round(int32(places))`,
+		"chain of five variables": `a := x.NumDigits()
+	b := a
+	c := b
+	d := c
+	places := 15 - (int(x.Exponent()) + d)
+	return x.Round(int32(places))`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			decls := ""
@@ -607,6 +619,9 @@ func TestSpreadsheetRawDoubleSignificantNearMatchesStillFind(t *testing.T) {
 		{name: "Round(2) beside digit count", body: `_ = x.NumDigits()
 	return x.Round(2)`},
 		{name: "digits minus one", body: `return x.Round(int32(x.NumDigits() - 1))`},
+		{name: "compound assignment gives no value", body: `var places int32
+	places -= int32(15 - (int(x.Exponent()) + x.NumDigits()))
+	return x.Round(places)`},
 		{name: "remainder", body: `return x.Round(int32(x.NumDigits() % 2))`},
 		{name: "digits times two", body: `return x.Round(int32(x.NumDigits() * 2))`},
 		{name: "other round receiver", body: `scale := decimal.NewFromInt(1)
