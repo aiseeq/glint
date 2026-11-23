@@ -255,10 +255,9 @@ func tsConditionalMentionIsIneffective(code string, mention, candidate int) bool
 		if ifPos <= searchStart {
 			break
 		}
+		// Relative to searchStart, like the first position: the loop head
+		// adds the window start back.
 		ifPos = strings.LastIndex(code[searchStart:ifPos], "if")
-		if ifPos >= 0 {
-			ifPos += searchStart
-		}
 	}
 	return false
 }
