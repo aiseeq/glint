@@ -70,7 +70,8 @@ func FuncCallSites(ctx *core.GoProjectContext, decls map[*types.Func]TypedFuncDe
 
 // OrderedFuncObjects returns declarations in file-name and source-position
 // order. This lets callers build ordered indexes without depending on map
-// iteration order.
+// iteration order. Each declaration is placed by its own FileSet; one built
+// by a rule without a FileSet has no file name and goes first, by Pos.
 func OrderedFuncObjects(decls map[*types.Func]TypedFuncDecl) []*types.Func {
 	type orderedDecl struct {
 		fn       *types.Func
@@ -78,30 +79,23 @@ func OrderedFuncObjects(decls map[*types.Func]TypedFuncDecl) []*types.Func {
 		filename string
 		offset   int
 	}
-	var fset *token.FileSet
-	for _, decl := range decls {
-		if decl.FileSet != nil {
-			fset = decl.FileSet
-			break
-		}
-	}
 	ordered := make([]orderedDecl, 0, len(decls))
 	for fn, decl := range decls {
 		entry := orderedDecl{fn: fn, pos: decl.Decl.Pos()}
-		if fset != nil {
-			position := fset.PositionFor(entry.pos, false)
+		if decl.FileSet != nil {
+			position := decl.FileSet.PositionFor(entry.pos, false)
 			entry.filename, entry.offset = position.Filename, position.Offset
 		}
 		ordered = append(ordered, entry)
 	}
 	sort.Slice(ordered, func(i, j int) bool {
-		if fset == nil {
-			return ordered[i].pos < ordered[j].pos
-		}
 		if ordered[i].filename != ordered[j].filename {
 			return ordered[i].filename < ordered[j].filename
 		}
-		return ordered[i].offset < ordered[j].offset
+		if ordered[i].offset != ordered[j].offset {
+			return ordered[i].offset < ordered[j].offset
+		}
+		return ordered[i].pos < ordered[j].pos
 	})
 	functions := make([]*types.Func, len(ordered))
 	for i, entry := range ordered {
