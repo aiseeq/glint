@@ -762,3 +762,28 @@ switch_traffic
 `,
 	}))
 }
+
+// Two captured functions call one logger: its line is reported once, and the
+// message names the first of them in the script, on every run.
+func TestShellCapturedFunctionWritesLogsNamesFirstCaller(t *testing.T) {
+	rule, ok := rules.Get("shell-captured-function-writes-logs")
+	require.True(t, ok)
+	source := `#!/bin/bash
+log_info() { echo "[setup] $*"; }
+find_config_dir() {
+  log_info "looking for config"
+  echo /etc/app
+}
+find_domain() {
+  log_info "looking for domain"
+  echo example.org
+}
+dir=$(find_config_dir)
+domain=$(find_domain)
+`
+	for run := range 32 {
+		violations := rule.AnalyzeFile(rulestest.TextFile(t, "setup.sh", source))
+		require.Len(t, violations, 1)
+		assert.Contains(t, violations[0].Message, "find_config_dir calls it", "run %d", run)
+	}
+}

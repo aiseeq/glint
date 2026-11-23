@@ -1,6 +1,7 @@
 package shellrules
 
 import (
+	"cmp"
 	"maps"
 	"path"
 	"regexp"
@@ -300,7 +301,11 @@ func checkCapturedFunctionOutput(r *shellRule, src *patternkit.ShellSource) []*c
 		reported[line] = true
 		out = appendReport(out, src.Report(r, line, message, suggestion))
 	}
-	for name := range captured {
+	// In script order: a line two captured functions share names the first.
+	names := slices.SortedFunc(maps.Keys(captured), func(a, b string) int {
+		return cmp.Compare(funcs[a].First, funcs[b].First)
+	})
+	for _, name := range names {
 		body := src.Body(funcs[name])
 		redirected := patternkit.RedirectedCompoundSegments(body)
 		for i, l := range body {
