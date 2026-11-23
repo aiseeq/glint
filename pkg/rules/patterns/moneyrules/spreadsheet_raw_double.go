@@ -629,8 +629,7 @@ func isDecimalSignificantRound(info *types.Info, call *ast.CallExpr, assignments
 	if !ok {
 		return false
 	}
-	arg := expandSpreadsheetValue(info, call.Args[0], assignments, make(map[types.Object]bool), 8)
-	return arg != nil && isSignificantPlaces(info, arg, receiver)
+	return isSignificantPlaces(info, call.Args[0], receiver, assignments, make(map[types.Object]bool), 8)
 }
 
 func decimalMethodReceiver(info *types.Info, call *ast.CallExpr) (types.Object, bool) {
@@ -649,44 +648,34 @@ func decimalMethodReceiver(info *types.Info, call *ast.CallExpr) (types.Object, 
 	return obj, obj != nil
 }
 
-func expandSpreadsheetValue(info *types.Info, expr ast.Expr, assignments map[types.Object]spreadsheetVariableAssignment, seen map[types.Object]bool, depth int) ast.Expr {
+func resolveSpreadsheetAlias(info *types.Info, expr ast.Expr, assignments map[types.Object]spreadsheetVariableAssignment, seen map[types.Object]bool, depth int) ast.Expr {
 	if expr == nil || depth < 0 {
 		return nil
 	}
 	expr = ast.Unparen(expr)
 	if call, ok := expr.(*ast.CallExpr); ok && isTypeConversion(info, call) {
-		return expandSpreadsheetValue(info, call.Args[0], assignments, seen, depth)
+		return resolveSpreadsheetAlias(info, call.Args[0], assignments, seen, depth)
 	}
-	switch node := expr.(type) {
-	case *ast.Ident:
-		obj := info.Uses[node]
-		if obj == nil {
-			obj = info.Defs[node]
-		}
-		assignment, ok := assignments[obj]
-		if !ok {
-			return expr
-		}
-		_, constantRHS := patternkit.ConstantInt(info, assignment.rhs)
-		if assignment.count != 1 || assignment.rhs == nil || seen[obj] || constantRHS {
-			return nil
-		}
-		seen[obj] = true
-		expanded := expandSpreadsheetValue(info, assignment.rhs, assignments, seen, depth-1)
-		delete(seen, obj)
-		return expanded
-	case *ast.BinaryExpr:
-		x := expandSpreadsheetValue(info, node.X, assignments, seen, depth)
-		y := expandSpreadsheetValue(info, node.Y, assignments, seen, depth)
-		if x == nil || y == nil {
-			return nil
-		}
-		if x == node.X && y == node.Y {
-			return node
-		}
-		return &ast.BinaryExpr{X: x, Op: node.Op, Y: y}
+	id, ok := expr.(*ast.Ident)
+	if !ok {
+		return expr
 	}
-	return expr
+	obj := info.Uses[id]
+	if obj == nil {
+		obj = info.Defs[id]
+	}
+	assignment, ok := assignments[obj]
+	if !ok {
+		return expr
+	}
+	_, constantRHS := patternkit.ConstantInt(info, assignment.rhs)
+	if assignment.count != 1 || assignment.rhs == nil || seen[obj] || depth == 0 || constantRHS {
+		return nil
+	}
+	seen[obj] = true
+	resolved := resolveSpreadsheetAlias(info, assignment.rhs, assignments, seen, depth-1)
+	delete(seen, obj)
+	return resolved
 }
 
 func isTypeConversion(info *types.Info, call *ast.CallExpr) bool {
@@ -697,33 +686,46 @@ func isTypeConversion(info *types.Info, call *ast.CallExpr) bool {
 	return ok && tv.IsType()
 }
 
-func isSignificantPlaces(info *types.Info, expr ast.Expr, receiver types.Object) bool {
+func isSignificantPlaces(info *types.Info, expr ast.Expr, receiver types.Object, assignments map[types.Object]spreadsheetVariableAssignment, seen map[types.Object]bool, depth int) bool {
+	expr = resolveSpreadsheetAlias(info, expr, assignments, seen, depth)
+	if expr == nil {
+		return false
+	}
 	expr = ast.Unparen(expr)
 	outer, ok := expr.(*ast.BinaryExpr)
 	if !ok || outer.Op != token.SUB {
 		return false
 	}
-	if isSignificantDigitConstant(info, outer.X) && isExponentAndDigits(info, outer.Y, receiver) {
+	if isSignificantDigitConstant(info, outer.X, assignments, depth) && isExponentAndDigits(info, outer.Y, receiver, assignments, depth) {
 		return true
 	}
-	first, ok := ast.Unparen(outer.X).(*ast.BinaryExpr)
-	if !ok || first.Op != token.SUB || !isSignificantDigitConstant(info, first.X) {
+	firstExpr := resolveSpreadsheetAlias(info, outer.X, assignments, make(map[types.Object]bool), depth)
+	first, ok := ast.Unparen(firstExpr).(*ast.BinaryExpr)
+	if !ok || first.Op != token.SUB || !isSignificantDigitConstant(info, first.X, assignments, depth) {
 		return false
 	}
-	return isDecimalValueMethod(info, first.Y, receiver, "Exponent") && isDecimalValueMethod(info, outer.Y, receiver, "NumDigits") ||
-		isDecimalValueMethod(info, first.Y, receiver, "NumDigits") && isDecimalValueMethod(info, outer.Y, receiver, "Exponent")
+	return isDecimalDigitMethod(info, first.Y, receiver, "Exponent", assignments, depth) && isDecimalDigitMethod(info, outer.Y, receiver, "NumDigits", assignments, depth) ||
+		isDecimalDigitMethod(info, first.Y, receiver, "NumDigits", assignments, depth) && isDecimalDigitMethod(info, outer.Y, receiver, "Exponent", assignments, depth)
 }
 
-func isExponentAndDigits(info *types.Info, expr ast.Expr, receiver types.Object) bool {
+func isExponentAndDigits(info *types.Info, expr ast.Expr, receiver types.Object, assignments map[types.Object]spreadsheetVariableAssignment, depth int) bool {
+	expr = resolveSpreadsheetAlias(info, expr, assignments, make(map[types.Object]bool), depth)
+	if expr == nil {
+		return false
+	}
 	pair, ok := ast.Unparen(expr).(*ast.BinaryExpr)
 	if !ok || pair.Op != token.ADD {
 		return false
 	}
-	return isDecimalValueMethod(info, pair.X, receiver, "Exponent") && isDecimalValueMethod(info, pair.Y, receiver, "NumDigits") ||
-		isDecimalValueMethod(info, pair.X, receiver, "NumDigits") && isDecimalValueMethod(info, pair.Y, receiver, "Exponent")
+	return isDecimalDigitMethod(info, pair.X, receiver, "Exponent", assignments, depth) && isDecimalDigitMethod(info, pair.Y, receiver, "NumDigits", assignments, depth) ||
+		isDecimalDigitMethod(info, pair.X, receiver, "NumDigits", assignments, depth) && isDecimalDigitMethod(info, pair.Y, receiver, "Exponent", assignments, depth)
 }
 
-func isDecimalValueMethod(info *types.Info, expr ast.Expr, receiver types.Object, name string) bool {
+func isDecimalDigitMethod(info *types.Info, expr ast.Expr, receiver types.Object, name string, assignments map[types.Object]spreadsheetVariableAssignment, depth int) bool {
+	expr = resolveSpreadsheetAlias(info, expr, assignments, make(map[types.Object]bool), depth)
+	if expr == nil {
+		return false
+	}
 	call, ok := ast.Unparen(expr).(*ast.CallExpr)
 	if !ok || len(call.Args) != 0 || !patternkit.IsPkgFunc(info, call, patternkit.ShopspringDecimalPath, name) {
 		return false
@@ -732,7 +734,11 @@ func isDecimalValueMethod(info *types.Info, expr ast.Expr, receiver types.Object
 	return ok && methodReceiver == receiver
 }
 
-func isSignificantDigitConstant(info *types.Info, expr ast.Expr) bool {
+func isSignificantDigitConstant(info *types.Info, expr ast.Expr, assignments map[types.Object]spreadsheetVariableAssignment, depth int) bool {
+	expr = resolveSpreadsheetAlias(info, expr, assignments, make(map[types.Object]bool), depth)
+	if expr == nil {
+		return false
+	}
 	value, ok := patternkit.ConstantInt(info, ast.Unparen(expr))
 	return ok && value == 15
 }

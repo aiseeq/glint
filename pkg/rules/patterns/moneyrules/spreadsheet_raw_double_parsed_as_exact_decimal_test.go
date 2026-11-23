@@ -1,9 +1,13 @@
 package moneyrules
 
 import (
+	"fmt"
 	"maps"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
@@ -204,6 +208,14 @@ func read(book *excelize.File) {
 
 func spreadsheetFindings(t *testing.T, files map[string]string) []string {
 	t.Helper()
+	project := spreadsheetProject(t, files)
+	violations, err := NewSpreadsheetRawDoubleParsedAsExactDecimalRule().AnalyzeGoProject(project)
+	require.NoError(t, err)
+	return patterntest.FoundLines(violations)
+}
+
+func spreadsheetProject(t *testing.T, files map[string]string) *core.GoProjectContext {
+	t.Helper()
 	all := map[string]string{
 		"go.mod": "module example.com/rulestest\n\ngo 1.24\n\n" +
 			"require (\n github.com/shopspring/decimal v0.0.0\n github.com/xuri/excelize/v2 v2.0.0\n)\n\n" +
@@ -227,9 +239,7 @@ func OpenFile(string, ...Options) (*File, error) { return nil, nil }
 		"third_party/decimal/decimal.go": patterntest.DecimalStub,
 	}
 	maps.Copy(all, files)
-	violations, err := NewSpreadsheetRawDoubleParsedAsExactDecimalRule().AnalyzeGoProject(rulestest.Project(t, all))
-	require.NoError(t, err)
-	return patterntest.FoundLines(violations)
+	return rulestest.Project(t, all)
 }
 
 func TestSpreadsheetRawDoubleParsedAsExactDecimalAcceptsPackageNormalizer(t *testing.T) {
@@ -588,6 +598,8 @@ func TestSpreadsheetRawDoubleSignificantNearMatchesStillFind(t *testing.T) {
 		{name: "variable is not a constant", body: `limit := 15
 	return x.Round(int32(limit - (int(x.Exponent()) + x.NumDigits())))`},
 		{name: "wrong operator between terms", body: `return x.Round(int32(15 - (int(x.Exponent()) - x.NumDigits())))`},
+		{name: "15 minus exponent plus digits", body: `return x.Round(int32(15 - int(x.Exponent()) + x.NumDigits()))`},
+		{name: "15 plus exponent minus digits", body: `return x.Round(int32(15 + int(x.Exponent()) - x.NumDigits()))`},
 		{name: "min", body: `return x.Round(int32(min(x.NumDigits(), 2)))`},
 		{name: "second assignment", body: `places := 15 - (int(x.Exponent()) + x.NumDigits())
 	places = 2
@@ -632,6 +644,57 @@ func roundAmount(x decimal.Decimal) decimal.Decimal {
 `,
 		"third_party/decimal/decimal.go": spreadsheetDecimalStub(),
 	})
+}
+
+func TestSpreadsheetRawDoubleSignificantIncrementedPlacesStillFind(t *testing.T) {
+	assert.Equal(t, []string{"sheet/read.go:8"}, spreadsheetSignificantRoundFindings(t, "", `places := 15 - (int(x.Exponent()) + x.NumDigits())
+	places++
+	return x.Round(int32(places))`))
+}
+
+func TestSpreadsheetRawDoubleSignificantRangeAssignedPlacesStillFind(t *testing.T) {
+	assert.Equal(t, []string{"sheet/read.go:8"}, spreadsheetSignificantRoundFindings(t, "", `places := 15 - (int(x.Exponent()) + x.NumDigits())
+	for places = range []int{2} {}
+	return x.Round(int32(places))`))
+}
+
+func TestSpreadsheetRawDoubleSignificantLocalConst15IsNormalization(t *testing.T) {
+	assert.Empty(t, spreadsheetSignificantRoundFindings(t, "", `const significantDigits = 15
+	return x.Round(int32(significantDigits - (int(x.Exponent()) + x.NumDigits())))`))
+}
+
+func TestSpreadsheetRawDoubleSignificantExpansionDoesNotBranch(t *testing.T) {
+	var chain strings.Builder
+	chain.WriteString("v0 := 1\n")
+	for i := 1; i <= 10; i++ {
+		terms := make([]string, 10)
+		for j := range terms {
+			terms[j] = fmt.Sprintf("v%d", i-1)
+		}
+		fmt.Fprintf(&chain, "v%d := %s\n", i, strings.Join(terms, " + "))
+	}
+	files := map[string]string{
+		"sheet/read.go": `package sheet
+import (
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
+)
+func read(rows *excelize.Rows) {
+	cells, _ := rows.Columns(excelize.Options{RawCellValue: true})
+	value, _ := decimal.NewFromString(cells[0])
+` + chain.String() + `	_ = value.Round(int32(v10))
+}
+`,
+		"third_party/decimal/decimal.go": spreadsheetDecimalStub(),
+	}
+	project := spreadsheetProject(t, files)
+	start := time.Now()
+	violations, err := NewSpreadsheetRawDoubleParsedAsExactDecimalRule().AnalyzeGoProject(project)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	assert.NotEmpty(t, patterntest.FoundLines(violations))
+	t.Logf("rule analysis for k=10 expansion: %s", elapsed)
+	assert.Less(t, elapsed, 100*time.Millisecond)
 }
 
 func spreadsheetDecimalStub() string {
