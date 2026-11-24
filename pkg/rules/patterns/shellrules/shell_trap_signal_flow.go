@@ -195,36 +195,31 @@ func callName(call *syntax.CallExpr) string {
 // trapFollowedByWork walks one sequence after the trap. A later trap
 // replaces the handler for its signals. A loop that runs before the
 // replacement is long-lived; other work counts on a path where the handler
-// remains active afterwards. exit, return and exec of a command
-// end the sequence.
+// remains active afterwards or that ends with exit, return or exec of a
+// command.
 func trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool {
 	if waitThenCleanup(stmts) {
 		return false
 	}
-	work := false
+	out := trapEffect{left: signals}
 	for _, stmt := range stmts {
 		if stmt.Background {
 			continue
 		}
-		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && endsShell(call) {
-			return work
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && callName(call) == "return" {
+			return out.work
 		}
-		effect := afterTrap(stmt, signals)
-		if effect.loop {
-			return true
+		out = out.seq(afterTrap(stmt, out.left))
+		if out.left == 0 {
+			return out.found
 		}
-		if effect.left == 0 {
-			return false
-		}
-		work = work || effect.work
-		signals = effect.left
 	}
-	return work
+	return out.work
 }
 
-// endsShell holds for exit, return and exec of a command, which replaces
-// the shell; exec with redirections only goes on.
-func endsShell(call *syntax.CallExpr) bool {
+// exitsShell holds for exit and for exec of a command, which replaces the
+// shell; exec with redirections only goes on.
+func exitsShell(call *syntax.CallExpr) bool {
 	args := call.Args
 	for len(args) > 0 && (wordLit(args[0]) == "builtin" || wordLit(args[0]) == "command") {
 		args = args[1:]
@@ -233,7 +228,7 @@ func endsShell(call *syntax.CallExpr) bool {
 		return false
 	}
 	switch wordLit(args[0]) {
-	case "exit", "return":
+	case "exit":
 		return true
 	case "exec":
 		return len(args) > 1
@@ -263,21 +258,25 @@ func foregroundWalk(node syntax.Node, visit func(syntax.Node) bool) bool {
 	return found
 }
 
-// trapEffect says what a command after the trap does to it: whether a loop
-// runs while some of the trapped signals keep the handler, whether a path
-// that keeps one of them does other work, and which signals keep the
-// handler on some path after the command.
+// trapEffect says what a command after the trap does to it: found holds
+// where a loop runs while some of the trapped signals keep the handler, or
+// a path does work and then exits with the handler on, and then nothing
+// else matters; work holds where a path that keeps one of the signals does
+// other work; exits holds where a path ends the script; left are the
+// signals that keep the handler on some path that goes on after the
+// command, none once found.
 type trapEffect struct {
-	loop, work bool
-	left       uint8
+	found, work, exits bool
+	left               uint8
 }
 
 // afterTrap follows stmt in the order it runs. Inside a brace group, the
 // condition of an if, the left of && and || and every branch of an if or a
 // case, a trap replaces the handler for the commands after it; the right of
 // && and || and a branch replace nothing for what follows, since they may
-// not run. A subshell, a pipeline and a background command replace nothing
-// in the script.
+// not run. exit and exec of a command end their path. A subshell, a
+// pipeline and a background command neither replace nor end anything in
+// the script. A return in a branch is taken to go on, as the caller does.
 func afterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
 	if stmt.Background {
 		return trapEffect{left: signals}
@@ -287,8 +286,11 @@ func afterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
 		if later, ok := signalTrapCall(x); ok {
 			return trapEffect{left: signals &^ later.signals}
 		}
+		if exitsShell(x) {
+			return trapEffect{exits: true}
+		}
 	case *syntax.WhileClause, *syntax.ForClause:
-		return trapEffect{loop: true, left: signals}
+		return trapEffect{found: true}
 	case *syntax.Block:
 		return listAfterTrap(x.Stmts, signals)
 	case *syntax.IfClause:
@@ -300,29 +302,45 @@ func afterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
 			return binaryAfterTrap(x, signals)
 		}
 	}
-	return trapEffect{loop: runsLoop(stmt), work: doesWork(stmt), left: signals}
+	if runsLoop(stmt) {
+		return trapEffect{found: true}
+	}
+	return trapEffect{work: doesWork(stmt), left: signals}
 }
 
-// listAfterTrap drops the work of a path once every signal is replaced on
-// it: the handler no longer runs there.
-func listAfterTrap(stmts []*syntax.Stmt, signals uint8) trapEffect {
-	out := trapEffect{left: signals}
-	for _, stmt := range stmts {
-		next := afterTrap(stmt, out.left)
-		if next.loop {
-			return next
-		}
-		if next.left == 0 {
-			return trapEffect{}
-		}
-		out = trapEffect{work: out.work || next.work, left: next.left}
+// seq follows a path that did e and then next. The work of a path is
+// dropped once every signal is replaced on it, since the handler no longer
+// runs there, and counts once the path exits.
+func (e trapEffect) seq(next trapEffect) trapEffect {
+	if next.found || e.work && next.exits {
+		return trapEffect{found: true}
 	}
-	return out
+	exits := e.exits || next.exits
+	if next.left == 0 {
+		return trapEffect{exits: exits}
+	}
+	return trapEffect{work: e.work || next.work, exits: exits, left: next.left}
 }
 
 // orPath joins the effects of two paths of which either may run.
 func (e trapEffect) orPath(o trapEffect) trapEffect {
-	return trapEffect{loop: e.loop || o.loop, work: e.work || o.work, left: e.left | o.left}
+	return trapEffect{
+		found: e.found || o.found,
+		work:  e.work || o.work,
+		exits: e.exits || o.exits,
+		left:  e.left | o.left,
+	}
+}
+
+func listAfterTrap(stmts []*syntax.Stmt, signals uint8) trapEffect {
+	out := trapEffect{left: signals}
+	for _, stmt := range stmts {
+		out = out.seq(afterTrap(stmt, out.left))
+		if out.left == 0 {
+			break
+		}
+	}
+	return out
 }
 
 func binaryAfterTrap(x *syntax.BinaryCmd, signals uint8) trapEffect {
@@ -330,26 +348,22 @@ func binaryAfterTrap(x *syntax.BinaryCmd, signals uint8) trapEffect {
 	if left.left == 0 {
 		return left
 	}
-	return left.orPath(listAfterTrap([]*syntax.Stmt{x.Y}, left.left))
+	return left.orPath(left.seq(afterTrap(x.Y, left.left)))
 }
 
 func ifAfterTrap(x *syntax.IfClause, signals uint8) trapEffect {
 	cond := listAfterTrap(x.Cond, signals)
-	if cond.loop || cond.left == 0 {
+	if cond.left == 0 {
 		return cond
 	}
-	then := listAfterTrap(x.Then, cond.left)
-	other := trapEffect{left: cond.left}
+	then := cond.seq(listAfterTrap(x.Then, cond.left))
 	switch {
 	case x.Else == nil:
+		return then.orPath(cond)
 	case len(x.Else.Cond) == 0:
-		other = listAfterTrap(x.Else.Then, cond.left)
-	default:
-		other = ifAfterTrap(x.Else, cond.left)
+		return then.orPath(cond.seq(listAfterTrap(x.Else.Then, cond.left)))
 	}
-	out := then.orPath(other)
-	out.work = out.work || cond.work
-	return out
+	return then.orPath(cond.seq(ifAfterTrap(x.Else, cond.left)))
 }
 
 // caseAfterTrap: the word, with a command substitution in it, runs before
@@ -357,17 +371,18 @@ func ifAfterTrap(x *syntax.IfClause, signals uint8) trapEffect {
 // signal.
 func caseAfterTrap(x *syntax.CaseClause, signals uint8) trapEffect {
 	if runsLoop(x.Word) {
-		return trapEffect{loop: true, left: signals}
+		return trapEffect{found: true}
 	}
-	out, hasDefault := trapEffect{work: doesWork(x.Word)}, false
+	word := trapEffect{work: doesWork(x.Word), left: signals}
+	out, hasDefault := trapEffect{}, false
 	for _, item := range x.Items {
-		out = out.orPath(listAfterTrap(item.Stmts, signals))
+		out = out.orPath(word.seq(listAfterTrap(item.Stmts, signals)))
 		for _, pattern := range item.Patterns {
 			hasDefault = hasDefault || wordLit(pattern) == "*"
 		}
 	}
 	if !hasDefault {
-		out.left |= signals
+		out = out.orPath(word)
 	}
 	return out
 }

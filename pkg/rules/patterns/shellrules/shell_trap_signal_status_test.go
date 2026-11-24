@@ -550,3 +550,121 @@ trap 'echo bye' TERM # want
 out=$(while poll-once; do sleep 5; done)
 `)
 }
+
+// exit and exec of a command in a branch end that path: the commands after
+// the compound command run only on the other paths. Work done before the
+// exit counts, as it does before exit in a plain sequence.
+func TestShellTrapSignalWithoutExitBranchExit(t *testing.T) {
+	for name, source := range map[string]string{
+		"o16_nested_branch_exit_inner.sh": `#!/bin/bash
+trap 'echo bye' TERM
+if [ -n "$1" ]; then
+  if [ "$1" = strict ]; then trap 'exit 143' TERM; else exit 1; fi
+  while poll-once; do sleep 5; done
+fi
+`,
+		"o08_other_branch_exits_case.sh": `#!/bin/bash
+trap 'rm -f "$pidfile"' TERM
+case "${1:-}" in
+  watch) trap 'rm -f "$pidfile"; exit 143' TERM ;;
+  *) echo "usage: $0 watch" >&2; exit 2 ;;
+esac
+while poll-once; do sleep 5; done
+`,
+		"o09_other_branch_exits_if.sh": `#!/bin/bash
+trap 'echo bye' TERM
+if [ -n "${STRICT:-}" ]; then
+  trap 'exit 143' TERM
+else
+  echo "STRICT is required" >&2
+  exit 1
+fi
+while poll-once; do sleep 5; done
+`,
+		"exec_branch_other_replaces.sh": `#!/bin/bash
+trap 'echo bye' TERM
+if [ "$1" = serve ]; then
+  exec my-server
+else
+  trap - TERM
+fi
+while poll-once; do sleep 5; done
+`,
+		"replace_or_exit.sh": `#!/bin/bash
+trap 'echo bye' TERM
+trap 'exit 143' TERM || exit 1
+while poll-once; do sleep 5; done
+`,
+		"w01_work_then_reset_one_branch.sh": `#!/bin/bash
+trap 'rm -f "$tmp"' TERM
+if [ -n "${1:-}" ]; then
+  render-config > "$tmp"
+  trap - TERM
+fi
+`,
+	} {
+		shellWanted(t, "shell-trap-signal-without-exit", name, source)
+	}
+	shellWanted(t, "shell-trap-signal-without-exit", "work_then_exit_in_branch.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+if [ -n "$1" ]; then
+  prepare-cache
+  exit 1
+else
+  trap - TERM
+fi
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "work_then_branches_exit.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+prepare-cache
+if [ -n "$1" ]; then exit 1; else trap - TERM; fi
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "exec_in_one_branch.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+if [ "$1" = serve ]; then
+  exec my-server
+fi
+while poll-once; do sleep 5; done
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "or_exit_then_loop.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+[ -n "$1" ] || exit 1
+while poll-once; do sleep 5; done
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "subshell_exit_in_branch.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+if [ -n "$1" ]; then
+  ( exit 1 )
+else
+  trap - TERM
+fi
+while poll-once; do sleep 5; done
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "work_in_exit_branch_then_loop.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+case "$1" in
+  once) sync-once; exit 0 ;;
+  *) trap 'exit 143' TERM ;;
+esac
+while poll-once; do sleep 5; done
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "work_then_brace_exit_or_reset.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+prepare-cache
+{ [ -n "$x" ] || exit 1; trap - TERM; }
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "loop_in_subst_then_reset.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+state=$(while ! ready; do sleep 1; done)
+trap - TERM
+`)
+	// A return in a branch of a function goes on in the caller.
+	shellWanted(t, "shell-trap-signal-without-exit", "branch_return_to_caller.sh", `#!/bin/bash
+setup() {
+  trap 'echo bye' TERM # want
+  if [ -n "$x" ]; then return 0; else return 1; fi
+}
+setup
+while poll-once; do sleep 5; done
+`)
+}
