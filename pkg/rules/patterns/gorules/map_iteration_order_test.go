@@ -2532,3 +2532,697 @@ func Collect(owners map[string][]int) []string {
 	assert.Equal(t, 21, violations[0].Line)
 	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
 }
+
+// The write sits in the branch where the slot is free and the slot is marked
+// after the if: the polarity of the test, not where the mark sits, tells the
+// free branch.
+func TestMapIterationOrderReportsDedupWinnerWrittenBeforeMark(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 15, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The then branch marks a free slot and the else branch leaves on a taken
+// one: the write after the if runs only for the first entry of a slot.
+func TestMapIterationOrderReportsDedupWinnerAfterElseThatLeaves(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			seen[slot] = true
+		} else {
+			return
+		}
+		out = append(out, who)
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 17, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A goto forward past the write skips it for a taken slot, as a return would.
+func TestMapIterationOrderReportsDedupWinnerAfterForwardGoto(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slot int, who string) {
+		if seen[slot] {
+			goto done
+		}
+		seen[slot] = true
+		out = append(out, who)
+	done:
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 17, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// break in a case skips the rest of the case: the write after the guard in the
+// same case runs only for a free slot.
+func TestMapIterationOrderReportsDedupWinnerAfterBreakInCase(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slot int, who string, kind int) {
+		switch kind {
+		case 1:
+			if seen[slot] {
+				break
+			}
+			seen[slot] = true
+			out = append(out, who)
+		}
+	}
+	for who, slot := range src {
+		add(slot, who, 1)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 19, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// break in a select clause skips the rest of the clause: the write after the
+// guard in the same clause runs only for a free slot.
+func TestMapIterationOrderReportsDedupWinnerAfterBreakInSelect(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int, ch chan int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slot int, who string) {
+		select {
+		case <-ch:
+			if seen[slot] {
+				break
+			}
+			seen[slot] = true
+			out = append(out, who)
+		default:
+		}
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 20, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// break leaves only the select: the write after the select runs on every call.
+func TestMapIterationOrderAcceptsWriteAfterSelectBreak(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func All(src map[string]int, ch chan int) []string {
+	seen := map[int]bool{}
+	var all []string
+	add := func(slot int, who string) {
+		select {
+		case <-ch:
+			if seen[slot] {
+				break
+			}
+			seen[slot] = true
+		default:
+		}
+		all = append(all, who)
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(all)
+	return all
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// The write in the free branch is never followed by a mark on its path: the
+// slot stays free, and every entry is written.
+func TestMapIterationOrderAcceptsFreeWriteNeverMarked(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func All(src map[string]int) []string {
+	seen := map[int]bool{}
+	var all []string
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			all = append(all, who)
+		} else {
+			seen[slot] = true
+		}
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(all)
+	return all
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A comma-ok test that the slot is absent: the then branch is the free one,
+// whatever follows the if.
+func TestMapIterationOrderReportsDedupWinnerInAbsentBranch(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slot int, who string) {
+		if _, ok := seen[slot]; !ok {
+			out = append(out, who)
+		}
+		seen[slot] = true
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 15, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A test that the slot is taken and the run is strict keeps the first entry
+// of a slot on a strict run: a condition that reads nothing of the slot or the
+// entry does not hide the claim.
+func TestMapIterationOrderReportsDedupWinnerBehindUnrelatedCondition(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int, strict bool) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slot int, who string) {
+		if seen[slot] && strict {
+			return
+		}
+		seen[slot] = true
+		out = append(out, who)
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 16, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The if init copies the slot's value, and the test reads the copy.
+func TestMapIterationOrderReportsDedupWinnerOnCopiedLookup(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int) []string {
+	owner := map[int]string{}
+	var out []string
+	add := func(slot int, who string) {
+		if prev := owner[slot]; prev != "" {
+			return
+		}
+		owner[slot] = who
+		out = append(out, who)
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 16, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// Both sides of && say the slot is taken: the test says so too.
+func TestMapIterationOrderReportsDedupWinnerOnTwoTestsOfTheSlot(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int) []string {
+	owner := map[int]string{}
+	var out []string
+	add := func(slot int, who string) {
+		if prev, ok := owner[slot]; ok && prev != "" {
+			return
+		}
+		owner[slot] = who
+		out = append(out, who)
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 16, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A condition beside the slot, left of && or right of ||, leaves the decision
+// to the slot on a run where it holds.
+func TestMapIterationOrderReportsDedupWinnerBesideConditionOnEitherSide(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int, strict, quiet bool) ([]string, []string) {
+	seen := map[int]bool{}
+	heard := map[int]bool{}
+	var out, said []string
+	add := func(slot int, who string) {
+		if strict && seen[slot] {
+			return
+		}
+		seen[slot] = true
+		out = append(out, who)
+	}
+	say := func(slot int, who string) {
+		if heard[slot] || quiet {
+			return
+		}
+		heard[slot] = true
+		said = append(said, who)
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	for who, slot := range src {
+		say(slot, who)
+	}
+	sort.Strings(out)
+	sort.Strings(said)
+	return out, said
+}
+`)
+
+	require.Len(t, violations, 2)
+	assert.Equal(t, 24, violations[0].Line)
+	assert.Equal(t, 27, violations[1].Line)
+}
+
+// The test reads the slot's value in a way that does not tell a free slot
+// from a taken one: a taken slot whose first entry is light lets the next one
+// through.
+func TestMapIterationOrderAcceptsGuardOnValueOfTakenSlot(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+type mark struct{ weight int }
+
+func All(src map[string]int, limit int) []string {
+	seen := map[int]mark{}
+	var all []string
+	add := func(slot int, who string) {
+		if prev, ok := seen[slot]; ok && prev.weight > limit {
+			return
+		}
+		seen[slot] = mark{weight: len(who)}
+		all = append(all, who)
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(all)
+	return all
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// The slot is filled in one branch only: the run that fills it keeps the
+// first entry.
+func TestMapIterationOrderReportsDedupWinnerMarkedInElseBranch(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int, dryRun bool) ([]string, int) {
+	seen := map[int]bool{}
+	skipped := 0
+	var out []string
+	add := func(slot int, who string) {
+		if seen[slot] {
+			return
+		}
+		if dryRun {
+			skipped++
+		} else {
+			seen[slot] = true
+		}
+		out = append(out, who)
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out, skipped
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 21, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The write in the free branch sits in an else; the slot is filled after the
+// if.
+func TestMapIterationOrderReportsDedupWinnerWrittenInNestedElse(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string]int, muted bool) ([]string, int) {
+	seen := map[int]bool{}
+	skipped := 0
+	var out []string
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			if muted {
+				skipped++
+			} else {
+				out = append(out, who)
+			}
+		}
+		seen[slot] = true
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out, skipped
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 20, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// The guard sits in a function literal inside the callee: its return leaves
+// that literal, past the write.
+func TestMapIterationOrderReportsDedupWinnerInNestedLiteral(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func Firsts(src map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(lines []int, who string) {
+		put := func(line int) {
+			if seen[line] {
+				return
+			}
+			seen[line] = true
+			out = append(out, who)
+		}
+		for _, line := range lines {
+			put(line)
+		}
+	}
+	for who, lines := range src {
+		add(lines, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 21, violations[0].Line)
+	assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+}
+
+// A repeat stops the program: no entry wins a slot.
+func TestMapIterationOrderAcceptsRepeatThatExits(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import (
+	"os"
+	"sort"
+)
+
+func All(src map[string]int) []string {
+	seen := map[int]bool{}
+	var all []string
+	add := func(slot int, who string) {
+		if seen[slot] {
+			os.Exit(1)
+		}
+		seen[slot] = true
+		all = append(all, who)
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(all)
+	return all
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// One branch fills the slot and the other keeps the entry: a run that keeps
+// entries never fills a slot, and every entry is kept.
+func TestMapIterationOrderAcceptsMarkAndWriteOnSeparateBranches(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+func All(src map[string]int, dryRun bool) []string {
+	seen := map[int]bool{}
+	var all []string
+	add := func(slot int, who string) {
+		if seen[slot] {
+			return
+		}
+		if dryRun {
+			seen[slot] = true
+		} else {
+			all = append(all, who)
+		}
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(all)
+	return all
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// dedupGuardSource is a callee add that returns at the test when it says the
+// slot is taken, or keeps the entry in the then branch when it says the slot
+// is free; the call add(slot, who) sits on line 22.
+func dedupGuardSource(test string, takenThen bool) string {
+	branch := `			return
+		}
+		seen[slot] = true
+		count[slot]++
+		at[slot] = &who
+		out = append(out, who)
+`
+	if !takenThen {
+		branch = `			seen[slot] = true
+			count[slot]++
+			at[slot] = &who
+			out = append(out, who)
+		}
+
+`
+	}
+	return `package order
+
+import "sort"
+
+var strict bool
+
+func Firsts(src map[string]int) ([]string, map[int]*string) {
+	seen := map[int]bool{}
+	count := map[int]int{}
+	at := map[int]*string{}
+	var out []string
+	add := func(slot int, who string) {
+		if ` + test + ` {
+` + branch + `	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out, at
+}
+`
+}
+
+// Each spelling of a test that the slot is taken or free - a comparison with
+// true or false, with 0 or 1, the constant on either side, a negated one -
+// tells the free branch as plainly as seen[slot] does.
+func TestMapIterationOrderReportsDedupWinnerOnGuardForms(t *testing.T) {
+	forms := []struct {
+		test      string
+		takenThen bool
+	}{
+		{"seen[slot] == true", true},
+		{"seen[slot] != false", true},
+		{"true == seen[slot]", true},
+		{"count[slot] >= 1", true},
+		{"0 < count[slot]", true},
+		{"1 <= count[slot]", true},
+		{"0 != count[slot]", true},
+		{"!(at[slot] == nil)", true},
+		{"nil != at[slot]", true},
+		{"_, ok := seen[slot]; ok == true", true},
+		{"seen[slot] == false", false},
+		{"seen[slot] != true", false},
+		{"false == seen[slot]", false},
+		{"count[slot] < 1", false},
+		{"count[slot] <= 0", false},
+		{"1 > count[slot]", false},
+		{"0 >= count[slot]", false},
+		{"0 == count[slot]", false},
+		{"!(at[slot] != nil)", false},
+		{"_, ok := seen[slot]; ok == false", false},
+		{"_, ok := seen[slot]; !(ok != false)", false},
+	}
+	for _, form := range forms {
+		t.Run(form.test, func(t *testing.T) {
+			violations := analyzeMapOrder(t, dedupGuardSource(form.test, form.takenThen))
+
+			require.Len(t, violations, 1)
+			assert.Equal(t, 22, violations[0].Line)
+			assert.Equal(t, "map_iteration_dedup_winner", violations[0].Context["pattern"])
+		})
+	}
+}
+
+// A comparison of the count with another constant than 0 or 1 lets more than
+// one entry in (count[slot] > 2): the guard is left unread.
+func TestMapIterationOrderAcceptsGuardOnCountAboveOne(t *testing.T) {
+	forms := []struct {
+		test      string
+		takenThen bool
+	}{
+		{"count[slot] > 2", true},
+		{"count[slot] >= 2", true},
+		{"count[slot] < 2", false},
+	}
+	for _, form := range forms {
+		t.Run(form.test, func(t *testing.T) {
+			assert.Empty(t, analyzeMapOrder(t, dedupGuardSource(form.test, form.takenThen)))
+		})
+	}
+}
+
+// A comparison of something else than the slot with 0 sits beside the slot:
+// the slot still decides.
+func TestMapIterationOrderReportsDedupWinnerBesideComparisonOfAnotherValue(t *testing.T) {
+	violations := analyzeMapOrder(t, dedupGuardSource("!seen[slot] && len(src) > 0", false))
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 22, violations[0].Line)
+}
+
+// Presence compared with a flag of the run reads like a condition beside the
+// slot: on a run where the flag is set, the test beside it keeps the first
+// entry.
+func TestMapIterationOrderReportsDedupWinnerBesidePresenceComparedWithFlag(t *testing.T) {
+	violations := analyzeMapOrder(t, dedupGuardSource("prev, ok := at[slot]; prev != nil || ok == strict", true))
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, 22, violations[0].Line)
+}

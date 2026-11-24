@@ -420,122 +420,7 @@ type dedupGuard struct {
 	// slot is how the slot is spelled: taken[line].
 	slot *ast.IndexExpr
 	// marks are the statements that fill the slot.
-	marks []ast.Node
-}
-
-// freeSpan returns where the statements that run while the slot is still
-// free sit. A guard whose branch leaves (return, or continue or break of a
-// loop of the callee) and is followed by a write of the slot lets past it
-// only a free slot: the span runs from the guard to where the branch resumes
-// - the end of the function, or of the loop it leaves - and the branch only
-// counts the repeat (b.count[line]++). Otherwise the free span is the branch
-// that fills the slot. A guard whose taken branch only overwrites
-// (t.again[slot] = name) lets the last entry win, and is no claim; one that
-// neither leaves nor fills the slot in a branch keeps every entry.
-func (g dedupGuard) freeSpan(body *ast.BlockStmt) (from, to token.Pos, ok bool) {
-	marked := func(from, to token.Pos) bool {
-		for _, mark := range g.marks {
-			if mark.Pos() >= from && mark.End() <= to {
-				return true
-			}
-		}
-		return false
-	}
-	if resume, ok := leftTo(body, g.test); ok && marked(g.test.End(), resume) {
-		return g.test.End(), resume, true
-	}
-	switch {
-	case marked(g.test.Body.Pos(), g.test.Body.End()):
-		return g.test.Body.Pos(), g.test.Body.End(), true
-	case g.test.Else != nil && marked(g.test.Else.Pos(), g.test.Else.End()):
-		return g.test.Else.Pos(), g.test.Else.End(), true
-	}
-	return token.NoPos, token.NoPos, false
-}
-
-// leftTo returns the end of what the branch of the guard leaves when it ends
-// with a return - the function - or with a continue or break - the loop, or
-// for a break the case of a switch or select. Code up to there does not run
-// after the branch. A goto to a label of an enclosing loop starts it over,
-// which leaves the rest of its body as a continue does.
-func leftTo(body *ast.BlockStmt, guard *ast.IfStmt) (token.Pos, bool) {
-	list := guard.Body.List
-	if len(list) == 0 {
-		return token.NoPos, false
-	}
-	path := pathTo(body, guard)
-	switch last := list[len(list)-1].(type) {
-	case *ast.ReturnStmt:
-		for i := len(path) - 1; i >= 0; i-- {
-			if lit, ok := path[i].(*ast.FuncLit); ok {
-				return lit.Body.End(), true
-			}
-		}
-		return body.End(), true
-	case *ast.BranchStmt:
-		return branchEnd(path, last)
-	}
-	return token.NoPos, false
-}
-
-// branchEnd returns the end of the loop, or of the case of the switch or
-// select, a break or continue on the path to it leaves. Its target is always
-// on the path, inside any function literal around it.
-func branchEnd(path []ast.Node, branch *ast.BranchStmt) (token.Pos, bool) {
-	for i := len(path) - 1; i >= 0; i-- {
-		node := path[i]
-		if branch.Label != nil {
-			labeled, ok := node.(*ast.LabeledStmt)
-			if !ok || labeled.Label.Name != branch.Label.Name {
-				continue
-			}
-			node = labeled.Stmt
-		}
-		switch target := node.(type) {
-		case *ast.ForStmt:
-			return target.Body.End(), true
-		case *ast.RangeStmt:
-			return target.Body.End(), true
-		case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
-			if branch.Tok == token.BREAK {
-				return clauseEnd(path[i:])
-			}
-		}
-	}
-	return token.NoPos, false
-}
-
-// clauseEnd returns the end of the first case clause on the path.
-func clauseEnd(path []ast.Node) (token.Pos, bool) {
-	for _, node := range path {
-		switch clause := node.(type) {
-		case *ast.CaseClause, *ast.CommClause:
-			return clause.End(), true
-		}
-	}
-	return token.NoPos, false
-}
-
-// pathTo returns the nodes from root down to the parent of target.
-func pathTo(root, target ast.Node) []ast.Node {
-	var stack, path []ast.Node
-	found := false
-	ast.Inspect(root, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-		if n == nil {
-			stack = stack[:len(stack)-1]
-			return false
-		}
-		if n == target {
-			path, found = append([]ast.Node{}, stack...), true
-			return false
-		}
-		stack = append(stack, n)
-		return true
-	})
-	return path
+	marks []ast.Stmt
 }
 
 // guards returns the ifs that test seen[slot] - in the condition or in the
@@ -596,9 +481,9 @@ func (c *dedupCallee) ofOneEntry(seenMap ast.Expr, rangeStmt *ast.RangeStmt, key
 
 // slotMarks returns the statements of the callee that write the slot it
 // tested: assign it or count it up.
-func (c *dedupCallee) slotMarks(index *ast.IndexExpr) []ast.Node {
+func (c *dedupCallee) slotMarks(index *ast.IndexExpr) []ast.Stmt {
 	spelled := types.ExprString(index)
-	var marks []ast.Node
+	var marks []ast.Stmt
 	ast.Inspect(c.body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
@@ -647,27 +532,29 @@ func (c *dedupCallee) entryParams(tainted map[string]bool) map[types.Object]bool
 
 // keepsEntry reports whether a write the guard lets through only once per
 // slot keeps more of the entry than the slot - in the value, or in an index
-// of the target - in a target that outlives the function.
+// of the target - in a target that outlives the function. Which writes run
+// only past a free slot follows the paths through the function that holds the
+// guard: the branch the test sends a free slot to, by its polarity, and
+// whatever a taken slot skips by leaving - return, continue, break, a goto
+// forward.
 func (c *dedupCallee) keepsEntry(fn *ast.FuncDecl, guard dedupGuard, entry map[types.Object]bool, slot map[string]bool, info *types.Info) bool {
-	from, to, ok := guard.freeSpan(c.body)
-	if !ok {
-		return false
-	}
-	kept := false
-	ast.Inspect(c.body, func(n ast.Node) bool {
+	then, els := guard.outcomes(info)
+	body := guardBody(c.body, guard.test)
+	flow := &dedupFlow{guard: guard, then: then, els: els, writes: map[ast.Stmt]bool{}}
+	ast.Inspect(body, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
-		if kept || !ok || assign.Pos() < from || assign.End() > to {
-			return !kept
+		if !ok {
+			return true
 		}
 		for i, lhs := range assign.Lhs {
 			carries := c.readsEntryBeyond(rhsFor(assign, i), entry, slot, info) || c.indexCarries(lhs, entry, slot, info)
 			if carries && c.targetLeaves(fn, lhs, info) {
-				kept = true
+				flow.writes[assign] = true
 			}
 		}
-		return !kept
+		return true
 	})
-	return kept
+	return len(flow.writes) > 0 && flow.claims(body)
 }
 
 // indexCarries reports whether an index of the target reads more of the
