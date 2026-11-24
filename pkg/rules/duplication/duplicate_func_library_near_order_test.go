@@ -11,10 +11,16 @@ import (
 
 // The library scales and raises weights, wraps words, sums and counts the
 // values from a floor up, finds a peak, divides, reads a byte, sets one
-// counter and reads another, sums values apart by sign and tallies them.
+// counter and reads another, also after a new value of the other, sums
+// values apart by sign and tallies them, grows weights by one and doubles
+// them, and resets a pair.
 const libraryOrderSource = `package lib
 
 type Box struct{ N int }
+
+type Wrap struct{ *Box }
+
+type Pair struct{ N, M int }
 
 func ScaleRaise(ws []int, f, cap int) int {
 	total := 0
@@ -107,6 +113,62 @@ func Bump(a, b *Box, top int) int {
 		v = top
 	}
 	return v + b.N
+}
+
+func BumpStar(a, b *Box, top int) int {
+	if top < 0 {
+		top = 0
+	}
+	*b = Box{N: top}
+	v := a.N * 2
+	if v > top {
+		v = top
+	}
+	return v + b.N
+}
+
+func Breaks(xs []int, lim, cap int) (int, int) {
+	n, m := 0, 0
+	for _, v := range xs {
+		switch v % 3 {
+		case 1:
+			n++
+		}
+		if v > lim {
+			break
+		}
+		m += v
+	}
+	if m > cap {
+		m = cap
+	}
+	return n, m
+}
+
+func Grow(ws []int, cap int) int {
+	total := 0
+	for _, x := range ws {
+		w := x
+		w += 1
+		w += w
+		if w > cap {
+			w = cap
+		}
+		total += w
+	}
+	return total
+}
+
+func Reset(s Pair, b, x, y int) int {
+	if b < 0 {
+		b = 0
+	}
+	s.N = b
+	s = Pair{N: x, M: y}
+	if s.N > s.M {
+		s.N = s.M
+	}
+	return s.N*2 + s.M + b
 }
 
 func Totals(xs []int, scale int) (int, int) {
@@ -225,9 +287,10 @@ func Tally(xs []int, bonus, floor, cap int) int {
 // A copy keeps the order of two writes of one variable unless both add to
 // an integer or both multiply it, the place of a statement against a jump
 // that skips it or a check that guards it, and reads no value a write
-// through another pointer may change while it keeps a second name of it; a
-// copy with independent statements swapped, also past a loop that a
-// continue leaves, is still a copy.
+// through another pointer may change while it keeps a second name of it;
+// a field that stands for a field makes its pointer stand for the other
+// pointer and for nothing else; a copy with independent statements
+// swapped, also past a loop that a continue leaves, is still a copy.
 func TestDuplicateFuncOfLibraryNearCopyOrderResidue(t *testing.T) {
 	for name, tc := range map[string]struct{ source, subject string }{
 		"raised before it is scaled": {`package app
@@ -505,6 +568,178 @@ func payprovBump(a, b *Box, top int) int {
 	return v + b.N
 }
 `, "Function payprovBump is a near copy (100% alike) of function Bump"},
+		"counter named before the other pointer increments": {`package app
+
+type Box struct{ N int }
+
+func payprovBump(a, b *Box, top int) int {
+	if top < 0 {
+		top = 0
+	}
+	old := a.N
+	b.N++
+	v := old * 2
+	if v > top {
+		v = top
+	}
+	return v + b.N
+}
+`, ""},
+		"counter of an embedded pointer named before the other pointer writes": {`package app
+
+type Box struct{ N int }
+
+type Wrap struct{ *Box }
+
+func payprovBump(a Wrap, b *Box, top int) int {
+	if top < 0 {
+		top = 0
+	}
+	old := a.N
+	b.N = top
+	v := old * 2
+	if v > top {
+		v = top
+	}
+	return v + b.N
+}
+`, ""},
+		"value replaced, renamed": {`package app
+
+type Box struct{ N int }
+
+func payprovBump(p, q *Box, limit int) int {
+	if limit < 0 {
+		limit = 0
+	}
+	*q = Box{N: limit}
+	r := p.N * 2
+	if r > limit {
+		r = limit
+	}
+	return r + q.N
+}
+`, "Function payprovBump duplicates function BumpStar"},
+		"value replaced with a unary plus, renamed": {`package app
+
+type Box struct{ N int }
+
+func payprovBump(p, q *Box, limit int) int {
+	if limit < 0 {
+		limit = 0
+	}
+	*q = Box{N: +limit}
+	r := p.N * 2
+	if r > limit {
+		r = limit
+	}
+	return r + q.N
+}
+`, "Function payprovBump is a near copy (98% alike) of function BumpStar"},
+		"sum moved before the break after a switch": {`package app
+
+func payprovBreaks(xs []int, lim, cap int) (int, int) {
+	n, m := 0, 0
+	for _, v := range xs {
+		switch v % 3 {
+		case 1:
+			n++
+		}
+		m += v
+		if v > lim {
+			break
+		}
+	}
+	if m > cap {
+		m = cap
+	}
+	return n, m
+}
+`, ""},
+		"break after a switch, renamed": {`package app
+
+func payprovBreaks(vals []int, most, top int) (int, int) {
+	a, b := 0, 0
+	for _, x := range vals {
+		switch x % 3 {
+		case 1:
+			a++
+		}
+		if x > most {
+			break
+		}
+		b += x
+	}
+	if b > top {
+		b = top
+	}
+	return a, b
+}
+`, "Function payprovBreaks duplicates function Breaks"},
+		"weight doubled before it grows by one": {`package app
+
+func payprovGrow(ws []int, cap int) int {
+	total := 0
+	for _, x := range ws {
+		w := x
+		w += w
+		w += 1
+		if w > cap {
+			w = cap
+		}
+		total += w
+	}
+	return total
+}
+`, ""},
+		"weight grown and doubled, renamed": {`package app
+
+func payprovGrow(vals []int, most int) int {
+	sum := 0
+	for _, v := range vals {
+		g := v
+		g += 1
+		g += g
+		if g > most {
+			g = most
+		}
+		sum += g
+	}
+	return sum
+}
+`, "Function payprovGrow duplicates function Grow"},
+		"pair replaced before its field is set": {`package app
+
+type Pair struct{ N, M int }
+
+func payprovReset(s Pair, b, x, y int) int {
+	if b < 0 {
+		b = 0
+	}
+	s = Pair{N: x, M: y}
+	s.N = b
+	if s.N > s.M {
+		s.N = s.M
+	}
+	return s.N*2 + s.M + b
+}
+`, ""},
+		"pair reset, renamed": {`package app
+
+type Pair struct{ N, M int }
+
+func payprovReset(p Pair, k, lo, hi int) int {
+	if k < 0 {
+		k = 0
+	}
+	p.N = k
+	p = Pair{N: lo, M: hi}
+	if p.N > p.M {
+		p.N = p.M
+	}
+	return p.N*2 + p.M + k
+}
+`, "Function payprovReset duplicates function Reset"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			violations := nearLibraryFindings(t, libraryOrderSource, tc.source)
@@ -657,12 +892,100 @@ export function quoteOf(bid: number, ask: number, floor: number): Quote {
   if (bid < 0) bid = 0
   return { bid, ask }
 }
+
+export function quoteElse(c: boolean, bid: number, ask: number, floor: number): Quote | null {
+  if (ask - bid < floor) ask = bid + floor
+  if (bid < 0) bid = 0
+  return c ? null : { bid, ask }
+}
+
+export function quoteIf(c: boolean, bid: number, ask: number, floor: number): Quote | null {
+  if (ask - bid < floor) ask = bid + floor
+  if (bid < 0) bid = 0
+  return c ? { bid, ask } : null
+}
+
+export function failQuote(bid: number, ask: number, floor: number): number {
+  if (ask - bid < floor) ask = bid + floor
+  if (bid < 0) bid = 0
+  throw { bid, ask }
+}
+
+export function quoteParam({ bid, ask }: Quote, floor: number): number {
+  let s = ask - bid
+  if (s < floor) s = floor
+  return s * 2 + bid
+}
+
+export function spanParam([lo, hi]: number[], floor: number): number {
+  let s = hi - lo
+  if (s < floor) s = floor
+  return s * 3 + lo
+}
+
+export function quotePair(c: boolean, bid: number, ask: number, floor: number): unknown {
+  if (ask - bid < floor) ask = bid + floor
+  if (bid < 0) bid = 0
+  return c ? [bid, ask] : { bid, ask }
+}
+
+export function labelled(xs: number[], c: boolean, cap: number): number {
+  let total = c ? 1 : 0
+  outer: {
+    total = total + xs.length
+    if (total > cap) break outer
+    total = total * 2
+  }
+  return total
+}
+
+export function spreadTwice({ bid, ask }: Quote, floor: number): number {
+  let s = ask - bid
+  let k = floor * 2
+  if (s < k) s = k
+  return s * 2 + bid
+}
+
+export function skipRest(xs: number[], step: number, cap: number): number[] {
+  let a = 0
+  let b = 0
+  for (const v of xs) {
+    switch (v % step) {
+      case 1:
+        continue
+      default:
+        a += v
+    }
+    b++
+  }
+  if (b > cap) b = cap
+  return [a, b]
+}
+
+export function caseBlock(xs: number[], step: number, cap: number): number {
+  let total = 0
+  for (const v of xs) {
+    switch (v % step) {
+      case 0: {
+        total = total + v
+        break
+      }
+      default:
+        total -= 1
+    }
+  }
+  if (total > cap) total = cap
+  return total
+}
 `
 
 // TypeScript copies keep the order of two writes of one variable, which
 // may join texts, the place of a statement against a continue that skips
-// it, but not against a loop it leaves, and the names of the properties
-// they destructure or build an object from.
+// it, also from inside a switch, but not against a loop it leaves, and the
+// names of the properties they destructure or build an object from, also
+// in a parameter, after the colon of a conditional and in a thrown object,
+// and the places of the elements of a parameter; a brace after a case
+// opens a block.
 func TestDuplicateFuncOfLibraryTypeScriptOrderResidue(t *testing.T) {
 	for name, tc := range map[string]struct{ source, subject string }{
 		"word before the bracket": {`function payprovWrap(words: string[], sep: string, width: number): string {
@@ -839,6 +1162,131 @@ func TestDuplicateFuncOfLibraryTypeScriptOrderResidue(t *testing.T) {
   return { bid: lo, ask: hi }
 }
 `, "Function payprovQuote duplicates function quoteOf"},
+		"object after the colon built under the other names": {`function payprovQuote(c: boolean, ask: number, bid: number, floor: number): Quote | null {
+  if (bid - ask < floor) bid = ask + floor
+  if (ask < 0) ask = 0
+  return c ? null : { ask, bid }
+}
+`, ""},
+		"object after the colon built with the names as keys": {`function payprovQuote(c: boolean, lo: number, hi: number, least: number): Quote | null {
+  if (hi - lo < least) hi = lo + least
+  if (lo < 0) lo = 0
+  return c ? null : { bid: lo, ask: hi }
+}
+`, "Function payprovQuote duplicates function quoteElse"},
+		"object after the question built under the other names": {`function payprovQuote(c: boolean, ask: number, bid: number, floor: number): Quote | null {
+  if (bid - ask < floor) bid = ask + floor
+  if (ask < 0) ask = 0
+  return c ? { ask, bid } : null
+}
+`, ""},
+		"object thrown under the other names": {`function payprovQuote(ask: number, bid: number, floor: number): number {
+  if (bid - ask < floor) bid = ask + floor
+  if (ask < 0) ask = 0
+  throw { ask, bid }
+}
+`, ""},
+		"object thrown with the names as keys": {`function payprovQuote(lo: number, hi: number, least: number): number {
+  if (hi - lo < least) hi = lo + least
+  if (lo < 0) lo = 0
+  throw { bid: lo, ask: hi }
+}
+`, "Function payprovQuote duplicates function failQuote"},
+		"parameter properties destructured in the other order": {`function payprovSpread({ ask, bid }: Quote, floor: number): number {
+  let s = bid - ask
+  if (s < floor) s = floor
+  return s * 2 + ask
+}
+`, ""},
+		"parameter properties destructured under other names": {`function payprovSpread({ bid: lo, ask: hi }: Quote, least: number): number {
+  let s = hi - lo
+  if (s < least) s = least
+  return s * 2 + lo
+}
+`, "Function payprovSpread duplicates function quoteParam"},
+		"object after a conditional array built under the other names": {`function payprovQuote(c: boolean, ask: number, bid: number, floor: number): unknown {
+  if (bid - ask < floor) bid = ask + floor
+  if (ask < 0) ask = 0
+  return c ? [ask, bid] : { ask, bid }
+}
+`, ""},
+		"labelled block after a conditional, renamed": {`function payprovLabelled(vals: number[], k: boolean, most: number): number {
+  let sum = k ? 1 : 0
+  outer: {
+    sum = sum + vals.length
+    if (sum > most) break outer
+    sum = sum * 2
+  }
+  return sum
+}
+`, "Function payprovLabelled duplicates function labelled"},
+		"parameter properties destructured, independent statements swapped": {`function payprovSpread({ bid: lo, ask: hi }: Quote, least: number): number {
+  let k = least * 2
+  let s = hi - lo
+  if (s < k) s = k
+  return s * 2 + lo
+}
+`, "Function payprovSpread is a near copy (100% alike) of function spreadTwice"},
+		"parameter elements destructured in the other order": {`function payprovSpan([hi, lo]: number[], floor: number): number {
+  let s = hi - lo
+  if (s < floor) s = floor
+  return s * 3 + lo
+}
+`, ""},
+		"parameter elements destructured under other names": {`function payprovSpan([a, b]: number[], least: number): number {
+  let s = b - a
+  if (s < least) s = least
+  return s * 3 + a
+}
+`, "Function payprovSpan duplicates function spanParam"},
+		"count moved before the switch a continue in it leaves": {`function payprovSkip(xs: number[], step: number, cap: number): number[] {
+  let a = 0
+  let b = 0
+  for (const v of xs) {
+    b++
+    switch (v % step) {
+      case 1:
+        continue
+      default:
+        a += v
+    }
+  }
+  if (b > cap) b = cap
+  return [a, b]
+}
+`, ""},
+		"switch with a continue, renamed": {`function payprovSkip(vals: number[], k: number, most: number): number[] {
+  let x = 0
+  let y = 0
+  for (const v of vals) {
+    switch (v % k) {
+      case 1:
+        continue
+      default:
+        x += v
+    }
+    y++
+  }
+  if (y > most) y = most
+  return [x, y]
+}
+`, "Function payprovSkip duplicates function skipRest"},
+		"block of a case, renamed": {`function payprovCase(vals: number[], k: number, most: number): number {
+  let sum = 0
+  for (const v of vals) {
+    switch (v % k) {
+      case 0: {
+        sum = sum + v
+        break
+      }
+      default:
+        sum -= 1
+    }
+  }
+  if (sum > most) sum = most
+  return sum
+}
+`, "Function payprovCase duplicates function caseBlock"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			violations := tsOrderFindings(t, tc.source)
@@ -859,4 +1307,76 @@ func tsOrderFindings(t *testing.T, source string) []*core.Violation {
 		"ts/order.ts":  libraryOrderTS,
 		"package.json": `{"name": "@owner/lib"}`,
 	}, "frontend/order.ts", "backend", source)
+}
+
+// The library names a field of one pointer and then increments the field
+// through another.
+const libraryRootsSource = `package lib
+
+type Box struct{ N int }
+
+func BumpNamed(a, b *Box, top int) int {
+	if top < 0 {
+		top = 0
+	}
+	old := a.N
+	b.N++
+	v := old * 2
+	if v > top {
+		v = top
+	}
+	return v + b.N
+}
+`
+
+// A field that stands for a field makes its pointer stand for the other
+// pointer, on the side of the library function too: a body that replaces
+// *b where the library function names a.N old aligns with it only by
+// making b stand for old.
+func TestDuplicateFuncOfLibraryNearCopyFieldRoots(t *testing.T) {
+	for name, tc := range map[string]struct{ source, subject string }{
+		"value replaced where the library names a field": {`package app
+
+type Box struct{ N int }
+
+func payprovBump(a, b *Box, top int) int {
+	if top < 0 {
+		top = 0
+	}
+	*b = Box{N: top}
+	v := a.N * 2
+	if v > top {
+		v = top
+	}
+	return v + b.N
+}
+`, ""},
+		"renamed": {`package app
+
+type Box struct{ N int }
+
+func payprovBump(p, q *Box, limit int) int {
+	if limit < 0 {
+		limit = 0
+	}
+	was := p.N
+	q.N++
+	r := was * 2
+	if r > limit {
+		r = limit
+	}
+	return r + q.N
+}
+`, "Function payprovBump duplicates function BumpNamed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			violations := nearLibraryFindings(t, libraryRootsSource, tc.source)
+			if tc.subject == "" {
+				assert.Empty(t, violations)
+				return
+			}
+			require.Len(t, violations, 1)
+			assert.Contains(t, violations[0].Message, tc.subject)
+		})
+	}
 }

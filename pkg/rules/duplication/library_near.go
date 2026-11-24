@@ -551,18 +551,7 @@ func (w *goNearWalker) walk(root ast.Node) {
 	var stack []ast.Node
 	ast.Inspect(root, func(node ast.Node) bool {
 		if node == nil {
-			top := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if isElseBlock(top, stack) {
-				w.b.closeStmt()
-			}
-			w.b.emit(")")
-			if isNearStmt(top) {
-				w.b.closeStmt()
-			}
-			if _, scope := goScopeOf(top); scope && w.b.detailed {
-				w.scopes = w.scopes[:len(w.scopes)-1]
-			}
+			stack = w.leave(stack)
 			return false
 		}
 		if !isNearStmt(node) {
@@ -651,6 +640,24 @@ func (w *goNearWalker) walk(root ast.Node) {
 		stack = append(stack, node)
 		return true
 	})
+}
+
+// leave closes the node on top of stack, which the walk is done with, and
+// returns the stack without it.
+func (w *goNearWalker) leave(stack []ast.Node) []ast.Node {
+	top := stack[len(stack)-1]
+	stack = stack[:len(stack)-1]
+	if isElseBlock(top, stack) {
+		w.b.closeStmt()
+	}
+	w.b.emit(")")
+	if isNearStmt(top) {
+		w.b.closeStmt()
+	}
+	if _, scope := goScopeOf(top); scope && w.b.detailed {
+		w.scopes = w.scopes[:len(w.scopes)-1]
+	}
+	return stack
 }
 
 // goScopeOf reports whether a break leaves node, a loop or a switch, and
@@ -1740,13 +1747,10 @@ func keptPair(partner []int, x, y int) bool {
 }
 
 func (a *varAccess) inOrder(partner []int) bool {
-	for k, w := range a.writers {
-		for l := k + 1; l < len(a.writers); l++ {
-			commute := a.updates[k] != "" && a.updates[k] == a.updates[l]
-			if !commute && !keptPair(partner, w, a.writers[l]) {
-				return false
-			}
-		}
+	if !a.writesInOrder(partner) {
+		return false
+	}
+	for _, w := range a.writers {
 		for _, f := range a.fieldWriters {
 			if !keptPair(partner, w, f) {
 				return false
@@ -1768,6 +1772,28 @@ func (a *varAccess) inOrder(partner []int) bool {
 			if !keptPair(partner, f, r) {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+// writesInOrder reports whether every two writers keep their order, unless
+// both make an update of one kind. Writers come in the order of the body,
+// so a writer keeps its order against the earlier ones when none of them
+// that it does not commute with has a later partner: latest holds the
+// latest partner of the earlier writers by the kind of their update, ""
+// for those that commute with none.
+func (a *varAccess) writesInOrder(partner []int) bool {
+	latest := make(map[string]int)
+	for k, w := range a.writers {
+		kind := a.updates[k]
+		for other, p := range latest {
+			if (other == "" || other != kind) && p > partner[w] {
+				return false
+			}
+		}
+		if p, seen := latest[kind]; !seen || p < partner[w] {
+			latest[kind] = partner[w]
 		}
 	}
 	return true
@@ -1971,8 +1997,13 @@ func restTable(lib, own []nearToken) []uint16 {
 // on both sides together with the one it stands for, and none crossing. A
 // field that stands for what its variable stands for is that variable, as
 // when a copy reads the slice of an element where the library function
-// reads the element; two fields of one variable are two variables.
+// reads the element; two fields of one variable are two variables. A field
+// that stands for a field makes its variable stand for the variable of the
+// other (rootsKept).
 func keptApart(edges map[[2]int]bool, libVars, ownVars map[int]bool, libRoots, ownRoots map[int]int) bool {
+	if !rootsKept(edges, libRoots, ownRoots) {
+		return false
+	}
 	ownDegree, libDegree := make(map[int]int), make(map[int]int)
 	kept := make([][2]int, 0, len(edges))
 	for edge := range edges {
@@ -1990,6 +2021,30 @@ func keptApart(edges map[[2]int]bool, libVars, ownVars map[int]bool, libRoots, o
 	}
 	for _, edge := range kept {
 		if ownDegree[edge[0]] > 1 && libDegree[edge[1]] > 1 {
+			return false
+		}
+	}
+	return true
+}
+
+// rootsKept reports whether no variable stands for the variable of a field
+// that a field of another variable stands for: b.N standing for b.N makes b
+// stand for b, so old, which stood for b as well, cannot. A copy that names
+// a.N old, then increments b.N, aligns with a function that replaces *b and
+// reads a.N only by making old stand for b.
+func rootsKept(edges map[[2]int]bool, libRoots, ownRoots map[int]int) bool {
+	ownFor, libBy := make(map[int][]int), make(map[int][]int)
+	for edge := range edges {
+		ownFor[edge[0]] = append(ownFor[edge[0]], edge[1])
+		libBy[edge[1]] = append(libBy[edge[1]], edge[0])
+	}
+	for edge := range edges {
+		ownRoot, ownField := ownRoots[edge[0]]
+		libRoot, libField := libRoots[edge[1]]
+		if !ownField || !libField || edges[[2]int{ownRoot, libRoot}] {
+			continue
+		}
+		if len(libBy[libRoot]) > 0 || len(ownFor[ownRoot]) > 0 {
 			return false
 		}
 	}

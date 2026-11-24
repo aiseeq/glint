@@ -280,16 +280,45 @@ func (s *tsSource) scan(i int) {
 		}
 	case tok.kind == tsIdent && (tok.text == "let" || tok.text == "const" || tok.text == "var"):
 		s.scanDeclaration(i + 1)
-	case tok.kind == tsPunct && tok.text == "{" && tsObjectBefore[s.text(i-1)]:
+	case tok.kind == tsPunct && tok.text == "{" && (tsObjectBefore[s.text(i-1)] || s.text(i-1) == ":" && s.conditionalElse(i-1)):
 		s.markShorthand(i)
 	}
 }
 
 // tsObjectBefore are the tokens after which a brace opens an object, not a
-// block.
+// block. After a colon a brace opens an object only in the second branch of
+// a conditional (conditionalElse), not after a case or a label.
 var tsObjectBefore = map[string]bool{
-	"(": true, "[": true, ",": true, "=": true, "return": true, "?": true,
-	"??": true, "||": true, "&&": true, "...": true,
+	"(": true, "[": true, ",": true, "=": true, "return": true, "throw": true,
+	"?": true, "??": true, "||": true, "&&": true, "...": true,
+}
+
+// conditionalElse reports whether the colon at colon parts the branches of
+// a conditional, c ? x : { ask, bid }: a question mark no other colon
+// answers comes before it in its expression. Before the colon of a case or
+// a label every question mark has its colon, up to the brace that opens
+// the block; before a colon in brackets, up to the bracket.
+func (s *tsSource) conditionalElse(colon int) bool {
+	colons := 0
+	for j := colon - 1; j >= 0; j-- {
+		switch s.text(j) {
+		case ")", "]", "}":
+			if s.match[j] < 0 {
+				return false
+			}
+			j = s.match[j]
+		case "?":
+			if colons == 0 {
+				return true
+			}
+			colons--
+		case ":":
+			colons++
+		case "(", "[", "{":
+			return false
+		}
+	}
+	return false
 }
 
 // markShorthand marks the names of the object pattern or literal that opens
@@ -570,6 +599,7 @@ func (s *tsSource) tsNearBody(f tsFunc, detailed bool) nearBody {
 	}
 	w := &tsNearWalker{s: s, b: newNearBodyBuilder(detailed), blocks: []tsBlock{{seed: fnvOffset64, parent: -1}}, scopes: make(map[int]bool)}
 	w.reopen()
+	w.params(f, locals)
 	for i := f.bodyOpen + 1; i < f.bodyClose; i++ {
 		tok := s.toks[i]
 		if w.depth == 0 && i > f.bodyOpen+1 && tok.line > s.toks[i-1].line && !w.b.fresh() {
@@ -604,6 +634,37 @@ func (s *tsSource) tsNearBody(f tsFunc, detailed bool) nearBody {
 		}
 	}
 	return w.b.finish()
+}
+
+// params emits the patterns among the parameters of f as a statement before
+// the body: ({ bid, ask }: Quote) binds the properties bid and ask to the
+// names the body reads, as const { bid, ask } = q does in the body, so a
+// function that destructures them in the other roles is another function.
+func (w *tsNearWalker) params(f tsFunc, locals *tsLocals) {
+	s := w.s
+	if s.text(f.paramsOpen) != "(" || s.match[f.paramsOpen] < f.paramsOpen {
+		return
+	}
+	emitted := false
+	for j := f.paramsOpen + 1; j < s.match[f.paramsOpen]; j++ {
+		pattern := (s.text(j) == "{" || s.text(j) == "[") && (s.text(j-1) == "(" || s.text(j-1) == ",")
+		if pattern && s.match[j] > j {
+			for k := j; k <= s.match[j]; k++ {
+				if s.toks[k].kind == tsIdent {
+					k += s.emitName(w.b, k, locals)
+				} else {
+					w.b.emit(s.text(k))
+				}
+			}
+			emitted = true
+		}
+		if s.match[j] > j {
+			j = s.match[j]
+		}
+	}
+	if emitted {
+		w.endStmt()
+	}
 }
 
 // tsNearWalker splits the body of a TypeScript function into statements.
