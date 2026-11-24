@@ -559,8 +559,8 @@ func (r *FrontendErrorMessageMatchRule) helperDecls(code []string, lineStarts []
 }
 
 // helperBodies finds where the bodies of the helpers end in the file's code
-// joined by newlines, its brackets paired once, when a name is first looked
-// up in them.
+// joined by newlines, its brackets paired once by pairBrackets, when a name
+// is first looked up in them.
 type helperBodies struct {
 	lines []string
 	decls []helperDecl
@@ -569,13 +569,13 @@ type helperBodies struct {
 	// one comes between "const name = (" and its parameter.
 	scoped   func() []helperDecl
 	code     string
-	brackets *patternkit.JsBrackets
+	brackets bracketPairs
 }
 
 func (h *helperBodies) withBodies() []helperDecl {
 	var bodies []helperDecl
 	h.code = strings.Join(h.lines, "\n")
-	h.brackets = patternkit.NewJsBrackets(h.code)
+	h.brackets = pairBrackets(h.code)
 	for _, decl := range h.decls {
 		if decl.end = h.end(decl.start, decl.arrow); decl.end >= 0 {
 			bodies = append(bodies, decl)
@@ -586,10 +586,9 @@ func (h *helperBodies) withBodies() []helperDecl {
 
 // end returns the end of the body of the function whose parameters open at
 // paren, -1 when there is none. A body in braces ends after its closing
-// brace, an arrow's expression at the end of its line, at a ';' or ',' or at
-// a bracket it does not open; brackets it opens it passes whole.
+// brace, an arrow's expression as expressionEnd finds.
 func (h *helperBodies) end(paren int, arrow bool) int {
-	closing, ok := h.brackets.Closing(paren)
+	closing, ok := h.brackets.closing(paren)
 	if !ok {
 		return -1
 	}
@@ -612,11 +611,24 @@ func (h *helperBodies) end(paren int, arrow bool) int {
 	if !arrow {
 		return -1
 	}
+	return h.expressionEnd(pos)
+}
+
+// expressionEnd returns the end of the expression that starts at pos: a ';',
+// a bracket it does not open, or a line break after which it does not go on
+// (see continues). Brackets and JSX elements it opens it passes whole. Where
+// it may go on it is taken to, so a body is read too long rather than too
+// short.
+func (h *helperBodies) expressionEnd(pos int) int {
 	for pos < len(h.code) {
-		switch h.code[pos] {
-		case '(', '[', '{':
+		switch c := h.code[pos]; {
+		case c == '(' || c == '[' || c == '{':
 			pos = h.after(pos)
-		case ')', ']', '}', ';', ',', '\n':
+		case c == '<' && h.jsxStart(pos):
+			pos = h.afterElement(pos)
+		case c == '\n' && h.continues(pos):
+			pos++
+		case c == ')' || c == ']' || c == '}' || c == ';' || c == '\n':
 			return pos
 		default:
 			pos++
@@ -625,16 +637,90 @@ func (h *helperBodies) end(paren int, arrow bool) int {
 	return pos
 }
 
+// continues reports whether an expression goes on past the line break at nl:
+// the line ends in an operator, "=>" among them, or the next line starts with
+// one, '.', '?' or ':' included.
+func (h *helperBodies) continues(nl int) bool {
+	prev := nl - 1
+	for prev >= 0 && patternkit.IsRegexpSpace(h.code[prev]) {
+		prev--
+	}
+	if prev >= 0 {
+		c := h.code[prev]
+		if strings.IndexByte("+-*/%&|^!~?:=<,.", c) >= 0 || c == '>' && prev > 0 && h.code[prev-1] == '=' {
+			return true
+		}
+	}
+	next := h.skipSpace(nl)
+	return next < len(h.code) && strings.IndexByte(".?:|&+-*/%=<>^,", h.code[next]) >= 0
+}
+
+// jsxStart reports whether the '<' at pos opens a JSX element: no operand
+// comes before it, as one does before a comparison or type arguments.
+func (h *helperBodies) jsxStart(pos int) bool {
+	prev := pos - 1
+	for prev >= 0 && patternkit.IsRegexpSpace(h.code[prev]) {
+		prev--
+	}
+	return prev < 0 || !(identifierByte(h.code[prev]) || h.code[prev] == ')' || h.code[prev] == ']')
+}
+
+// afterElement returns the offset after the JSX element that opens at pos,
+// the end of the code when it does not close. Its text is skipped whatever
+// brackets it holds; the braces of its expressions are passed whole.
+func (h *helperBodies) afterElement(pos int) int {
+	depth := 0
+	for pos < len(h.code) {
+		switch {
+		case h.code[pos] == '{':
+			pos = h.after(pos)
+		case h.at(pos, "</"):
+			pos = h.tagEnd(pos)
+			if depth--; depth <= 0 {
+				return pos
+			}
+		case h.code[pos] == '<' && pos+1 < len(h.code) && (isLetter(h.code[pos+1]) || h.code[pos+1] == '>'):
+			end := h.tagEnd(pos)
+			if h.code[end-2] != '/' {
+				depth++
+			}
+			pos = end
+			if depth == 0 {
+				return pos
+			}
+		default:
+			pos++
+		}
+	}
+	return pos
+}
+
+// tagEnd returns the offset after the '>' that ends the tag at pos, passing
+// the braces of its attributes whole; the end of the code when none does.
+func (h *helperBodies) tagEnd(pos int) int {
+	for pos++; pos < len(h.code); pos++ {
+		switch h.code[pos] {
+		case '{':
+			pos = h.after(pos) - 1
+		case '>':
+			return pos + 1
+		}
+	}
+	return pos
+}
+
+func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+
 // afterReturnType returns, for a return type whose ':' is at pos, where the body
 // begins: the '{' of a function's body, past the "=>" of an arrow's; -1 when
-// the code shows it is no function. A '{' after ':', '<', '|', '&' or ',' is
-// a type of an object.
+// the code shows it is no function. A '{' after ':', '<', '|', '&', ',' or
+// the "=>" of a function type is a type of an object.
 func (h *helperBodies) afterReturnType(pos int, arrow bool) int {
 	var last byte
 	for pos < len(h.code) {
 		c := h.code[pos]
 		switch {
-		case c == '{' && strings.IndexByte(":<|&,", last) < 0:
+		case c == '{' && strings.IndexByte(":<|&,=", last) < 0:
 			if arrow {
 				return -1
 			}
@@ -647,6 +733,9 @@ func (h *helperBodies) afterReturnType(pos int, arrow bool) int {
 			if arrow {
 				return pos + 2
 			}
+			last = '='
+			pos += 2
+			continue
 		case c == '=' || c == ';' || c == ')' || c == ']' || c == '}':
 			return -1
 		}
@@ -661,7 +750,7 @@ func (h *helperBodies) afterReturnType(pos int, arrow bool) int {
 // after returns the offset after the bracket that closes the one at open,
 // the end of the code when none does.
 func (h *helperBodies) after(open int) int {
-	if closing, ok := h.brackets.Closing(open); ok {
+	if closing, ok := h.brackets.closing(open); ok {
 		return closing + 1
 	}
 	return len(h.code)
@@ -676,6 +765,74 @@ func (h *helperBodies) skipSpace(pos int) int {
 		pos++
 	}
 	return pos
+}
+
+// bracketPairs holds the '(', '[' and '{' of a code in order with the
+// offsets of their closers, -1 for none.
+type bracketPairs struct{ opens, closes []int }
+
+// pairBrackets pairs each closer with the nearest open bracket of its kind:
+// the brackets opened after that one stay unclosed, and a closer with none of
+// its kind open is passed over. So a parenthesis in the text of JSX, as in
+// "1) Retry" or "Nothing :(", moves no end of a block around it.
+func pairBrackets(code string) bracketPairs {
+	var p bracketPairs
+	var stack []int
+	var open [3]int // the brackets of each kind on stack
+	for i := 0; i < len(code); i++ {
+		kind := bracketKind(code[i])
+		if kind < 0 {
+			continue
+		}
+		if kind < 3 {
+			p.opens = append(p.opens, i)
+			p.closes = append(p.closes, -1)
+			stack = append(stack, len(p.opens)-1)
+			open[kind]++
+			continue
+		}
+		if open[kind-3] == 0 {
+			continue
+		}
+		for {
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			k := bracketKind(code[p.opens[top]])
+			open[k]--
+			if k == kind-3 {
+				p.closes[top] = i
+				break
+			}
+		}
+	}
+	return p
+}
+
+// bracketKind numbers '(', '[', '{' 0 to 2 and their closers 3 to 5, -1 for
+// any other byte.
+func bracketKind(c byte) int {
+	switch c {
+	case '(':
+		return 0
+	case '[':
+		return 1
+	case '{':
+		return 2
+	case ')':
+		return 3
+	case ']':
+		return 4
+	case '}':
+		return 5
+	}
+	return -1
+}
+
+// closing returns the offset of the closer of the bracket at open, which
+// must be the offset of a bracket.
+func (p bracketPairs) closing(open int) (int, bool) {
+	i := sort.SearchInts(p.opens, open)
+	return p.closes[i], p.closes[i] >= 0
 }
 
 // spanHolds reports whether one of matches, sorted and not overlapping, lies

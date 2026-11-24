@@ -452,51 +452,78 @@ export function load(item: Item) {
 // shows no body has none.
 func TestFrontendErrorMessageMatchHelperBody(t *testing.T) {
 	for code, want := range map[string]string{
-		"function f(text) { a } b":                            "(text) { a }",
-		"function f(text)\n  { a } b":                         "(text)\n  { a }",
-		"function f(text): { k: string } { a } b":             "(text): { k: string } { a }",
-		"function f(text):{ k: string } { a } b":              "(text):{ k: string } { a }",
-		"function f(text): Promise<{ k: string }> { a } b":    "(text): Promise<{ k: string }> { a }",
-		"function f(text): A | { k: string } { a } b":         "(text): A | { k: string } { a }",
-		"function f(text): A & { k: string } { a } b":         "(text): A & { k: string } { a }",
-		"function f(text): Map<A, { k: string }> { a } b":     "(text): Map<A, { k: string }> { a }",
-		"function f(text): string[] { a } b":                  "(text): string[] { a }",
-		"function f(text): (a: string) => void { a } b":       "(text): (a: string) => void { a }",
-		"function f(text) { a":                                "(text) { a",
-		"function f(text): string;\nb":                        "",
-		"function f(text) b":                                  "",
-		"function f(text":                                     "",
-		"x{ function f(text":                                  "",
-		"function f(text) => { a } b":                         "",
-		"function f(text): a = 1 { b }":                       "",
-		"function f(text): string":                            "",
-		"function f(text): = 1":                               "",
-		"function f(text): a) { b }":                          "",
-		"function f(text): a] { b }":                          "",
-		"function f(text): a} { b }":                          "",
-		"const f = (text) => text.trim(); b":                  "(text) => text.trim()",
-		"const f = (text) =>\n  text.trim()\nb":               "(text) =>\n  text.trim()",
-		"const f = (text) => g(text, 1), h = 2":               "(text) => g(text, 1)",
-		"const f = (text) => [text, 1][0]\nb":                 "(text) => [text, 1][0]",
-		"const f = (text) => ({ k: text })\nb":                "(text) => ({ k: text })",
-		"const f = (text) => text) + b":                       "(text) => text",
-		"const f = (text) => text] + b":                       "(text) => text",
-		"const f = (text) => text} + b":                       "(text) => text",
-		"const f = (text) => { a } b":                         "(text) => { a }",
-		"const f = (text): string => { a } b":                 "(text): string => { a }",
-		"const f = (text) => text && { k: 1 }; b":             "(text) => text && { k: 1 }",
-		"const f = (text) => text":                            "(text) => text",
-		"const f = (text): string => text; b":                 "(text): string => text",
-		"const f = (text): { k: string } => ({ k: text }); b": "(text): { k: string } => ({ k: text })",
-		"const f = async (text) => text; b":                   "(text) => text",
-		"const f = (a + b) * 2; c":                            "",
-		"const f = (text) { a } b":                            "",
-		"const f = (text): T { a } b":                         "",
-		"const f = (text): a = 1":                             "",
-		"const f = (text): a; b => c":                         "",
-		"const f = (text): a":                                 "",
-		"const f = (text): a) => b":                           "",
-		"const wrap = (function inner(text) { a }) + b":       "(text) { a }",
+		"function f(text) { a } b":                              "(text) { a }",
+		"function f(text)\n  { a } b":                           "(text)\n  { a }",
+		"function f(text): { k: string } { a } b":               "(text): { k: string } { a }",
+		"function f(text):{ k: string } { a } b":                "(text):{ k: string } { a }",
+		"function f(text): Promise<{ k: string }> { a } b":      "(text): Promise<{ k: string }> { a }",
+		"function f(text): A | { k: string } { a } b":           "(text): A | { k: string } { a }",
+		"function f(text): A & { k: string } { a } b":           "(text): A & { k: string } { a }",
+		"function f(text): Map<A, { k: string }> { a } b":       "(text): Map<A, { k: string }> { a }",
+		"function f(text): string[] { a } b":                    "(text): string[] { a }",
+		"function f(text): (a: string) => void { a } b":         "(text): (a: string) => void { a }",
+		"function f(text) { a":                                  "(text) { a",
+		"function f(text): string;\nb":                          "",
+		"function f(text) b":                                    "",
+		"function f(text":                                       "",
+		"x{ function f(text":                                    "",
+		"function f(text) => { a } b":                           "",
+		"function f(text): a = 1 { b }":                         "",
+		"function f(text): string":                              "",
+		"function f(text): = 1":                                 "",
+		"function f(text): a) { b }":                            "",
+		"function f(text): a] { b }":                            "",
+		"function f(text): a} { b }":                            "",
+		"const f = (text) => text.trim(); b":                    "(text) => text.trim()",
+		"const f = (text) =>\n  text.trim()\nb":                 "(text) =>\n  text.trim()",
+		"const f = (text) => g(text, 1), h = 2":                 "(text) => g(text, 1), h = 2",
+		"const f = (text) => text ||\n  a\nb":                   "(text) => text ||\n  a",
+		"const f = (text) => text\n  .trim()\nb":                "(text) => text\n  .trim()",
+		"const f = (text) => text // note\nb":                   "(text) => text // note",
+		"const f = (text) => g(text) =>\n  a\nb":                "(text) => g(text) =>\n  a",
+		"const f = (text) => a >\n  b":                          "(text) => a >",
+		"const f = (text) =>\n  <div>\n    {text}\n  </div>\nb": "(text) =>\n  <div>\n    {text}\n  </div>",
+		"const f = (text) => <A b={c > 1}>x) y (</A>\nb":        "(text) => <A b={c > 1}>x) y (</A>",
+		"const f = (text) => <A><B /><C>t</C></A>\nb":           "(text) => <A><B /><C>t</C></A>",
+		"const f = (text) => <><B/></>\nb":                      "(text) => <><B/></>",
+		"const f = (text) => <br />\nb":                         "(text) => <br />",
+		"const f = (text) => <A>\nb":                            "(text) => <A>\nb",
+		"const f = (text) => <A b={c}\nb":                       "(text) => <A b={c}\nb",
+		"const f = (text) => a<b\nc":                            "(text) => a<b",
+		"const f = (text) => (a)<b\nc":                          "(text) => (a)<b",
+		"const f = (text) => [a]<b\nc":                          "(text) => [a]<b",
+		"const f = (text) => a < b\nc":                          "(text) => a < b",
+		"const f = (text) => a <b\nc":                           "(text) => a <b",
+		"const f = (text) => text ||  \n  a\nb":                 "(text) => text ||  \n  a",
+		"const f = (text) => <A>{g<T>(text)}</A>\nb":            "(text) => <A>{g<T>(text)}</A>",
+		"const f = (text) => <>\n  <B/>\n  {text}\n</>\nb":      "(text) => <>\n  <B/>\n  {text}\n</>",
+		"const f = (text) => <A b={c > 1} />\nb":                "(text) => <A b={c > 1} />",
+		"const f = (text) => <\nb":                              "(text) => <\nb",
+		"function f(text): () => { k: string } { a } b":         "(text): () => { k: string } { a }",
+		"function f(text) { a(1) } b":                           "(text) { a(1) }",
+		"function f(text) { a :( b } c":                         "(text) { a :( b }",
+		"function f(text) { a 1) b } c":                         "(text) { a 1) b }",
+		"function f(text) { a [1) b] } c":                       "(text) { a [1) b] }",
+		"const f = (text) => [text, 1][0]\nb":                   "(text) => [text, 1][0]",
+		"const f = (text) => ({ k: text })\nb":                  "(text) => ({ k: text })",
+		"const f = (text) => text) + b":                         "(text) => text",
+		"const f = (text) => text] + b":                         "(text) => text",
+		"const f = (text) => text} + b":                         "(text) => text",
+		"const f = (text) => { a } b":                           "(text) => { a }",
+		"const f = (text): string => { a } b":                   "(text): string => { a }",
+		"const f = (text) => text && { k: 1 }; b":               "(text) => text && { k: 1 }",
+		"const f = (text) => text":                              "(text) => text",
+		"const f = (text): string => text; b":                   "(text): string => text",
+		"const f = (text): { k: string } => ({ k: text }); b":   "(text): { k: string } => ({ k: text })",
+		"const f = async (text) => text; b":                     "(text) => text",
+		"const f = (a + b) * 2; c":                              "",
+		"const f = (text) { a } b":                              "",
+		"const f = (text): T { a } b":                           "",
+		"const f = (text): a = 1":                               "",
+		"const f = (text): a; b => c":                           "",
+		"const f = (text): a":                                   "",
+		"const f = (text): a) => b":                             "",
+		"const wrap = (function inner(text) { a }) + b":         "(text) { a }",
 	} {
 		lines := strings.Split(code, "\n")
 		rule := NewFrontendErrorMessageMatchRule()
@@ -617,4 +644,54 @@ try{go()}catch(err){shape(err.message)}
 if(kind.includes('x'))retry()
 `
 	assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.js", later))
+}
+
+// The body of an arrow without braces runs on over lines while its expression
+// goes on: a line ending in an operator, a line starting with one, a JSX
+// element; a comma between type arguments does not end it. A bracket in the
+// text of JSX that nothing pairs moves no end of a body, and a function type
+// returned by a function is not taken for its body.
+func TestFrontendErrorMessageMatch_BodyRunsToItsEnd(t *testing.T) {
+	tail := "export async function load() {\n  try { await go() } catch (err) { if (check(err.message)) retry() }\n}\n"
+	for name, c := range map[string]struct {
+		path, source string
+		want         []int
+	}{
+		"operator at the end of a line":   {"web/src/a.ts", "const check = (text: string) =>\n  text.includes('a') ||\n  text.includes('b') ||\n  text.includes('c')\n" + tail, []int{2, 3, 4}},
+		"operator at the start of a line": {"web/src/a.ts", "const check = (text: string) => text.includes('a')\n  || text.includes('b')\n" + tail, []int{1, 2}},
+		"comparison then and":             {"web/src/a.ts", "export const check = (text: string): boolean =>\n  !text.startsWith('4') &&\n  text !== 'Unauthorized'\n" + tail, []int{2, 3}},
+		"ternary over lines":              {"web/src/a.ts", "const check = (text: string): number =>\n  text.startsWith('a')\n    ? 1\n    : text.startsWith('b')\n      ? 2\n      : 3\n" + tail, []int{2, 4}},
+		"JSX on the next line":            {"web/src/a.tsx", "const check = (text: string) =>\n  <div>\n    {text.includes('quota') ? 'a' : 'b'}\n    <br />\n    Try later\n  </div>\n" + tail, []int{3}},
+		"comma of type arguments":         {"web/src/a.ts", "const check = (text: string) => test<A, B>(text) || text.includes('x')\n" + tail, []int{1}},
+		"closing parenthesis in JSX text": {"web/src/a.tsx", "function check(text: string) {\n  if (!text) return <li>1) Retry later</li>\n  if (text.includes('quota')) return <p>Limit</p>\n  return <p>{text}</p>\n}\n" + tail, []int{3}},
+		"opening parenthesis in JSX text": {"web/src/a.tsx", "function render(text: string) {\n  if (!text) return <p>Nothing :(</p>\n  return <p>{text}</p>\n}\nexport function load() {\n  try { go() } catch (err) {\n    const text = err.message\n    if (text.includes('quota')) retry()\n  }\n}\n", []int{8}},
+		"function type returned":          {"web/src/a.ts", "function check(text: string): () => { ok: boolean } {\n  if (text.includes('x')) retry()\n  return () => ({ ok: true })\n}\n" + tail, []int{2}},
+		"space after the parenthesis":     {"web/src/a.ts", "function check( text: string) {\n  if (text.includes('x')) retry()\n}\n" + tail, []int{2}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, c.want, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), c.path, c.source))
+		})
+	}
+}
+
+// A line that ends in an operator, or a next line that starts with one, goes
+// on with the expression of an arrow's body.
+func TestFrontendErrorMessageMatchArrowBodyOperators(t *testing.T) {
+	rule := NewFrontendErrorMessageMatchRule()
+	body := func(code string) string {
+		lines := strings.Split(code, "\n")
+		decls := rule.helperDecls(lines, lineOffsets(lines)).scoped()
+		if len(decls) != 1 {
+			return ""
+		}
+		return code[decls[0].start:decls[0].end]
+	}
+	for op := range strings.SplitSeq("+ - * / % & | ^ ! ~ ? : = < , .", " ") {
+		code := "const f = (text) => a " + op + "\n  b\nc"
+		assert.Equal(t, "(text) => a "+op+"\n  b", body(code), code)
+	}
+	for op := range strings.SplitSeq(". ? : | & + - * / % = < > ^ ,", " ") {
+		code := "const f = (text) => a\n  " + op + " b\nc"
+		assert.Equal(t, "(text) => a\n  "+op+" b", body(code), code)
+	}
 }
