@@ -356,3 +356,265 @@ func TestFrontendErrorMessageMatchAliasesGrowLinearly(t *testing.T) {
 		})
 	}
 }
+
+// A helper's parameter holds a message only inside the helper: a variable of
+// the same name elsewhere in the file, and the same name as the parameter of
+// a helper nobody hands a message, are other names.
+func TestFrontendErrorMessageMatch_HelperParameterOnlyInItsBody(t *testing.T) {
+	const source = `const seen: string[] = []
+const record = (text: string): void => { seen.push(text) }
+
+export function collect(page: Page) {
+  page.on('console', (message) => {
+    if (message.type() !== 'error') return
+    const text = message.text()
+    if (/favicon|net::ERR_|Failed to load resource/.test(text)) return
+    record(text)
+  })
+  page.on('pageerror', (error) => record(` + "`PageError: ${error.message}`" + `))
+}
+
+export function isCriticalPageError(text: string): boolean {
+  return /TypeError|ReferenceError|SyntaxError|Cannot read|is not defined|PageError/.test(text)
+}
+`
+	rule := NewFrontendErrorMessageMatchRule()
+	assert.Empty(t, rulestest.TextFileRuleLines(t, rule, "web/src/console.ts", source))
+	// The helper itself tests the message it is handed.
+	testing := strings.Replace(source, "{ seen.push(text) }", "{ if (text.includes('x')) return; seen.push(text) }", 1)
+	assert.Equal(t, []int{2}, rulestest.TextFileRuleLines(t, rule, "web/src/console.ts", testing))
+	// Outside the helper a variable of the parameter's name assigned from a
+	// message holds it.
+	declared := strings.Replace(source, "const text = message.text()", "const text = error.message", 1)
+	assert.Equal(t, []int{8}, rulestest.TextFileRuleLines(t, rule, "web/src/console.ts", declared))
+}
+
+// A body runs from the parameters to the brace that closes it, past a return
+// type with braces of its own and over lines; an arrow without braces runs to
+// the end of its expression.
+func TestFrontendErrorMessageMatch_HelperBodyEnds(t *testing.T) {
+	const source = `function shape(text: string): { kind: string } {
+  const kind = text.trim()
+  return { kind }
+}
+const short = (text: string) => text.toLowerCase()
+export function load() {
+  try { go() } catch (err) {
+    shape(err.message)
+    short(err.message)
+  }
+}
+export function other(text: string) {
+  if (text.includes('x')) retry()
+}
+export function inShape(text: string): { kind: string } {
+  if (text.includes('x')) retry()
+}
+`
+	assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.ts", source))
+	const inside = `function shape(text: string): { kind: string } {
+  const kind = text.trim()
+  if (kind.includes('y')) retry()
+  if (text.includes('x')) retry()
+  return { kind }
+}
+const short = (text: string) =>
+  text.includes('z')
+export function load() {
+  try { go() } catch (err) {
+    shape(err.message)
+    short(err.message)
+  }
+}
+`
+	assert.Equal(t, []int{3, 4, 8}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.ts", inside))
+}
+
+// The message goes on from a helper's parameter only where the parameter is
+// the helper's: a call outside the helper hands on a variable of that name.
+func TestFrontendErrorMessageMatch_HelperParameterHandedOnInItsBody(t *testing.T) {
+	const source = `function check(value: string) { if (value.includes("timeout")) retry() }
+function show(text: string) { log(text) }
+export function load(item: Item) {
+  try { go() } catch (err) { show(err.message) }
+  const text = item.label()
+  check(text)
+}
+`
+	assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.ts", source))
+	handed := strings.Replace(source, "{ log(text) }", "{ check(text) }", 1)
+	assert.Equal(t, []int{1}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.ts", handed))
+}
+
+// The body of a helper runs from its parameters past a return type to the
+// brace that closes it; an arrow's expression ends at the end of its line, at
+// a ';' or ',' or at a bracket it does not open. A declaration whose code
+// shows no body has none.
+func TestFrontendErrorMessageMatchHelperBody(t *testing.T) {
+	for code, want := range map[string]string{
+		"function f(text) { a } b":                            "(text) { a }",
+		"function f(text)\n  { a } b":                         "(text)\n  { a }",
+		"function f(text): { k: string } { a } b":             "(text): { k: string } { a }",
+		"function f(text):{ k: string } { a } b":              "(text):{ k: string } { a }",
+		"function f(text): Promise<{ k: string }> { a } b":    "(text): Promise<{ k: string }> { a }",
+		"function f(text): A | { k: string } { a } b":         "(text): A | { k: string } { a }",
+		"function f(text): A & { k: string } { a } b":         "(text): A & { k: string } { a }",
+		"function f(text): Map<A, { k: string }> { a } b":     "(text): Map<A, { k: string }> { a }",
+		"function f(text): string[] { a } b":                  "(text): string[] { a }",
+		"function f(text): (a: string) => void { a } b":       "(text): (a: string) => void { a }",
+		"function f(text) { a":                                "(text) { a",
+		"function f(text): string;\nb":                        "",
+		"function f(text) b":                                  "",
+		"function f(text":                                     "",
+		"x{ function f(text":                                  "",
+		"function f(text) => { a } b":                         "",
+		"function f(text): a = 1 { b }":                       "",
+		"function f(text): string":                            "",
+		"function f(text): = 1":                               "",
+		"function f(text): a) { b }":                          "",
+		"function f(text): a] { b }":                          "",
+		"function f(text): a} { b }":                          "",
+		"const f = (text) => text.trim(); b":                  "(text) => text.trim()",
+		"const f = (text) =>\n  text.trim()\nb":               "(text) =>\n  text.trim()",
+		"const f = (text) => g(text, 1), h = 2":               "(text) => g(text, 1)",
+		"const f = (text) => [text, 1][0]\nb":                 "(text) => [text, 1][0]",
+		"const f = (text) => ({ k: text })\nb":                "(text) => ({ k: text })",
+		"const f = (text) => text) + b":                       "(text) => text",
+		"const f = (text) => text] + b":                       "(text) => text",
+		"const f = (text) => text} + b":                       "(text) => text",
+		"const f = (text) => { a } b":                         "(text) => { a }",
+		"const f = (text): string => { a } b":                 "(text): string => { a }",
+		"const f = (text) => text && { k: 1 }; b":             "(text) => text && { k: 1 }",
+		"const f = (text) => text":                            "(text) => text",
+		"const f = (text): string => text; b":                 "(text): string => text",
+		"const f = (text): { k: string } => ({ k: text }); b": "(text): { k: string } => ({ k: text })",
+		"const f = async (text) => text; b":                   "(text) => text",
+		"const f = (a + b) * 2; c":                            "",
+		"const f = (text) { a } b":                            "",
+		"const f = (text): T { a } b":                         "",
+		"const f = (text): a = 1":                             "",
+		"const f = (text): a; b => c":                         "",
+		"const f = (text): a":                                 "",
+		"const f = (text): a) => b":                           "",
+		"const wrap = (function inner(text) { a }) + b":       "(text) { a }",
+	} {
+		lines := strings.Split(code, "\n")
+		rule := NewFrontendErrorMessageMatchRule()
+		var got []string
+		for _, decl := range rule.helperDecls(lines, lineOffsets(lines)).scoped() {
+			got = append(got, code[decl.start:decl.end])
+		}
+		if want == "" {
+			assert.Empty(t, got, code)
+		} else {
+			assert.Equal(t, []string{want}, got, code)
+		}
+	}
+}
+
+// Inside a helper nested in another one the name of both their parameters
+// is the inner one's; past the inner body it is the outer one's again.
+func TestFrontendErrorMessageMatch_NestedHelperParameter(t *testing.T) {
+	const source = `function outer(text: string) {
+  const inner = (text: string) => text.includes('a')
+  if (text.includes('b')) retry()
+}
+export function load() {
+  try { go() } catch (err) { outer(err.message) }
+}
+`
+	rule := NewFrontendErrorMessageMatchRule()
+	assert.Equal(t, []int{3}, rulestest.TextFileRuleLines(t, rule, "web/src/a.ts", source))
+	inner := strings.Replace(source, "outer(err.message)", "inner(err.message)", 1)
+	assert.Equal(t, []int{2}, rulestest.TextFileRuleLines(t, rule, "web/src/a.ts", inner))
+	// Past both bodies the name is the variable again.
+	const after = `function outer(text: string) {
+  const inner = (text: string) => log(text)
+}
+export function load() {
+  try { go() } catch (err) {
+    const text = err.message
+    if (text.includes('x')) retry()
+  }
+}
+`
+	assert.Equal(t, []int{7}, rulestest.TextFileRuleLines(t, rule, "web/src/a.ts", after))
+	// Right after the closing brace the name is no longer the parameter.
+	const minified = `function show(text){log(text)}text.includes("x");try{go()}catch(err){show(err.message)}`
+	assert.Empty(t, rulestest.TextFileRuleLines(t, rule, "web/src/a.js", minified))
+}
+
+// typeof before a name on the line keeps the place of the name, so a name
+// past the end of a helper's body is not taken for its parameter.
+func TestFrontendErrorMessageMatch_TypeofKeepsOffsets(t *testing.T) {
+	const source = `const record = (text: string) => typeof text === 'string' ? text : ''; if (text.includes('x')) b()
+export function load() {
+  try { go() } catch (err) { record(err.message) }
+}
+`
+	assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.ts", source))
+}
+
+// Of two names holding a message where one runs on past a '$' in the other,
+// m and m$x, the longer is tested.
+func TestFrontendErrorMessageMatch_NamesOverlap(t *testing.T) {
+	const source = `export function a() {
+  try { b() } catch (err) {
+    const m = err.message
+    const m$x = err.message
+    if (m$x.includes("a")) b()
+    const y$m = err.message
+    if (y$m.includes("a")) b()
+  }
+}
+`
+	assert.Equal(t, []int{5, 7}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.ts", source))
+}
+
+// Many helpers with one name for their parameters, and that name looked up
+// on many lines past their bodies, cost time linear in the file: a body passed
+// over is not passed over again for every later lookup.
+func TestFrontendErrorMessageMatchHelperScopesGrowLinearly(t *testing.T) {
+	rule := NewFrontendErrorMessageMatchRule()
+	lookups := func(n int) {
+		lines := make([]string, 0, 2*n)
+		for range n {
+			lines = append(lines, "function h(text) { log(text) }")
+		}
+		for range n {
+			lines = append(lines, "text")
+		}
+		starts := lineOffsets(lines)
+		scopes := newHelperScopes(rule.helperDecls(lines, starts))
+		for i := n; i < 2*n; i++ {
+			for range 8 {
+				if got := scopes.symbol("text", starts[i]); got != (textSymbol{name: "text"}) {
+					t.Fatalf("line %d: text is %+v, want the variable", i+1, got)
+				}
+			}
+		}
+	}
+	const scale, limit = 32, 140
+	// Measured at scale 32: current 24–52; the mutant that drops the bodies it
+	// passed over only for the one lookup 254–630. Limit 140.
+	checkGrowth(t, operationGrowthAtScale(t, lookups, 500, scale), scale, limit)
+}
+
+// A variable assigned from code that reads a helper's parameter inside the
+// helper's body holds the message the helper is handed.
+func TestFrontendErrorMessageMatch_DeclarationReadsParameterInBody(t *testing.T) {
+	const source = `const kind = keep(function shape(text: string) { return text.trim() })
+export function load() {
+  try { go() } catch (err) { shape(err.message) }
+  if (kind.includes('x')) retry()
+}
+`
+	assert.Equal(t, []int{4}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.ts", source))
+	// A name of the value past the end of the helper on the same line is the
+	// variable, wherever the value starts.
+	const later = `function shape(text){log(text)};const kind=String(1,2,3,4,5,6,7,text)
+try{go()}catch(err){shape(err.message)}
+if(kind.includes('x'))retry()
+`
+	assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.js", later))
+}
