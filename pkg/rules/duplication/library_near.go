@@ -805,7 +805,7 @@ func (w *goNearWalker) untouchedWhileNamed(assign *ast.AssignStmt, obj types.Obj
 		if !free || node == nil || node.End() <= from || node.Pos() >= to {
 			return false
 		}
-		free = node.Pos() < from || !goEffect(w.n.info, node) && !(written[node] && goReaches(w.n.info, node))
+		free = node.Pos() < from || !goEffect(w.n.info, node) && (!written[node] || !goReaches(w.n.info, node))
 		return free
 	})
 	return free
