@@ -65,7 +65,7 @@ func NewFrontendErrorMessageMatchRule() *FrontendErrorMessageMatchRule {
 
 // AnalyzeFile reports the lines that test the wording of an error message.
 func (r *FrontendErrorMessageMatchRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
-	if (!ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) || patternkit.SkipFrontendPath(ctx) {
+	if (!ctx.IsTypeScriptFile() && !ctx.IsJavaScriptFile()) || patternkit.SkipFrontendPath(ctx) || browserHarness(ctx) {
 		return nil
 	}
 	code := separateDollars(helpers.FileJSCode(ctx))
@@ -107,6 +107,24 @@ func (r *FrontendErrorMessageMatchRule) AnalyzeFile(ctx *core.FileContext) []*co
 }
 
 var typeofOperand = regexp.MustCompile(`\btypeof\s+[A-Za-z_$][\w$.]*`)
+
+// browserHarnessSign is a listener to a browser page's console or uncaught
+// errors, or an import of a browser test library.
+var browserHarnessSign = regexp.MustCompile(`\.\s*on\s*\(\s*['"` + "`" + `](?:console|pageerror)['"` + "`" + `]` +
+	`|(?:\bfrom\s+|\brequire\s*\(\s*|\bimport\s*\(\s*)['"](?:@playwright/test|playwright(?:-core)?|puppeteer(?:-core)?)['"]`)
+
+// browserHarness reports a file that drives a browser for a test, as a file
+// under e2e/ does: the errors it reads are the page's, and a console message
+// carries only its type and text, so the text is the one sign of an error.
+func browserHarness(ctx *core.FileContext) bool {
+	for _, line := range helpers.FileJSText(ctx) {
+		if (strings.Contains(line, "console") || strings.Contains(line, "pageerror") ||
+			strings.Contains(line, "playwright") || strings.Contains(line, "puppeteer")) && browserHarnessSign.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
 
 // textTests are the words every form the rule matches contains: a string
 // method, a comparison, a regular expression's test.

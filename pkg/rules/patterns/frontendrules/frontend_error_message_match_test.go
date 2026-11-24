@@ -356,3 +356,67 @@ func TestFrontendErrorMessageMatchAliasesGrowLinearly(t *testing.T) {
 		})
 	}
 }
+
+// A test harness that collects the browser page's console and uncaught errors
+// has no thrower to ask for a code: a console message carries only its type and
+// text, so the text is the one sign of an error. A file that listens to the
+// page's console or pageerror events, or imports a browser test library, is
+// such a harness, as a file under e2e/ is.
+func TestFrontendErrorMessageMatch_BrowserConsoleHarness(t *testing.T) {
+	const collector = `export function collectPageErrors(page: Watched) {
+  const record = (text: string): void => { seen.push(text) }
+  page.on('console', (message) => {
+    if (message.type() !== 'error') return
+    const text = message.text()
+    if (/favicon|net::ERR_/.test(text)) return
+    record(text)
+  })
+  page.on('pageerror', (error) => record(` + "`PageError: ${error.message}`" + `))
+}
+
+export function isCriticalPageError(text: string): boolean {
+  return /TypeError|ReferenceError|PageError/.test(text)
+}
+`
+	assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "shared/ts/page-errors.ts", collector))
+
+	const imported = `import { test, expect } from '@playwright/test'
+
+export function failOnCrash(err: Error) {
+  if (err.message.includes('Target crashed')) throw err
+}
+`
+	assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "shared/ts/crash.ts", imported))
+
+	// Each sign alone: the console listener, the pageerror listener, a
+	// required puppeteer.
+	for name, sign := range map[string]string{
+		"console":   "page.on(\"console\", (message) => record(message.text()))",
+		"pageerror": "page.on('pageerror', (error) => record(error.message))",
+		"require":   "const puppeteer = require('puppeteer')",
+	} {
+		source := sign + "\nexport function isCritical(err: Error) {\n  return /TypeError/.test(err.message)\n}\n"
+		assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "shared/ts/"+name+".ts", source), name)
+	}
+
+	// The application's own code still branches on the wording of its errors,
+	// a page handler named like the event too.
+	const app = `export async function load(api: Api) {
+  socket.on('error', log)
+  win.webContents.on('console-message', log)
+  // unlike page.on('pageerror') of an e2e helper
+  const lib = 'playwright'
+  try {
+    await api.load()
+  } catch (err) {
+    if (err.message.includes('Failed to fetch')) return retry()
+  }
+}
+
+export function onSave(err: Error) {
+  const text = err.message
+  if (text.startsWith('Quota')) notify()
+}
+`
+	assert.Equal(t, []int{9, 15}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "frontend/src/load.ts", app))
+}
