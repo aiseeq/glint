@@ -3910,6 +3910,28 @@ func All(src map[string]int, seen map[int]bool) []string {
 	return out
 }
 `,
+		"map ranged over": `package order
+
+import "sort"
+
+func All(src map[string]int, given map[int]bool) []string {
+	var out []string
+	for _, seen := range []map[int]bool{given} {
+		add := func(slot int, who string) {
+			if !seen[slot] {
+				out = append(out, who)
+			}
+			seen[slot] = true
+		}
+		for who, slot := range src {
+			add(slot, who)
+			clear(given)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+`,
 		"mark of shadowing slot": `package order
 
 import "sort"
@@ -4003,4 +4025,81 @@ func All(src map[string]int) ([]string, int) {
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, dedupCallLine(source), violations[0].Line)
+}
+
+// dedupMapSource builds a loop over src whose callee dedups by seen in the
+// r2 form - writes while the slot is free, marks it after; decl declares seen,
+// tail ends each iteration, extra goes at the top of the file.
+func dedupMapSource(extra, decl, tail string) string {
+	return `package order
+
+import "sort"
+
+type holder struct{ m map[int]bool }
+` + extra + `
+func All(src map[string]int, given map[int]bool) ([]string, any) {
+	var kept any
+	h := &holder{m: map[int]bool{}}
+	` + decl + `
+	var out []string
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+	}
+	for who, slot := range src {
+		add(slot, who)
+		` + tail + `
+	}
+	sort.Strings(out)
+	return out, []any{kept, h}
+}
+`
+}
+
+// A seen map that is another map under a local name - a field of a holder, a
+// map of the package, a parameter, what a getter returns - or that leaves the
+// function - returned by a literal, put in a composite literal, assigned to
+// another variable, sent on a channel, its address taken - may be emptied by
+// that other name: the guard is left to its free span.
+func TestMapIterationOrderAcceptsDedupWhoseMapIsNotItsOwn(t *testing.T) {
+	cases := map[string][3]string{
+		"alias of field":           {"", "seen := h.m", "clear(h.m)"},
+		"alias of package map":     {"var shared = map[int]bool{}\n", "seen := shared", "clear(shared)"},
+		"alias of parameter":       {"", "seen := given", "clear(given)"},
+		"map from getter":          {"var shared = map[int]bool{}\n\nfunc seenMap() map[int]bool { return shared }\n", "var seen = seenMap()", "clear(shared)"},
+		"returned by literal":      {"", "seen := map[int]bool{}\n\tkept = func() map[int]bool { return seen }", ""},
+		"in composite literal":     {"", "seen := map[int]bool{}", "kept = holder{m: seen}"},
+		"declared as other var":    {"", "seen := map[int]bool{}", "var m = seen\n\t\tkept = m"},
+		"sent on channel":          {"", "seen := map[int]bool{}\n\tch := make(chan map[int]bool, len(src))\n\tkept = ch", "ch <- seen"},
+		"address taken":            {"", "seen := map[int]bool{}", "kept = &seen"},
+		"second of pair from call": {"var shared = map[int]bool{}\n\nfunc pair() (int, map[int]bool) { return 0, shared }\n", "n, seen := pair()\n\tkept = n", "clear(shared)"},
+	}
+	for name, parts := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Empty(t, analyzeMapOrder(t, dedupMapSource(parts[0], parts[1], parts[2])))
+		})
+	}
+}
+
+// A seen map the function makes itself - make, a composite literal, a
+// declaration with no value - is its own: the first owner of a slot wins.
+func TestMapIterationOrderReportsDedupWinnerOnFreshMap(t *testing.T) {
+	decls := map[string]string{
+		"made":              "seen := make(map[int]bool, len(src))",
+		"literal":           "seen := map[int]bool{}",
+		"declared literal":  "var seen = map[int]bool{}",
+		"made beside other": "n, seen := 0, make(map[int]bool)\n\tkept = n",
+		"declared nil":      "var seen map[int]bool",
+	}
+	for name, decl := range decls {
+		t.Run(name, func(t *testing.T) {
+			source := dedupMapSource("", decl, "")
+			violations := analyzeMapOrder(t, source)
+
+			require.Len(t, violations, 1)
+			assert.Equal(t, dedupCallLine(source), violations[0].Line)
+		})
+	}
 }
