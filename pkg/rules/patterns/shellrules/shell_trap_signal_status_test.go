@@ -658,6 +658,29 @@ trap 'echo bye' TERM # want
 state=$(while ! ready; do sleep 1; done)
 trap - TERM
 `)
+	// Work in the left of ||, in the condition of an if or in the word of a
+	// case runs with the handler on, and the path that exits after it, or
+	// matches no item, keeps that work.
+	shellWanted(t, "shell-trap-signal-without-exit", "k2_or_exit_then_reset.sh", `#!/bin/bash
+trap 'rm -f "$tmp"' TERM # want
+download "$url" > "$tmp" || exit 1
+trap - TERM
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "k3_if_cond_work_then_exit.sh", `#!/bin/bash
+trap 'rm -f "$tmp"' TERM # want
+if ! download "$url" > "$tmp"; then exit 1; fi
+trap - TERM
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "k4_else_exit_after_cond_work.sh", `#!/bin/bash
+trap 'rm -f "$tmp"' TERM # want
+if download "$url" > "$tmp"; then trap - TERM; else exit 1; fi
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "k5_case_word_work_no_match.sh", `#!/bin/bash
+trap 'rm -f "$tmp"' TERM # want
+case "$(detect-mode --slow)" in
+  a) trap - TERM ;;
+esac
+`)
 	// A return in a branch of a function goes on in the caller.
 	shellWanted(t, "shell-trap-signal-without-exit", "branch_return_to_caller.sh", `#!/bin/bash
 setup() {
