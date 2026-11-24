@@ -144,12 +144,12 @@ func (r *BinScriptExecBitRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 
 // chmodSuggestion names the command that records the bit, the path quoted
 // for a shell run where glint ran: bin/a b would be two paths, bin/q"x an open
-// quote.
+// quote, and after -- a name -x run from bin is no option of git.
 func chmodSuggestion(rel string) string {
 	quoted, err := syntax.Quote(rel, syntax.LangBash)
 	if err != nil {
 		return "Record the executable bit in git with git update-index --chmod=+x; the path " +
 			strconv.Quote(rel) + " cannot be written for a shell: " + err.Error()
 	}
-	return "Record the executable bit in git: git update-index --chmod=+x " + quoted
+	return "Record the executable bit in git: git update-index --chmod=+x -- " + quoted
 }
