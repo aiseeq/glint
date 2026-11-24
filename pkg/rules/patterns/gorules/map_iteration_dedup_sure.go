@@ -14,18 +14,19 @@ import (
 // writes run only past a free slot. They may only where every way the slot
 // could be another than the one tested, or be emptied again, is ruled out by
 // the shape of the code: the variables the slot is spelled with are never
-// written, the seen map is only ever filled with a mark of that same slot,
+// written, the seen map is a local of the function that runs the loop and is
+// only ever filled there with a mark of that same slot,
 // no goto jumps back, and the guard, the marks and the writes sit in one
 // function. Anywhere else the free span of the guard decides, as it did
 // before the paths were followed.
-func (c *dedupCallee) pathsSure(guard dedupGuard, body *ast.BlockStmt, writes []ast.Stmt, info *types.Info) bool {
+func (c *dedupCallee) pathsSure(fn *ast.FuncDecl, guard dedupGuard, body *ast.BlockStmt, writes []ast.Stmt, info *types.Info) bool {
 	for _, stmt := range append(slices.Clip(writes), guard.marks...) {
 		if bodyOf(c.body, stmt) != body {
 			return false
 		}
 	}
 	parents := helpers.ParentMap(c.body)
-	return c.indexFixed(guard.slot.Index, parents, info) && c.onlyMarked(guard, parents, info) && !gotoBack(c.body)
+	return c.indexFixed(guard.slot.Index, parents, info) && onlyMarked(fn, guard, info) && !gotoBack(c.body)
 }
 
 // indexFixed reports whether the slot index is built of constants and of
@@ -118,62 +119,29 @@ func onlyRead(ident *ast.Ident, parents map[ast.Node]ast.Node, info *types.Info)
 	}
 }
 
-// onlyMarked reports whether the callee writes the seen map only with marks
-// of the tested slot - seen[slot] = <a constant other than zero or false>,
-// count[slot]++ - and otherwise only reads it: indexes it, ranges over it,
-// takes its len, compares it. A map reached through a field (s.taken) needs
-// its holder used only for its fields.
-func (c *dedupCallee) onlyMarked(guard dedupGuard, parents map[ast.Node]ast.Node, info *types.Info) bool {
-	isMap, holder, ok := seenMapOf(guard.slot.X, info)
-	if !ok {
+// onlyMarked reports whether the seen map is a local of the function that
+// runs the loop and that whole function - the loop, the callee, any other
+// literal in it - writes the map only with marks of the tested slot
+// (seen[slot] = <a constant other than zero or false>, count[slot]++) and
+// otherwise only reads it: indexes it, ranges over it, takes its len,
+// compares it, discards it. A map of the package or a field of a holder may
+// be emptied anywhere - a helper, a method of the holder, the caller - and is
+// not.
+func onlyMarked(fn *ast.FuncDecl, guard dedupGuard, info *types.Info) bool {
+	ident, _ := ast.Unparen(guard.slot.X).(*ast.Ident)
+	seen, isVar := info.Uses[ident].(*types.Var)
+	if !isVar || seen.Pos() < fn.Body.Pos() || seen.Pos() >= fn.Body.End() {
 		return false
 	}
+	parents := helpers.ParentMap(fn.Body)
 	marked := true
-	ast.Inspect(c.body, func(n ast.Node) bool {
-		expr, isExpr := n.(ast.Expr)
-		switch {
-		case !isExpr:
-		case isMap(expr):
-			marked = guard.onlyMarks(expr, parents, info)
-			return false
-		case holder != nil:
-			if ident, isIdent := expr.(*ast.Ident); isIdent && info.Uses[ident] == holder {
-				selector, isSelector := parents[ident].(*ast.SelectorExpr)
-				marked = isSelector && selector.X == ident && info.Selections[selector] != nil &&
-					info.Selections[selector].Kind() == types.FieldVal
-			}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if use, ok := n.(*ast.Ident); ok && info.Uses[use] == seen {
+			marked = guard.onlyMarks(use, parents, info)
 		}
 		return marked
 	})
 	return marked
-}
-
-// seenMapOf returns how to tell the seen map in the callee - a variable, or a
-// field of a variable - and the variable that holds the field.
-func seenMapOf(seenMap ast.Expr, info *types.Info) (func(ast.Expr) bool, types.Object, bool) {
-	switch node := ast.Unparen(seenMap).(type) {
-	case *ast.Ident:
-		obj := info.Uses[node]
-		return func(expr ast.Expr) bool {
-			ident, ok := expr.(*ast.Ident)
-			return ok && info.Uses[ident] == obj
-		}, nil, obj != nil
-	case *ast.SelectorExpr:
-		root, ok := node.X.(*ast.Ident)
-		if !ok || info.Uses[root] == nil {
-			return nil, nil, false
-		}
-		holder := info.Uses[root]
-		return func(expr ast.Expr) bool {
-			selector, ok := expr.(*ast.SelectorExpr)
-			if !ok || selector.Sel.Name != node.Sel.Name {
-				return false
-			}
-			x, ok := selector.X.(*ast.Ident)
-			return ok && info.Uses[x] == holder
-		}, holder, true
-	}
-	return nil, nil, false
 }
 
 // onlyMarks reports whether a use of the seen map is a read or a mark of the
@@ -189,8 +157,21 @@ func (g dedupGuard) onlyMarks(use ast.Expr, parents map[ast.Node]ast.Node, info 
 		return parent.X == use
 	case *ast.BinaryExpr:
 		return true
+	case *ast.AssignStmt:
+		return discarded(parent, use)
 	}
 	return false
+}
+
+// discarded reports whether the assignment hands the value to the blank
+// identifier: _ = seen reads the map and keeps nothing of it.
+func discarded(assign *ast.AssignStmt, value ast.Expr) bool {
+	at := slices.Index(assign.Rhs, value)
+	if at < 0 {
+		return false
+	}
+	blank, ok := assign.Lhs[at].(*ast.Ident)
+	return ok && blank.Name == "_"
 }
 
 func calleeIdent(fun ast.Expr) *ast.Ident {
@@ -201,7 +182,7 @@ func calleeIdent(fun ast.Expr) *ast.Ident {
 // marksOrReads reports whether the index of the seen map is read, or written
 // with a mark of the tested slot.
 func (g dedupGuard) marksOrReads(index *ast.IndexExpr, parents map[ast.Node]ast.Node, info *types.Info) bool {
-	sameSlot := types.ExprString(index.Index) == types.ExprString(g.slot.Index)
+	sameSlot := sameIndex(index.Index, g.slot.Index, info)
 	switch parent := parents[index].(type) {
 	case *ast.IncDecStmt:
 		return sameSlot && parent.Tok == token.INC
@@ -245,4 +226,28 @@ func gotoBack(body *ast.BlockStmt) bool {
 		return !back
 	})
 	return back
+}
+
+// sameIndex reports whether two indexes have the same shape and name the same
+// variables, fields and constants: a variable that shadows the tested one is
+// another slot however it is spelled.
+func sameIndex(left, right ast.Expr, info *types.Info) bool {
+	switch x := ast.Unparen(left).(type) {
+	case *ast.Ident:
+		y, ok := ast.Unparen(right).(*ast.Ident)
+		return ok && info.ObjectOf(x) != nil && info.ObjectOf(x) == info.ObjectOf(y)
+	case *ast.BasicLit:
+		y, ok := ast.Unparen(right).(*ast.BasicLit)
+		return ok && x.Kind == y.Kind && x.Value == y.Value
+	case *ast.SelectorExpr:
+		y, ok := ast.Unparen(right).(*ast.SelectorExpr)
+		return ok && sameIndex(x.Sel, y.Sel, info) && sameIndex(x.X, y.X, info)
+	case *ast.BinaryExpr:
+		y, ok := ast.Unparen(right).(*ast.BinaryExpr)
+		return ok && x.Op == y.Op && sameIndex(x.X, y.X, info) && sameIndex(x.Y, y.Y, info)
+	case *ast.UnaryExpr:
+		y, ok := ast.Unparen(right).(*ast.UnaryExpr)
+		return ok && x.Op == y.Op && sameIndex(x.X, y.X, info)
+	}
+	return false
 }

@@ -3254,8 +3254,8 @@ func withLock(f func()) { f() }
 func advance(p *int) { *p++ }
 
 type cursor struct {
-	n  int
-	at *cursor
+	n, m int
+	at   *cursor
 }
 
 func (c *cursor) bump() { c.n++ }
@@ -3674,6 +3674,10 @@ func TestMapIterationOrderReportsDedupWinnerWhereThePathsAreSure(t *testing.T) {
 			out = append(out, who)
 		}
 		seen[slot+base] = true`,
+		"slot negated": `		if !seen[-slot] {
+			out = append(out, who)
+		}
+		seen[-slot] = true`,
 		"slot in field of local": `		c := cursor{n: slot}
 		if !seen[c.n] {
 			out = append(out, who)
@@ -3764,6 +3768,33 @@ func TestMapIterationOrderAcceptsDedupWhereThePathsAreNotSure(t *testing.T) {
 		}
 		seen[slot] = true
 		seen[slot+1] = true`,
+		"other field filled": `		c := cursor{n: slot, m: slot + 1}
+		if !seen[c.n] {
+			out = append(out, who)
+		}
+		seen[c.n] = true
+		seen[c.m] = true`,
+		"field of other cursor filled": `		c, d := cursor{n: slot}, cursor{n: slot + 1}
+		if !seen[c.n] {
+			out = append(out, who)
+		}
+		seen[c.n] = true
+		seen[d.n] = true`,
+		"slot below filled": `		if !seen[slot+1] {
+			out = append(out, who)
+		}
+		seen[slot+1] = true
+		seen[slot-1] = true`,
+		"slot two above filled": `		if !seen[slot+1] {
+			out = append(out, who)
+		}
+		seen[slot+1] = true
+		seen[slot+2] = true`,
+		"complement filled": `		if !seen[-slot] {
+			out = append(out, who)
+		}
+		seen[-slot] = true
+		seen[^slot] = true`,
 		"count added to": `		if count[slot] == 0 {
 			out = append(out, who)
 		}
@@ -3774,4 +3805,202 @@ func TestMapIterationOrderAcceptsDedupWhereThePathsAreNotSure(t *testing.T) {
 			assert.Empty(t, analyzeMapOrder(t, dedupCalleeSource(body)))
 		})
 	}
+}
+
+// The seen map is emptied, or the slot taken back, outside the callee - by
+// the loop that calls it, by a helper the callee calls, by a method of the
+// map's holder - or the mark fills a slot of a variable that shadows the
+// tested one: every entry is kept, and the guard is left to its free span.
+func TestMapIterationOrderAcceptsDedupWhoseMapIsEmptiedOutside(t *testing.T) {
+	sources := map[string]string{
+		"loop clears map": `package order
+
+import "sort"
+
+type pair struct {
+	slot int
+	who  string
+}
+
+func Pairs(src map[string][]int) []pair {
+	seen := map[int]bool{}
+	var out []pair
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			out = append(out, pair{slot, who})
+		}
+		seen[slot] = true
+	}
+	for who, slots := range src {
+		clear(seen)
+		for _, s := range slots {
+			add(s, who)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].slot != out[j].slot {
+			return out[i].slot < out[j].slot
+		}
+		return out[i].who < out[j].who
+	})
+	return out
+}
+`,
+		"loop takes slot back": `package order
+
+import "sort"
+
+func All(src map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+	}
+	for who, slot := range src {
+		add(slot, who)
+		delete(seen, slot)
+	}
+	sort.Strings(out)
+	return out
+}
+`,
+		"helper resets package map": `package order
+
+import "sort"
+
+func All(src map[string]int) []string {
+	var out []string
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+		reset()
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+
+var seen = map[int]bool{}
+
+func reset() { clear(seen) }
+`,
+		"map handed in by caller": `package order
+
+import "sort"
+
+func All(src map[string]int, seen map[int]bool) []string {
+	var out []string
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`,
+		"mark of shadowing slot": `package order
+
+import "sort"
+
+func All(src map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		if slot := -slot - 1; slot < 0 {
+			seen[slot] = true
+		}
+	}
+	for who, slot := range src {
+		if slot >= 0 {
+			add(slot, who)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+`,
+		"holder reset by caller": `package order
+
+import "sort"
+
+type batch struct {
+	taken map[int]bool
+	out   []string
+}
+
+func (b *batch) add(slot int, who string) {
+	if !b.taken[slot] {
+		b.out = append(b.out, who)
+	}
+	b.taken[slot] = true
+}
+
+func (b *batch) reset() { clear(b.taken) }
+
+func (b *batch) All(src map[string]int) []string {
+	for who, slot := range src {
+		b.add(slot, who)
+		b.reset()
+	}
+	sort.Strings(b.out)
+	return b.out
+}
+`,
+	}
+	for name, source := range sources {
+		t.Run(name, func(t *testing.T) {
+			assert.Empty(t, analyzeMapOrder(t, source))
+		})
+	}
+}
+
+// The loop that calls the callee may read the seen map - its len, a lookup, a
+// range - and leave the first owner of a slot the winner.
+func TestMapIterationOrderReportsDedupWinnerWhoseMapTheLoopReads(t *testing.T) {
+	source := `package order
+
+import "sort"
+
+func All(src map[string]int) ([]string, int) {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slot int, who string) {
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+	}
+	taken := 0
+	for who, slot := range src {
+		add(slot, who)
+		if seen[slot] && len(seen) > 0 {
+			taken++
+		}
+	}
+	for range seen {
+		taken--
+	}
+	sort.Strings(out)
+	return out, taken
+}
+`
+	violations := analyzeMapOrder(t, source)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, dedupCallLine(source), violations[0].Line)
 }
