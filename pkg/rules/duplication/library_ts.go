@@ -286,11 +286,13 @@ func (s *tsSource) scan(i int) {
 }
 
 // tsObjectBefore are the tokens after which a brace opens an object, not a
-// block. After a colon a brace opens an object only in the second branch of
-// a conditional (conditionalElse), not after a case or a label.
+// block: the assignments that may assign an object, q ??= { bid, ask },
+// though not those of arithmetic, which make a number or a text of it.
+// After a colon a brace opens an object only in the second branch of a
+// conditional (conditionalElse), not after a case or a label.
 var tsObjectBefore = map[string]bool{
-	"(": true, "[": true, ",": true, "=": true, "return": true, "throw": true,
-	"?": true, "??": true, "||": true, "&&": true, "...": true,
+	"(": true, "[": true, ",": true, "=": true, "??=": true, "||=": true, "&&=": true,
+	"return": true, "throw": true, "?": true, "??": true, "||": true, "&&": true, "...": true,
 }
 
 // conditionalElse reports whether the colon at colon parts the branches of

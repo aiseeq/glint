@@ -12,8 +12,8 @@ import (
 // The library scales and raises weights, wraps words, sums and counts the
 // values from a floor up, finds a peak, divides, reads a byte, sets one
 // counter and reads another, also after a new value of the other, sums
-// values apart by sign and tallies them, grows weights by one and doubles
-// them, and resets a pair.
+// values apart by sign and tallies them, counts in two loops, grows weights
+// by one and doubles them, and resets a pair.
 const libraryOrderSource = `package lib
 
 type Box struct{ N int }
@@ -138,6 +138,40 @@ func Breaks(xs []int, lim, cap int) (int, int) {
 			break
 		}
 		m += v
+	}
+	if m > cap {
+		m = cap
+	}
+	return n, m
+}
+
+func TwoLoops(xs []int, lim, cap int) (int, int) {
+	n, m := 0, 0
+	for range lim {
+		if cap > 9 {
+			continue
+		}
+		n++
+	}
+	for range lim {
+		m++
+	}
+	if n > cap {
+		n = cap
+	}
+	return n, m
+}
+
+func LoopsAfter(xs []int, lim, cap int) (int, int) {
+	n, m := 0, 0
+	for range lim {
+		n++
+	}
+	for range lim {
+		if cap > 9 {
+			continue
+		}
+		m++
 	}
 	if m > cap {
 		m = cap
@@ -286,8 +320,10 @@ func Tally(xs []int, bonus, floor, cap int) int {
 
 // A copy keeps the order of two writes of one variable unless both add to
 // an integer or both multiply it, the place of a statement against a jump
-// that skips it or a check that guards it, and reads no value a write
-// through another pointer may change while it keeps a second name of it;
+// that skips it or a check that guards it, also when it moves to a loop of
+// the same head that has no such jump, either way round, and reads no value
+// a write through another pointer may change while it keeps a second name
+// of it;
 // a field that stands for a field makes its pointer stand for the other
 // pointer and for nothing else; a copy with independent statements
 // swapped, also past a loop that a continue leaves, is still a copy.
@@ -676,6 +712,82 @@ func payprovBreaks(vals []int, most, top int) (int, int) {
 	return a, b
 }
 `, "Function payprovBreaks duplicates function Breaks"},
+		"count moved to a loop without the continue": {`package app
+
+func payprovLoops(xs []int, lim, cap int) (int, int) {
+	n, m := 0, 0
+	for range lim {
+		n++
+	}
+	for range lim {
+		if cap > 9 {
+			continue
+		}
+		m++
+	}
+	if n > cap {
+		n = cap
+	}
+	return n, m
+}
+`, ""},
+		"two loops, renamed": {`package app
+
+func payprovLoops(vals []int, most, top int) (int, int) {
+	a, b := 0, 0
+	for range most {
+		if top > 9 {
+			continue
+		}
+		a++
+	}
+	for range most {
+		b++
+	}
+	if a > top {
+		a = top
+	}
+	return a, b
+}
+`, "Function payprovLoops duplicates function TwoLoops"},
+		"count moved to the loop with the continue": {`package app
+
+func payprovLoops(xs []int, lim, cap int) (int, int) {
+	n, m := 0, 0
+	for range lim {
+		if cap > 9 {
+			continue
+		}
+		n++
+	}
+	for range lim {
+		m++
+	}
+	if m > cap {
+		m = cap
+	}
+	return n, m
+}
+`, ""},
+		"loop with the continue second, renamed": {`package app
+
+func payprovLoops(vals []int, most, top int) (int, int) {
+	a, b := 0, 0
+	for range most {
+		a++
+	}
+	for range most {
+		if top > 9 {
+			continue
+		}
+		b++
+	}
+	if b > top {
+		b = top
+	}
+	return a, b
+}
+`, "Function payprovLoops duplicates function LoopsAfter"},
 		"weight doubled before it grows by one": {`package app
 
 func payprovGrow(ws []int, cap int) int {
@@ -946,6 +1058,33 @@ export function spreadTwice({ bid, ask }: Quote, floor: number): number {
   return s * 2 + bid
 }
 
+export function lazyQuote(bid: number, ask: number, floor: number, q: Quote | null): Quote | null {
+  if (ask - bid < floor) ask = bid + floor
+  if (bid < 0) bid = 0
+  q ??= { bid, ask }
+  return q
+}
+
+export function orQuote(bid: number, ask: number, floor: number, q: Quote | null): Quote | null {
+  if (ask - bid < floor) ask = bid + floor
+  if (bid < 0) bid = 0
+  q ||= { bid, ask }
+  return q
+}
+
+export function andQuote(bid: number, ask: number, floor: number, q: Quote | null): Quote | null {
+  if (ask - bid < floor) ask = bid + floor
+  if (bid < 0) bid = 0
+  q &&= { bid, ask }
+  return q
+}
+
+export function pickSecond(floor: number, { bid, ask }: Quote): number {
+  let s = ask - bid
+  if (s < floor) s = floor
+  return s * 4 + bid
+}
+
 export function skipRest(xs: number[], step: number, cap: number): number[] {
   let a = 0
   let b = 0
@@ -983,9 +1122,10 @@ export function caseBlock(xs: number[], step: number, cap: number): number {
 // may join texts, the place of a statement against a continue that skips
 // it, also from inside a switch, but not against a loop it leaves, and the
 // names of the properties they destructure or build an object from, also
-// in a parameter, after the colon of a conditional and in a thrown object,
-// and the places of the elements of a parameter; a brace after a case
-// opens a block.
+// in a parameter, the first or another, after the colon of a conditional,
+// in a thrown object and in an object a logical assignment assigns, and the
+// places of the elements of a parameter; a brace after a case opens a
+// block.
 func TestDuplicateFuncOfLibraryTypeScriptOrderResidue(t *testing.T) {
 	for name, tc := range map[string]struct{ source, subject string }{
 		"word before the bracket": {`function payprovWrap(words: string[], sep: string, width: number): string {
@@ -1227,6 +1367,60 @@ func TestDuplicateFuncOfLibraryTypeScriptOrderResidue(t *testing.T) {
   return s * 2 + lo
 }
 `, "Function payprovSpread is a near copy (100% alike) of function spreadTwice"},
+		"object assigned with ??= under the other names": {`function payprovQuote(ask: number, bid: number, floor: number, q: Quote | null): Quote | null {
+  if (bid - ask < floor) bid = ask + floor
+  if (ask < 0) ask = 0
+  q ??= { ask, bid }
+  return q
+}
+`, ""},
+		"object assigned with ??= with the names as keys": {`function payprovQuote(lo: number, hi: number, least: number, q: Quote | null): Quote | null {
+  if (hi - lo < least) hi = lo + least
+  if (lo < 0) lo = 0
+  q ??= { bid: lo, ask: hi }
+  return q
+}
+`, "Function payprovQuote duplicates function lazyQuote"},
+		"object assigned with ||= under the other names": {`function payprovQuote(ask: number, bid: number, floor: number, q: Quote | null): Quote | null {
+  if (bid - ask < floor) bid = ask + floor
+  if (ask < 0) ask = 0
+  q ||= { ask, bid }
+  return q
+}
+`, ""},
+		"object assigned with ||= with the names as keys": {`function payprovQuote(lo: number, hi: number, least: number, q: Quote | null): Quote | null {
+  if (hi - lo < least) hi = lo + least
+  if (lo < 0) lo = 0
+  q ||= { bid: lo, ask: hi }
+  return q
+}
+`, "Function payprovQuote duplicates function orQuote"},
+		"object assigned with &&= under the other names": {`function payprovQuote(ask: number, bid: number, floor: number, q: Quote | null): Quote | null {
+  if (bid - ask < floor) bid = ask + floor
+  if (ask < 0) ask = 0
+  q &&= { ask, bid }
+  return q
+}
+`, ""},
+		"object assigned with &&= with the names as keys": {`function payprovQuote(lo: number, hi: number, least: number, q: Quote | null): Quote | null {
+  if (hi - lo < least) hi = lo + least
+  if (lo < 0) lo = 0
+  q &&= { bid: lo, ask: hi }
+  return q
+}
+`, "Function payprovQuote duplicates function andQuote"},
+		"second parameter properties destructured in the other order": {`function payprovSpread(floor: number, { ask, bid }: Quote): number {
+  let s = bid - ask
+  if (s < floor) s = floor
+  return s * 4 + ask
+}
+`, ""},
+		"second parameter properties destructured under other names": {`function payprovSpread(least: number, { bid: lo, ask: hi }: Quote): number {
+  let s = hi - lo
+  if (s < least) s = least
+  return s * 4 + lo
+}
+`, "Function payprovSpread duplicates function pickSecond"},
 		"parameter elements destructured in the other order": {`function payprovSpan([hi, lo]: number[], floor: number): number {
   let s = hi - lo
   if (s < floor) s = floor
