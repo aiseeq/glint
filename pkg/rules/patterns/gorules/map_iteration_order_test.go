@@ -3,6 +3,7 @@ package gorules
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/core"
@@ -2911,10 +2912,10 @@ func Firsts(src map[string]int, strict, quiet bool) ([]string, []string) {
 }
 
 // The test reads the slot's value in a way that does not tell a free slot
-// from a taken one: a taken slot whose first entry is light lets the next one
-// through.
-func TestMapIterationOrderAcceptsGuardOnValueOfTakenSlot(t *testing.T) {
-	violations := analyzeMapOrder(t, `package order
+// from a taken one, so the free span of the guard decides: the entries kept
+// for a slot are those up to the first heavy one, which the order picks.
+func TestMapIterationOrderReportsDedupWinnerOnGuardOnValueOfTakenSlot(t *testing.T) {
+	source := `package order
 
 import "sort"
 
@@ -2936,9 +2937,11 @@ func All(src map[string]int, limit int) []string {
 	sort.Strings(all)
 	return all
 }
-`)
+`
+	violations := analyzeMapOrder(t, source)
 
-	assert.Empty(t, violations)
+	require.Len(t, violations, 1)
+	assert.Equal(t, dedupCallLine(source), violations[0].Line)
 }
 
 // The slot is filled in one branch only: the run that fills it keeps the
@@ -3190,9 +3193,10 @@ func TestMapIterationOrderReportsDedupWinnerOnGuardForms(t *testing.T) {
 	}
 }
 
-// A comparison of the count with another constant than 0 or 1 lets more than
-// one entry in (count[slot] > 2): the guard is left unread.
-func TestMapIterationOrderAcceptsGuardOnCountAboveOne(t *testing.T) {
+// A comparison of the count with another constant than 0 or 1 (count[slot] >
+// 2) does not say free or taken: the guard is read as it was before the paths
+// were followed - the span its branch leaves or fills.
+func TestMapIterationOrderReportsDedupWinnerOnGuardOnCountAboveOne(t *testing.T) {
 	forms := []struct {
 		test      string
 		takenThen bool
@@ -3203,7 +3207,10 @@ func TestMapIterationOrderAcceptsGuardOnCountAboveOne(t *testing.T) {
 	}
 	for _, form := range forms {
 		t.Run(form.test, func(t *testing.T) {
-			assert.Empty(t, analyzeMapOrder(t, dedupGuardSource(form.test, form.takenThen)))
+			violations := analyzeMapOrder(t, dedupGuardSource(form.test, form.takenThen))
+
+			require.Len(t, violations, 1)
+			assert.Equal(t, 22, violations[0].Line)
 		})
 	}
 }
@@ -3225,4 +3232,283 @@ func TestMapIterationOrderReportsDedupWinnerBesidePresenceComparedWithFlag(t *te
 
 	require.Len(t, violations, 1)
 	assert.Equal(t, 22, violations[0].Line)
+}
+
+// dedupCalleeSource puts body into a callee add(slot, who) that the loop over
+// src calls; seen, count and idx are maps the entries share, out the result.
+func dedupCalleeSource(body string) string {
+	return `package order
+
+import (
+	"errors"
+	"sort"
+)
+
+var strict bool
+
+var errRepeat = errors.New("repeat")
+
+func withLock(f func()) { f() }
+
+func keep(map[int]bool, int) {}
+
+func Firsts(src map[string]int) []string {
+	seen := map[int]bool{}
+	count := map[int]int{}
+	idx := map[int]int{}
+	var out []string
+	_, _, _ = seen, count, idx
+	add := func(slot int, who string) {
+` + body + `
+	}
+	for who, slot := range src {
+		add(slot, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`
+}
+
+// dedupCallLine returns the line of the call add(slot, who) in the source.
+func dedupCallLine(source string) int {
+	for i, line := range strings.Split(source, "\n") {
+		if strings.TrimSpace(line) == "add(slot, who)" {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// Where the paths do not tell - the slot variable moves on after the test, the
+// slot is cleared again, a write or a mark sits in a function literal, the test
+// does not say free or taken - the guard is read as it was before the paths
+// were followed. A probe for a free slot (for !seen[slot] fails, slot++) keeps
+// every entry; so does a slot filled and cleared again.
+func TestMapIterationOrderAcceptsDedupWhereThePathsDoNotTell(t *testing.T) {
+	bodies := map[string]string{
+		"probe": `		for {
+			if !seen[slot] {
+				break
+			}
+			slot++
+		}
+		seen[slot] = true
+		out = append(out, who)`,
+		"probe past select": `		for {
+			select {
+			default:
+			}
+			if !seen[slot] {
+				break
+			}
+			slot++
+		}
+		seen[slot] = true
+		out = append(out, who)`,
+		"probe past switch": `	loop:
+		for {
+			switch {
+			case !seen[slot]:
+				break loop
+			}
+			if !seen[slot] {
+				break loop
+			}
+			slot++
+		}
+		seen[slot] = true
+		out = append(out, who)`,
+		"count cleared": `		if count[slot] == 0 {
+			out = append(out, who)
+		}
+		count[slot]++
+		count[slot]--`,
+		"flag cleared": `		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+		seen[slot] = false`,
+		"probe by addition": `		for {
+			if !seen[slot] {
+				break
+			}
+			slot += 1
+		}
+		seen[slot] = true
+		out = append(out, who)`,
+		"count taken down": `		if count[slot] == 0 {
+			out = append(out, who)
+		}
+		count[slot]++
+		count[slot] -= 1`,
+		"count reset": `		if count[slot] == 0 {
+			out = append(out, who)
+		}
+		count[slot]++
+		count[slot] = 0`,
+		"flag deleted": `		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+		delete(seen, slot)`,
+		"count never below zero": `		if count[slot] >= 0 {
+			out = append(out, who)
+		}
+		count[slot]++`,
+		"count never negative": `		if !(count[slot] < 0) {
+			out = append(out, who)
+		}
+		count[slot]++`,
+		"count below two before fill": `		if count[slot] < 2 {
+			out = append(out, who)
+		}
+		count[slot]++`,
+		"count at two jumps": `		if count[slot] >= 2 {
+			goto done
+		}
+		count[slot]++
+		out = append(out, who)
+	done:`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			assert.Empty(t, analyzeMapOrder(t, dedupCalleeSource(body)))
+		})
+	}
+}
+
+// A method that probes for a free port from the one asked for starts every
+// service: the port it fills is not the one it tested first.
+func TestMapIterationOrderAcceptsProbeForFreePortInMethod(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+type Pool struct {
+	used  map[int]bool
+	names []string
+}
+
+func (p *Pool) place(pos int, name string) {
+	for {
+		if !p.used[pos] {
+			break
+		}
+		pos++
+	}
+	p.used[pos] = true
+	p.names = append(p.names, name)
+}
+
+func (p *Pool) PlaceAll(want map[string]int) []string {
+	for name, pos := range want {
+		p.place(pos, name)
+	}
+	sort.Strings(p.names)
+	return p.names
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// The same cases the paths do not tell, where the guard read as before keeps
+// the first entry of a slot: a write or a mark in a function literal - a defer,
+// a literal called at once, a callback - a test of presence against a flag, a
+// test of the value beside presence, a guard inside a literal of the if init.
+func TestMapIterationOrderReportsDedupWinnerWhereThePathsDoNotTell(t *testing.T) {
+	bodies := map[string]string{
+		"write deferred": `		if seen[slot] {
+			return
+		}
+		seen[slot] = true
+		defer func() { out = append(out, who) }()`,
+		"write in literal called at once": `		if seen[slot] {
+			return
+		}
+		seen[slot] = true
+		func() { out = append(out, who) }()`,
+		"write in callback": `		if seen[slot] {
+			return
+		}
+		seen[slot] = true
+		withLock(func() { out = append(out, who) })`,
+		"mark deferred": `		if seen[slot] {
+			return
+		}
+		defer func() { seen[slot] = true }()
+		out = append(out, who)`,
+		"presence against flag": `		if _, ok := seen[slot]; ok == strict {
+			return
+		}
+		seen[slot] = true
+		out = append(out, who)`,
+		"value beside presence": `		if n, ok := idx[slot]; ok && n >= 0 {
+			return
+		}
+		idx[slot] = len(out)
+		out = append(out, who)`,
+		"guard in literal of init": `		if err := func() error {
+			if seen[slot] {
+				return errRepeat
+			}
+			return nil
+		}(); err != nil {
+			return
+		}
+		seen[slot] = true
+		out = append(out, who)`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			source := dedupCalleeSource(body)
+			violations := analyzeMapOrder(t, source)
+
+			require.Len(t, violations, 1)
+			assert.Equal(t, dedupCallLine(source), violations[0].Line)
+		})
+	}
+}
+
+// A slot variable set before the test is the slot tested and filled; a write
+// every entry makes between the free branch and the mark leaves the write of
+// the branch the first entry's alone.
+func TestMapIterationOrderReportsDedupWinnerAroundPathsThatTell(t *testing.T) {
+	bodies := map[string]string{
+		"slot set before test": `		slot = slot % 8
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true`,
+		"write of every entry before mark": `		if !seen[slot] {
+			out = append(out, who)
+		}
+		out = append(out, who+"/")
+		seen[slot] = true`,
+		"count filled after write": `		if count[slot] == 0 {
+			out = append(out, who)
+		}
+		count[slot]++`,
+		"filled with a zero beside": `		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot], idx[slot] = true, 0`,
+		"other slots deleted": `		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+		delete(count, slot)
+		delete(seen, slot+1)
+		keep(seen, slot)`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			source := dedupCalleeSource(body)
+			violations := analyzeMapOrder(t, source)
+
+			require.Len(t, violations, 1)
+			assert.Equal(t, dedupCallLine(source), violations[0].Line)
+		})
+	}
 }
