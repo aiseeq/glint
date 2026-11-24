@@ -2,15 +2,18 @@ package shellrules
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 func init() {
@@ -18,7 +21,8 @@ func init() {
 }
 
 // binPathspec selects the files git keeps right in a bin directory, at any
-// depth: bin/run and services/bin/start, not bin/lib/common.sh.
+// depth from the top of the repository: bin/run and services/bin/start, not
+// bin/lib/common.sh.
 const binPathspec = ":(glob)**/bin/*"
 
 // executableMode and plainMode are the modes git records for a regular file.
@@ -57,15 +61,24 @@ func NewBinScriptExecBitRule() *BinScriptExecBitRule {
 func (r *BinScriptExecBitRule) ReadsOtherFiles() bool { return true }
 
 // CacheInputs returns the modes the git index records for the files in bin
-// directories: a change of a mode alone reruns the rule.
+// directories, by their paths from root: a change of a mode alone reruns the
+// rule.
 func (r *BinScriptExecBitRule) CacheInputs(root string) (string, error) {
 	modes, err := core.GitIndexModes(root, binPathspec)
 	if err != nil {
 		return "", err
 	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("make %s absolute: %w", root, err)
+	}
 	var b strings.Builder
 	for _, path := range slices.Sorted(maps.Keys(modes)) {
-		b.WriteString(modes[path] + " " + path + "\n")
+		rel, err := filepath.Rel(abs, path)
+		if err != nil {
+			return "", fmt.Errorf("relate %s to %s: %w", path, abs, err)
+		}
+		b.WriteString(modes[path] + " " + filepath.ToSlash(rel) + "\n")
 	}
 	return b.String(), nil
 }
@@ -109,18 +122,34 @@ func (r *BinScriptExecBitRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 		return nil
 	}
 	rel := filepath.ToSlash(ctx.RelPath)
-	modes, err := core.GitIndexModes(ctx.ProjectRoot, binPathspec)
+	path, err := filepath.Abs(ctx.Path)
+	var modes map[string]string
+	if err == nil {
+		modes, err = core.GitIndexModes(ctx.ProjectRoot, binPathspec)
+	}
 	if err != nil {
 		return []*core.Violation{r.CreateViolation(ctx.RelPath, 1,
 			"could not read the mode of script "+rel+" from the git index: "+err.Error())}
 	}
-	if modes[rel] != plainMode {
+	if modes[path] != plainMode {
 		return nil
 	}
 	v := r.CreateViolation(ctx.RelPath, 1,
 		"script "+rel+" starts with #! but git records it as "+plainMode+", not "+executableMode+
 			" — every other clone checks it out not executable, and running it fails with permission denied")
 	v.WithCode(strings.TrimSpace(ctx.GetLine(1)))
-	v.WithSuggestion("Record the executable bit in git: git update-index --chmod=+x " + rel)
+	v.WithSuggestion(chmodSuggestion(rel))
 	return []*core.Violation{v}
+}
+
+// chmodSuggestion names the command that records the bit, the path quoted
+// for a shell run where glint ran: bin/a b would be two paths, bin/q"x an open
+// quote.
+func chmodSuggestion(rel string) string {
+	quoted, err := syntax.Quote(rel, syntax.LangBash)
+	if err != nil {
+		return "Record the executable bit in git with git update-index --chmod=+x; the path " +
+			strconv.Quote(rel) + " cannot be written for a shell: " + err.Error()
+	}
+	return "Record the executable bit in git: git update-index --chmod=+x " + quoted
 }

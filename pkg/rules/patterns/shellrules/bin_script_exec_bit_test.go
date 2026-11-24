@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -91,6 +92,7 @@ func TestBinScriptExecBit(t *testing.T) {
 		if v.File == "bin/run" {
 			assert.Contains(t, v.Message, "100644")
 			assert.Contains(t, v.Suggestion, "git update-index --chmod=+x bin/run")
+			assert.Equal(t, "#!/bin/sh", v.Code)
 		}
 	}
 
@@ -100,8 +102,8 @@ func TestBinScriptExecBit(t *testing.T) {
 	assert.Equal(t, []string{"bin/deploy.sh:1", "bin/tool:1", "services/bin/start:1"}, places)
 }
 
-// glint run on a subdirectory of the repository names the path from it, as
-// git ls-files run there does.
+// glint run on a subdirectory of the repository names the path from it and
+// finds the mode by the path from the top of the repository.
 func TestBinScriptExecBitInSubdirectory(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
@@ -116,6 +118,82 @@ func TestBinScriptExecBitInSubdirectory(t *testing.T) {
 	assert.Equal(t, []string{"bin/run:1"}, places)
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Suggestion, "git update-index --chmod=+x bin/run")
+}
+
+// suggestedCommand is the shell command a finding's suggestion names.
+func suggestedCommand(t *testing.T, v *core.Violation) string {
+	t.Helper()
+	_, command, ok := strings.Cut(v.Suggestion, "Record the executable bit in git: ")
+	require.True(t, ok, v.Suggestion)
+	return command
+}
+
+// indexMode is the mode git's index records for path.
+func indexMode(t *testing.T, root, path string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", root, "ls-files", "-s", "--", ":(literal)"+path).Output()
+	require.NoError(t, err)
+	mode, _, _ := strings.Cut(string(out), " ")
+	return mode
+}
+
+// The command of the suggestion runs as written from where glint ran, also
+// for a name a shell splits or reads as a quote.
+func TestBinScriptExecBitSuggestionRunsInShell(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"bin/a b":   "#!/bin/sh\necho a\n",
+		"bin/q\"x":  "#!/bin/sh\necho q\n",
+		"bin/it's":  "#!/bin/sh\necho it\n",
+		"bin/t\tab": "#!/bin/sh\necho tab\n",
+		"go.mod":    "module example.com/app\n\ngo 1.24\n",
+	}, nil)
+	gitIn(t, root, "init", "-q")
+	gitIn(t, root, "config", "core.fileMode", "false")
+	gitIn(t, root, "add", "-A")
+
+	places, violations := binExecBitFindings(t, root)
+	assert.Equal(t, []string{"bin/a b:1", "bin/it's:1", "bin/q\"x:1", "bin/t\tab:1"}, places)
+	for _, v := range violations {
+		cmd := exec.Command("bash", "-c", suggestedCommand(t, v))
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s: %s", v.Suggestion, out)
+		assert.Equal(t, "100755", indexMode(t, root, v.File), v.Suggestion)
+	}
+}
+
+// glint run on the bin directory itself (glint check bin, glint check
+// bin/run, cd bin && glint check .) names the script from there and finds it
+// as from the top of the repository.
+func TestBinScriptExecBitRunOnBinDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"bin/run":         "#!/bin/sh\necho run\n",
+		"bin/ok":          "#!/bin/sh\necho ok\n",
+		"svc/bin/start":   "#!/bin/sh\necho start\n",
+		"svc/.glint.yaml": "settings: {}\n",
+		"go.mod":          "module example.com/app\n\ngo 1.24\n",
+	}, nil)
+	gitIn(t, root, "init", "-q")
+	gitIn(t, root, "config", "core.fileMode", "false")
+	gitIn(t, root, "add", "-A")
+	gitIn(t, root, "update-index", "--chmod=+x", "bin/ok")
+
+	bin := filepath.Join(root, "bin")
+	places, violations := binExecBitFindings(t, bin)
+	assert.Equal(t, []string{"run:1"}, places)
+	require.Len(t, violations, 1)
+	cmd := exec.Command("bash", "-c", suggestedCommand(t, violations[0]))
+	cmd.Dir = bin
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s: %s", violations[0].Suggestion, out)
+	assert.Equal(t, "100755", indexMode(t, root, "bin/run"))
+
+	places, _ = binExecBitFindings(t, filepath.Join(root, "svc", "bin"))
+	assert.Equal(t, []string{"start:1"}, places)
+	places, _ = binExecBitFindings(t, filepath.Join(root, "svc"))
+	assert.Equal(t, []string{"bin/start:1"}, places)
 }
 
 // Outside git there is no index: nothing is reported, and nothing fails.
@@ -155,6 +233,7 @@ func TestBinScriptExecBitCacheInputs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "100644 a/bin/x\n100755 bin/run\n100644 bin/z\n", after)
 	assert.True(t, rule.ReadsOtherFiles())
+	assert.Equal(t, core.SeverityMedium, rule.DefaultSeverity())
 }
 
 // The walk reads a file for the rule only when it is a script right in a
@@ -168,6 +247,7 @@ func TestBinScriptExecBitSelectsFiles(t *testing.T) {
 		"bin/lib/common.sh": "#!/bin/bash\n",
 		"scripts/tool":      "#!/usr/bin/env python3\n",
 		"bin/empty":         "",
+		"bin/notes":         "# notes\n",
 	}, nil)
 	require.NoError(t, syscall.Mkfifo(filepath.Join(root, "bin", "pipe"), 0o644))
 	rule := NewBinScriptExecBitRule()
@@ -177,6 +257,7 @@ func TestBinScriptExecBitSelectsFiles(t *testing.T) {
 	assert.True(t, rule.RequiresAdditionalFile(filepath.Join(root, "bin", "tool")))
 	assert.False(t, rule.RequiresAdditionalFile(filepath.Join(root, "bin", "data")))
 	assert.False(t, rule.RequiresAdditionalFile(filepath.Join(root, "bin", "empty")))
+	assert.False(t, rule.RequiresAdditionalFile(filepath.Join(root, "bin", "notes")), "a comment is no #!")
 	assert.False(t, rule.RequiresAdditionalFile(filepath.Join(root, "bin", "lib", "common.sh")))
 	assert.False(t, rule.RequiresAdditionalFile(filepath.Join(root, "scripts", "tool")))
 	assert.False(t, rule.RequiresAdditionalFile(filepath.Join(root, "bin", "missing")))
@@ -204,4 +285,16 @@ func TestBinScriptExecBitGitFailure(t *testing.T) {
 	assert.Empty(t, rule.AnalyzeFile(core.NewFileContext(filepath.Join(root, "scripts", "run"), root, script, core.DefaultConfig())))
 	_, err := rule.CacheInputs(root)
 	require.Error(t, err)
+}
+
+// A script whose path cannot be made absolute (the working directory is
+// gone) is told in a finding, not passed off as one without a mode.
+func TestBinScriptExecBitPathNotResolved(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone")
+	require.NoError(t, os.Mkdir(gone, 0o755))
+	t.Chdir(gone)
+	require.NoError(t, os.Remove(gone))
+	found := NewBinScriptExecBitRule().AnalyzeFile(core.NewFileContext(filepath.Join("bin", "run"), ".", []byte("#!/bin/sh\n"), core.DefaultConfig()))
+	require.Len(t, found, 1)
+	assert.Contains(t, found[0].Message, "could not read the mode of script bin/run")
 }
