@@ -33,9 +33,9 @@ func init() {
 //
 // A message is followed from the error (err.message, a catch parameter, a
 // name ending in err or error) through variables assigned from it and through
-// a helper of the file it is handed to as the first argument. The parameter
-// holds it inside the helper only: elsewhere the same name is another
-// variable. It is matched when a branch tests it: includes, startsWith,
+// a helper of the file it is handed to as the first argument. A variable
+// holds it in the whole file, a helper's parameter inside the helper's body
+// only; a name is the message where either holds it. It is matched when a branch tests it: includes, startsWith,
 // endsWith, indexOf, match, search, a comparison with a string, a regular
 // expression's test.
 type FrontendErrorMessageMatchRule struct {
@@ -181,16 +181,24 @@ func (r *FrontendErrorMessageMatchRule) errorNames(code []string) []string {
 	return names
 }
 
-// textSymbol is what a name stands for: the first parameter of helper inside
-// a body of the helper, else the variable name of the file.
-type textSymbol struct{ helper, name string }
-
-// textMarks are the symbols that hold the message of an error.
+// textMarks are the names that hold the message of an error: the variables
+// of the file, and the bodies of helpers whose first parameter holds it.
 type textMarks struct {
-	texts  map[textSymbol]bool
+	vars   map[string]bool
+	active []bool // by the bodies of bodies.scoped()
 	bodies *helperBodies
 	// names are the names that hold a message somewhere in the file.
 	names nameIndex
+}
+
+// holds reports whether name at offset pos holds a message: the variable of
+// that name does, or the parameter of a body around pos does.
+func (t *textMarks) holds(name string, pos int, scopes *helperScopes) bool {
+	if t.vars[name] {
+		return true
+	}
+	node := scopes.innermost(name, pos)
+	return node >= 0 && t.active[node]
 }
 
 // rewrite returns line, which starts at offset start of the file, with every
@@ -199,7 +207,7 @@ type textMarks struct {
 func (t *textMarks) rewrite(line string, start int, scopes *helperScopes) string {
 	var spans [][2]int
 	t.names.each(line, func(name string, at int) {
-		if !t.texts[scopes.symbol(name, start+at)] {
+		if !t.holds(name, start+at, scopes) {
 			return
 		}
 		end := at + len(name)
@@ -224,14 +232,22 @@ func (t *textMarks) rewrite(line string, start int, scopes *helperScopes) string
 	return b.String()
 }
 
-// messageTexts returns the symbols that hold the message of an error:
-// variables assigned from a message or from another such symbol, and the
-// first parameter of a helper the file calls with one. A name read inside a
-// body of a helper whose first parameter it names is that parameter, so a
-// message handed to the helper stays inside it.
+// textRef is a name read at a place: the variable of the file when node is
+// -1, else the parameter of the helper body node of helperBodies.scoped.
+type textRef struct {
+	name string
+	node int
+}
+
+// messageTexts returns the names that hold the message of an error:
+// variables assigned from a message or from a name that holds one, and the
+// first parameter of a helper the file calls with one, inside the helper's
+// body. A name read inside such a body is both the variable and the
+// parameter: either holding a message makes it hold one, so a body whose end
+// is misread too long keeps every finding of the variable.
 //
 // The names each declaration and each helper argument read are found once;
-// marking a symbol then marks what reads it, so a chain of n names costs no n
+// marking a name then marks what reads it, so a chain of n names costs no n
 // passes over the file.
 func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, lineStarts []int, messageOf *regexp.Regexp) *textMarks {
 	bodies := r.helperDecls(code, lineStarts)
@@ -242,9 +258,9 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, lineStarts [
 	}
 	var declarations []declarationMatch
 	names := nameIndex{names: make(map[string]bool)}
-	paramsOf := make(map[string][]string)
+	helperNames := make(map[string]bool)
 	for _, decl := range bodies.decls {
-		paramsOf[decl.helper] = append(paramsOf[decl.helper], decl.param)
+		helperNames[decl.helper] = true
 		names.add(decl.param)
 	}
 	for i, line := range code {
@@ -253,40 +269,75 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, lineStarts [
 			names.add(line[m[2]:m[3]])
 		}
 	}
-	calls := make(map[string]*regexp.Regexp, len(paramsOf))
-	for helper := range paramsOf {
+	calls := make(map[string]*regexp.Regexp, len(helperNames))
+	for helper := range helperNames {
 		calls[helper] = regexp.MustCompile(`\b` + regexp.QuoteMeta(helper) + `\s*\(`)
 	}
 	callLines := indexHelperCalls(code, calls)
 
-	texts := make(map[textSymbol]bool)
-	var queue []textSymbol
-	mark := func(symbol textSymbol) {
-		if !texts[symbol] {
-			texts[symbol] = true
-			queue = append(queue, symbol)
+	// read calls found with the variable a name at offset pos reads and with
+	// the innermost body around pos whose parameter it names.
+	read := func(scopes *helperScopes, name string, pos int, found func(textRef)) {
+		found(textRef{name: name, node: -1})
+		if node := scopes.innermost(name, pos); node >= 0 {
+			found(textRef{node: node})
 		}
 	}
-	// readers maps a symbol to the declarations whose value reads it.
-	readers := make(map[textSymbol][]string)
+	marks := &textMarks{vars: make(map[string]bool), bodies: bodies, names: nameIndex{names: make(map[string]bool)}}
+	decls := bodies.scoped()
+	marks.active = make([]bool, len(decls))
+	nodesOf := make(map[string][]int)
+	for node, decl := range decls {
+		nodesOf[decl.helper] = append(nodesOf[decl.helper], node)
+	}
+	helpers := make(map[string]bool)
+	var queue []textRef
+	markVar := func(name string) {
+		if !marks.vars[name] {
+			marks.vars[name] = true
+			queue = append(queue, textRef{name: name, node: -1})
+		}
+	}
+	// A body inside another whose parameter has its name reads the outer
+	// parameter too, so marking a body marks those inside it.
+	markHelper := func(helper string) {
+		if helpers[helper] {
+			return
+		}
+		helpers[helper] = true
+		stack := slices.Clone(nodesOf[helper])
+		for len(stack) > 0 {
+			node := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if marks.active[node] {
+				continue
+			}
+			marks.active[node] = true
+			queue = append(queue, textRef{node: node})
+			stack = append(stack, bodies.inner[node]...)
+		}
+	}
+	// readers maps a name read to the declarations whose value reads it.
+	readers := make(map[textRef][]string)
 	scopes := newHelperScopes(bodies)
 	for _, declaration := range declarations {
 		if messageOf.MatchString(declaration.value) {
-			mark(textSymbol{name: declaration.name})
+			markVar(declaration.name)
 			continue
 		}
 		names.each(declaration.value, func(name string, at int) {
-			symbol := scopes.symbol(name, declaration.at+at)
-			readers[symbol] = append(readers[symbol], declaration.name)
+			read(scopes, name, declaration.at+at, func(ref textRef) {
+				readers[ref] = append(readers[ref], declaration.name)
+			})
 		})
 	}
 	// all holds every helper call of the file and parents the call whose first
 	// argument holds each one: a name inside an inner argument is inside the
-	// outer ones too. argumentsOf maps a symbol to the innermost calls whose
-	// first argument reads it.
+	// outer ones too. argumentsOf maps a name read to the innermost calls
+	// whose first argument reads it.
 	var all []helperCall
 	var parents []int
-	argumentsOf := make(map[textSymbol][]int)
+	argumentsOf := make(map[textRef][]int)
 	scopes = newHelperScopes(bodies)
 	for i, line := range callLines {
 		if line == nil {
@@ -298,24 +349,25 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, lineStarts [
 		parents = append(parents, nest.parents...)
 		names.each(code[i], func(name string, at int) {
 			if call := nest.innermost(at); call >= 0 {
-				symbol := scopes.symbol(name, lineStarts[i]+at)
-				argumentsOf[symbol] = append(argumentsOf[symbol], call)
+				read(scopes, name, lineStarts[i]+at, func(ref textRef) {
+					argumentsOf[ref] = append(argumentsOf[ref], call)
+				})
 			}
 		})
 		for _, call := range line.calls {
 			if spanHolds(line.messages, call.start, call.end) {
-				mark(textSymbol{helper: call.helper})
+				markHelper(call.helper)
 			}
 		}
 	}
-	// live returns the first call from call outwards whose helper parameter is
-	// not marked yet, -1 when there is none. A call passed over stays passed
-	// over, since marks are never taken back, so it jumps there next time.
+	// live returns the first call from call outwards whose helper is not
+	// marked yet, -1 when there is none. A call passed over stays passed over,
+	// since marks are never taken back, so it jumps there next time.
 	jump := make([]int, len(all))
 	for i := range jump {
 		jump[i] = i
 	}
-	dead := func(call int) bool { return texts[textSymbol{helper: all[call].helper}] }
+	dead := func(call int) bool { return helpers[all[call].helper] }
 	up := func(call int) int {
 		if jump[call] != call {
 			return jump[call]
@@ -335,26 +387,32 @@ func (r *FrontendErrorMessageMatchRule) messageTexts(code []string, lineStarts [
 		return found
 	}
 	for len(queue) > 0 {
-		symbol := queue[0]
+		ref := queue[0]
 		queue = queue[1:]
-		for _, reader := range readers[symbol] {
-			mark(textSymbol{name: reader})
+		for _, reader := range readers[ref] {
+			markVar(reader)
 		}
-		for _, call := range argumentsOf[symbol] {
+		for _, call := range argumentsOf[ref] {
 			for call = live(call); call >= 0; call = live(parents[call]) {
-				mark(textSymbol{helper: all[call].helper})
+				markHelper(all[call].helper)
 			}
 		}
 	}
-	// A helper's symbol has no name of its own: its parameters are added.
-	marks := &textMarks{texts: texts, bodies: bodies, names: nameIndex{names: make(map[string]bool)}}
-	for symbol := range texts {
-		marks.names.add(symbol.name)
-		for _, param := range paramsOf[symbol.helper] {
-			marks.names.add(param)
+	marks.indexNames(decls)
+	return marks
+}
+
+// indexNames adds to names the variables that hold a message and the
+// parameters of the bodies that do.
+func (t *textMarks) indexNames(decls []helperDecl) {
+	for name := range t.vars {
+		t.names.add(name)
+	}
+	for node, active := range t.active {
+		if active {
+			t.names.add(decls[node].param)
 		}
 	}
-	return marks
 }
 
 // helperScopes tells, for offsets taken in increasing order, the helper
@@ -372,8 +430,9 @@ func newHelperScopes(bodies *helperBodies) *helperScopes {
 	return &helperScopes{bodies: bodies, byParam: make(map[string][]int)}
 }
 
-// symbol returns what name at offset pos stands for.
-func (s *helperScopes) symbol(name string, pos int) textSymbol {
+// innermost returns the innermost body around offset pos whose first
+// parameter is name, by its index in bodies.scoped(); -1 for none.
+func (s *helperScopes) innermost(name string, pos int) int {
 	decls := s.bodies.scoped()
 	for s.next < len(decls) && decls[s.next].start <= pos {
 		param := decls[s.next].param
@@ -386,9 +445,9 @@ func (s *helperScopes) symbol(name string, pos int) textSymbol {
 	}
 	s.byParam[name] = open
 	if len(open) > 0 {
-		return textSymbol{helper: decls[open[len(open)-1]].helper}
+		return open[len(open)-1]
 	}
-	return textSymbol{name: name}
+	return -1
 }
 
 // nameIndex finds the names of a set in a text as the expressions of
@@ -570,6 +629,9 @@ type helperBodies struct {
 	scoped   func() []helperDecl
 	code     string
 	brackets bracketPairs
+	// inner holds, for each body of scoped, the bodies right inside it whose
+	// first parameter has the same name.
+	inner [][]int
 }
 
 func (h *helperBodies) withBodies() []helperDecl {
@@ -580,6 +642,19 @@ func (h *helperBodies) withBodies() []helperDecl {
 		if decl.end = h.end(decl.start, decl.arrow); decl.end >= 0 {
 			bodies = append(bodies, decl)
 		}
+	}
+	h.inner = make([][]int, len(bodies))
+	open := make(map[string][]int)
+	for i, decl := range bodies {
+		stack := open[decl.param]
+		for len(stack) > 0 && bodies[stack[len(stack)-1]].end <= decl.start {
+			stack = stack[:len(stack)-1]
+		}
+		if len(stack) > 0 {
+			outer := stack[len(stack)-1]
+			h.inner[outer] = append(h.inner[outer], i)
+		}
+		open[decl.param] = append(stack, i)
 	}
 	return bodies
 }
@@ -614,22 +689,35 @@ func (h *helperBodies) end(paren int, arrow bool) int {
 	return h.expressionEnd(pos)
 }
 
-// expressionEnd returns the end of the expression that starts at pos: a ';',
-// a bracket it does not open, or a line break after which it does not go on
-// (see continues). Brackets and JSX elements it opens it passes whole. Where
-// it may go on it is taken to, so a body is read too long rather than too
-// short.
+// expressionEnd returns the end of an arrow's body without braces that
+// starts at pos: a ';', the closer of a bracket opened before it, or a line
+// break after which a line starts with a statement (see statementAt). The
+// brackets it opens it passes whole, and a bracket nothing pairs, as one in
+// the text of JSX, it passes over; an operator, JSX, a cast or a template
+// over lines does not end it. A body is read too long rather than too short:
+// a name past its true end is still the variable of the file.
 func (h *helperBodies) expressionEnd(pos int) int {
 	for pos < len(h.code) {
-		switch c := h.code[pos]; {
-		case c == '(' || c == '[' || c == '{':
-			pos = h.after(pos)
-		case c == '<' && h.jsxStart(pos):
-			pos = h.afterElement(pos)
-		case c == '\n' && h.continues(pos):
+		c := h.code[pos]
+		switch kind := bracketKind(c); {
+		case kind >= 0 && kind < 3:
+			if closing, ok := h.brackets.closing(pos); ok {
+				pos = closing
+			}
 			pos++
-		case c == ')' || c == ']' || c == '}' || c == ';' || c == '\n':
+		case kind >= 3:
+			if h.brackets.closer(pos) {
+				return pos
+			}
+			pos++
+		case c == ';':
 			return pos
+		case c == '\n':
+			next := h.skipSpace(pos)
+			if h.statementAt(next) {
+				return pos
+			}
+			pos = next
 		default:
 			pos++
 		}
@@ -637,79 +725,22 @@ func (h *helperBodies) expressionEnd(pos int) int {
 	return pos
 }
 
-// continues reports whether an expression goes on past the line break at nl:
-// the line ends in an operator, "=>" among them, or the next line starts with
-// one, '.', '?' or ':' included.
-func (h *helperBodies) continues(nl int) bool {
-	prev := nl - 1
-	for prev >= 0 && patternkit.IsRegexpSpace(h.code[prev]) {
-		prev--
+// statements are the words a statement or a declaration starts with.
+var statements = []string{"const", "let", "var", "function", "class", "export", "import", "return", "if", "for", "while", "switch", "try", "throw"}
+
+// statementAt reports whether a statement starts at pos: one of statements as
+// a whole word, or a '}'.
+func (h *helperBodies) statementAt(pos int) bool {
+	if h.at(pos, "}") {
+		return true
 	}
-	if prev >= 0 {
-		c := h.code[prev]
-		if strings.IndexByte("+-*/%&|^!~?:=<,.", c) >= 0 || c == '>' && prev > 0 && h.code[prev-1] == '=' {
+	for _, word := range statements {
+		if h.at(pos, word) && (pos+len(word) == len(h.code) || !identifierByte(h.code[pos+len(word)])) {
 			return true
 		}
 	}
-	next := h.skipSpace(nl)
-	return next < len(h.code) && strings.IndexByte(".?:|&+-*/%=<>^,", h.code[next]) >= 0
+	return false
 }
-
-// jsxStart reports whether the '<' at pos opens a JSX element: no operand
-// comes before it, as one does before a comparison or type arguments.
-func (h *helperBodies) jsxStart(pos int) bool {
-	prev := pos - 1
-	for prev >= 0 && patternkit.IsRegexpSpace(h.code[prev]) {
-		prev--
-	}
-	return prev < 0 || !(identifierByte(h.code[prev]) || h.code[prev] == ')' || h.code[prev] == ']')
-}
-
-// afterElement returns the offset after the JSX element that opens at pos,
-// the end of the code when it does not close. Its text is skipped whatever
-// brackets it holds; the braces of its expressions are passed whole.
-func (h *helperBodies) afterElement(pos int) int {
-	depth := 0
-	for pos < len(h.code) {
-		switch {
-		case h.code[pos] == '{':
-			pos = h.after(pos)
-		case h.at(pos, "</"):
-			pos = h.tagEnd(pos)
-			if depth--; depth <= 0 {
-				return pos
-			}
-		case h.code[pos] == '<' && pos+1 < len(h.code) && (isLetter(h.code[pos+1]) || h.code[pos+1] == '>'):
-			end := h.tagEnd(pos)
-			if h.code[end-2] != '/' {
-				depth++
-			}
-			pos = end
-			if depth == 0 {
-				return pos
-			}
-		default:
-			pos++
-		}
-	}
-	return pos
-}
-
-// tagEnd returns the offset after the '>' that ends the tag at pos, passing
-// the braces of its attributes whole; the end of the code when none does.
-func (h *helperBodies) tagEnd(pos int) int {
-	for pos++; pos < len(h.code); pos++ {
-		switch h.code[pos] {
-		case '{':
-			pos = h.after(pos) - 1
-		case '>':
-			return pos + 1
-		}
-	}
-	return pos
-}
-
-func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 
 // afterReturnType returns, for a return type whose ':' is at pos, where the body
 // begins: the '{' of a function's body, past the "=>" of an arrow's; -1 when
@@ -769,7 +800,11 @@ func (h *helperBodies) skipSpace(pos int) int {
 
 // bracketPairs holds the '(', '[' and '{' of a code in order with the
 // offsets of their closers, -1 for none.
-type bracketPairs struct{ opens, closes []int }
+type bracketPairs struct {
+	opens, closes []int
+	// closers are the offsets of the closers that close a bracket, in order.
+	closers []int
+}
 
 // pairBrackets pairs each closer with the nearest open bracket of its kind:
 // the brackets opened after that one stay unclosed, and a closer with none of
@@ -801,6 +836,7 @@ func pairBrackets(code string) bracketPairs {
 			open[k]--
 			if k == kind-3 {
 				p.closes[top] = i
+				p.closers = append(p.closers, i)
 				break
 			}
 		}
@@ -833,6 +869,12 @@ func bracketKind(c byte) int {
 func (p bracketPairs) closing(open int) (int, bool) {
 	i := sort.SearchInts(p.opens, open)
 	return p.closes[i], p.closes[i] >= 0
+}
+
+// closer reports whether the closer at pos closes a bracket.
+func (p bracketPairs) closer(pos int) bool {
+	i := sort.SearchInts(p.closers, pos)
+	return i < len(p.closers) && p.closers[i] == pos
 }
 
 // spanHolds reports whether one of matches, sorted and not overlapping, lies
