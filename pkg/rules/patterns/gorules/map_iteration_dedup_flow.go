@@ -48,7 +48,8 @@ func (p slotPolarity) negated() slotPolarity {
 // comparison of the value with its zero (count[slot] > 0, at[slot] != nil)
 // say taken; ! and == with the zero say free. A condition beside the slot
 // (seen[slot] && strict) leaves the decision to the slot: the claim holds on a
-// run where it does. A test whose polarity is not known finds nothing.
+// run where it does. A test whose polarity is not known finds neither: the
+// free span of the guard decides (keepsEntry).
 func (g dedupGuard) outcomes(info *types.Info) (then, els slotOutcome) {
 	t := slotTest{spelled: types.ExprString(g.slot), info: info}
 	if assign, isAssign := g.test.Init.(*ast.AssignStmt); isAssign && len(assign.Rhs) == 1 &&
@@ -224,13 +225,22 @@ func (t slotTest) reads(expr ast.Expr) bool {
 type dedupPath struct {
 	outcome slotOutcome
 	marked  bool
-	pending []ast.Stmt
+	pending *pendingWrite
+}
+
+// pendingWrite is a write of the entry a path made past a free slot before it
+// filled the slot, the last one first. A path adds a write in front, so the
+// paths a branch copies share what they wrote before it and never each
+// other's later writes.
+type pendingWrite struct {
+	write  ast.Stmt
+	before *pendingWrite
 }
 
 func dedupPathKey(path dedupPath) string {
 	parts := []string{strconv.Itoa(int(path.outcome)), strconv.FormatBool(path.marked)}
-	for _, write := range path.pending {
-		parts = append(parts, patternkit.FlowPosKey(write.Pos()))
+	for pending := path.pending; pending != nil; pending = pending.before {
+		parts = append(parts, patternkit.FlowPosKey(pending.write.Pos()))
 	}
 	return patternkit.FlowPathKey(parts...)
 }
@@ -266,8 +276,8 @@ func (f *dedupFlow) claims(body *ast.BlockStmt) bool {
 	return false
 }
 
-// CloneState copies the paths; a path never appends to pending in place, so
-// the copies may share it.
+// CloneState copies the paths; the copies share pending, which a path only
+// adds to in front.
 func (*dedupFlow) CloneState(paths []dedupPath) []dedupPath {
 	return slices.Clone(paths)
 }
@@ -299,15 +309,15 @@ func (f *dedupFlow) SimpleStmt(stmt ast.Stmt, paths []dedupPath, _ struct{}) ([]
 			case paths[i].marked:
 				f.confirmed[stmt] = true
 			default:
-				paths[i].pending = append(slices.Clip(paths[i].pending), stmt)
+				paths[i].pending = &pendingWrite{write: stmt, before: paths[i].pending}
 			}
 		}
 	}
 	if f.marks[stmt] {
 		for i := range paths {
 			paths[i].marked = true
-			for _, write := range paths[i].pending {
-				f.confirmed[write] = true
+			for pending := paths[i].pending; pending != nil; pending = pending.before {
+				f.confirmed[pending.write] = true
 			}
 		}
 	}
@@ -360,16 +370,117 @@ func (*dedupFlow) Normalize(edges *patternkit.FlowEdges[[]dedupPath]) {
 // callee, or a function literal inside it, whose return the guard's branch
 // would leave.
 func guardBody(body *ast.BlockStmt, guard *ast.IfStmt) *ast.BlockStmt {
+	return bodyOf(body, guard)
+}
+
+// bodyOf returns the body of the innermost function, the callee or a literal
+// inside it, that holds the node.
+func bodyOf(body *ast.BlockStmt, node ast.Node) *ast.BlockStmt {
 	innermost := body
 	ast.Inspect(body, func(n ast.Node) bool {
 		lit, ok := n.(*ast.FuncLit)
 		if !ok {
 			return true
 		}
-		if lit.Body.Pos() <= guard.Pos() && guard.End() <= lit.Body.End() {
+		if lit.Body.Pos() <= node.Pos() && node.End() <= lit.Body.End() {
 			innermost = lit.Body
 		}
 		return true
 	})
 	return innermost
+}
+
+// pathsTell reports whether the paths through the function that holds the
+// guard say which writes run only past a free slot. They do not when the slot
+// the writes fill is not the one tested - a variable of the slot changes
+// after the test (a probe for a free slot: slot++) - when the slot is cleared
+// again (count[slot]--, seen[slot] = false, delete), or when a write or a mark
+// sits in another function than the guard: a literal the walk does not enter,
+// or the callee around the literal the guard is in.
+func (g dedupGuard) pathsTell(callee, body *ast.BlockStmt, writes []ast.Stmt, info *types.Info) bool {
+	for _, stmt := range append(slices.Clip(writes), g.marks...) {
+		if bodyOf(callee, stmt) != body {
+			return false
+		}
+	}
+	for _, mark := range g.marks {
+		if g.clears(mark, info) {
+			return false
+		}
+	}
+	return !g.slotMoves(callee, info) && !g.deleted(callee)
+}
+
+// clears reports whether the mark empties the slot: counts it down or sets it
+// to its zero.
+func (g dedupGuard) clears(mark ast.Stmt, info *types.Info) bool {
+	spelled := types.ExprString(g.slot)
+	switch node := mark.(type) {
+	case *ast.IncDecStmt:
+		return node.Tok == token.DEC
+	case *ast.AssignStmt:
+		if node.Tok == token.SUB_ASSIGN {
+			return true
+		}
+		for i, lhs := range node.Lhs {
+			if types.ExprString(lhs) != spelled || len(node.Rhs) != len(node.Lhs) {
+				continue
+			}
+			if isZeroConstant(info, node.Rhs[i]) || (slotTest{info: info}).isFalse(node.Rhs[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isFalse reports whether the expression is the constant false.
+func (t slotTest) isFalse(expr ast.Expr) bool {
+	value, ok := t.boolConstant(expr)
+	return ok && !value
+}
+
+// deleted reports whether the callee deletes the slot from its map.
+func (g dedupGuard) deleted(callee *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(callee, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if ok && len(call.Args) == 2 && types.ExprString(call.Fun) == "delete" &&
+			types.ExprString(call.Args[0]) == types.ExprString(g.slot.X) &&
+			types.ExprString(call.Args[1]) == types.ExprString(g.slot.Index) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// slotMoves reports whether a variable the slot is spelled with is assigned
+// after the test: the slot filled is then another than the one tested.
+func (g dedupGuard) slotMoves(callee *ast.BlockStmt, info *types.Info) bool {
+	vars := map[types.Object]bool{}
+	ast.Inspect(g.slot.Index, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok {
+			vars[info.Uses[ident]] = true
+		}
+		return true
+	})
+	assigns := func(target ast.Expr) bool {
+		ident, ok := ast.Unparen(target).(*ast.Ident)
+		return ok && vars[info.Uses[ident]]
+	}
+	moves := false
+	ast.Inspect(callee, func(n ast.Node) bool {
+		if n == nil || n.Pos() < g.test.Pos() {
+			return !moves
+		}
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			moves = moves || slices.ContainsFunc(node.Lhs, assigns)
+		case *ast.IncDecStmt:
+			moves = moves || assigns(node.X)
+		}
+		return !moves
+	})
+	return moves
 }
