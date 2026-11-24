@@ -12,17 +12,19 @@ import (
 	"sync"
 )
 
-// runGitIndexModes lists the index entries under root that match pathspec,
-// with their modes; a test replaces it to count the runs.
-var runGitIndexModes = func(root, pathspec string) ([]byte, error) {
-	cmd := exec.Command("git", "-C", root, "ls-files", "-s", "-z", "--", pathspec)
+// runGitIndexModes lists the index entries of the repository with the top
+// repo that match pathspec, with their modes; run at the top, git reads the
+// pathspec and writes the paths from there. A test replaces it to count the
+// runs.
+var runGitIndexModes = func(repo, pathspec string) ([]byte, error) {
+	cmd := exec.Command("git", "-C", repo, "ls-files", "-s", "-z", "--", pathspec)
 	return cmd.Output()
 }
 
 // indexModesKey names one answer of GitIndexModes: the question and the
 // state of the git index it was read from.
 type indexModesKey struct {
-	root       string
+	repo       string
 	pathspec   string
 	indexSize  int64
 	indexMtime int64
@@ -36,11 +38,13 @@ var indexModesCache = struct {
 	answers map[indexModesKey]map[string]string
 }{answers: make(map[indexModesKey]map[string]string)}
 
-// GitIndexModes returns the mode the git index records for each file under
-// root that matches pathspec (100644, 100755, 120000 for a link), by its
-// path relative to root with forward slashes — the mode every clone checks
-// the file out with, whatever the disk of this one says. Git runs once per
-// root, pathspec and state of the index in the process. Outside a
+// GitIndexModes returns the mode the git index records (100644, 100755,
+// 120000 for a link) for each file of the repository holding root that
+// matches pathspec, by the file's absolute path — the mode every clone checks
+// the file out with, whatever the disk of this one says. The pathspec is read
+// from the top of the repository, not from root: a run on its bin directory
+// asks about the same files as a run on the whole repository. Git runs once
+// per repository, pathspec and state of the index in the process. Outside a
 // repository, or without git, no file has a mode and there is no error.
 func GitIndexModes(root, pathspec string) (map[string]string, error) {
 	abs, err := filepath.Abs(root)
@@ -51,7 +55,7 @@ func GitIndexModes(root, pathspec string) (map[string]string, error) {
 	if inside, err := hasOwnGit(repo); err != nil || !inside {
 		return map[string]string{}, err
 	}
-	key := indexModesKey{root: abs, pathspec: pathspec}
+	key := indexModesKey{repo: repo, pathspec: pathspec}
 	// The state of the index joins the key: a mode changed between two runs
 	// in one process changes the answer.
 	if gitDir, gitDirErr := resolveGitDir(repo); gitDirErr == nil && gitDir != "" {
@@ -66,28 +70,29 @@ func GitIndexModes(root, pathspec string) (map[string]string, error) {
 	if answer, ok := indexModesCache.answers[key]; ok {
 		return maps.Clone(answer), nil
 	}
-	output, err := runGitIndexModes(abs, pathspec)
+	output, err := runGitIndexModes(repo, pathspec)
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return map[string]string{}, nil
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("list the index of %s: %w: %s", abs, err, strings.TrimSpace(string(exitErr.Stderr)))
+			return nil, fmt.Errorf("list the index of %s: %w: %s", repo, err, strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return nil, fmt.Errorf("list the index of %s: %w", abs, err)
+		return nil, fmt.Errorf("list the index of %s: %w", repo, err)
 	}
-	answer, err := parseIndexModes(output)
+	answer, err := parseIndexModes(repo, output)
 	if err != nil {
-		return nil, fmt.Errorf("list the index of %s: %w", abs, err)
+		return nil, fmt.Errorf("list the index of %s: %w", repo, err)
 	}
 	indexModesCache.answers[key] = answer
 	return maps.Clone(answer), nil
 }
 
-// parseIndexModes reads `git ls-files -s -z`: entries of
-// "<mode> <object> <stage>\t<path>" ended by NUL.
-func parseIndexModes(output []byte) (map[string]string, error) {
+// parseIndexModes reads `git ls-files -s -z` run at repo, the top of the
+// repository: entries of "<mode> <object> <stage>\t<path>" ended by
+// NUL, the path from the top.
+func parseIndexModes(repo string, output []byte) (map[string]string, error) {
 	modes := make(map[string]string)
 	for entry := range bytes.SplitSeq(output, []byte{0}) {
 		if len(entry) == 0 {
@@ -99,7 +104,7 @@ func parseIndexModes(output []byte) (map[string]string, error) {
 		if !spaced || len(path) == 0 {
 			return nil, fmt.Errorf("unexpected entry %q", entry)
 		}
-		modes[string(path)] = string(mode)
+		modes[filepath.Join(repo, filepath.FromSlash(string(path)))] = string(mode)
 	}
 	return modes, nil
 }

@@ -30,16 +30,25 @@ func TestGitIndexModesRunsGitOncePerIndexState(t *testing.T) {
 	for range 3 {
 		modes, err := GitIndexModes(root, ":(glob)**/bin/*")
 		require.NoError(t, err)
-		assert.Equal(t, map[string]string{"bin/run": "100644", "bin/a b": "100755"}, modes)
+		assert.Equal(t, map[string]string{
+			filepath.Join(root, "bin", "run"): "100644",
+			filepath.Join(root, "bin", "a b"): "100755",
+		}, modes)
 	}
 	require.Equal(t, 1, calls, "git ls-files calls for one state of the index")
+	// A run on a directory of the repository asks git at its top, with paths
+	// from there: the answer is the same one.
+	fromBin, err := GitIndexModes(filepath.Join(root, "bin"), ":(glob)**/bin/*")
+	require.NoError(t, err)
+	assert.Equal(t, "100644", fromBin[filepath.Join(root, "bin", "run")])
+	require.Equal(t, 1, calls, "git ls-files calls from a directory of the repository")
 	// The caller owns its copy: a change to it does not reach the next one.
 	first, err := GitIndexModes(root, ":(glob)**/bin/*")
 	require.NoError(t, err)
-	delete(first, "bin/run")
+	delete(first, filepath.Join(root, "bin", "run"))
 	again, err := GitIndexModes(root, ":(glob)**/bin/*")
 	require.NoError(t, err)
-	assert.Contains(t, again, "bin/run")
+	assert.Contains(t, again, filepath.Join(root, "bin", "run"))
 
 	// Another pathspec is another question.
 	_, err = GitIndexModes(root, "bin")
