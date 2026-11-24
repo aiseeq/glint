@@ -4065,16 +4065,21 @@ func All(src map[string]int, given map[int]bool) ([]string, any) {
 // that other name: the guard is left to its free span.
 func TestMapIterationOrderAcceptsDedupWhoseMapIsNotItsOwn(t *testing.T) {
 	cases := map[string][3]string{
-		"alias of field":           {"", "seen := h.m", "clear(h.m)"},
-		"alias of package map":     {"var shared = map[int]bool{}\n", "seen := shared", "clear(shared)"},
-		"alias of parameter":       {"", "seen := given", "clear(given)"},
-		"map from getter":          {"var shared = map[int]bool{}\n\nfunc seenMap() map[int]bool { return shared }\n", "var seen = seenMap()", "clear(shared)"},
-		"returned by literal":      {"", "seen := map[int]bool{}\n\tkept = func() map[int]bool { return seen }", ""},
-		"in composite literal":     {"", "seen := map[int]bool{}", "kept = holder{m: seen}"},
-		"declared as other var":    {"", "seen := map[int]bool{}", "var m = seen\n\t\tkept = m"},
-		"sent on channel":          {"", "seen := map[int]bool{}\n\tch := make(chan map[int]bool, len(src))\n\tkept = ch", "ch <- seen"},
-		"address taken":            {"", "seen := map[int]bool{}", "kept = &seen"},
-		"second of pair from call": {"var shared = map[int]bool{}\n\nfunc pair() (int, map[int]bool) { return 0, shared }\n", "n, seen := pair()\n\tkept = n", "clear(shared)"},
+		"alias of field":                {"", "seen := h.m", "clear(h.m)"},
+		"alias of package map":          {"var shared = map[int]bool{}\n", "seen := shared", "clear(shared)"},
+		"alias of parameter":            {"", "seen := given", "clear(given)"},
+		"map from getter":               {"var shared = map[int]bool{}\n\nfunc seenMap() map[int]bool { return shared }\n", "var seen = seenMap()", "clear(shared)"},
+		"returned by literal":           {"", "seen := map[int]bool{}\n\tkept = func() map[int]bool { return seen }", ""},
+		"in composite literal":          {"", "seen := map[int]bool{}", "kept = holder{m: seen}"},
+		"declared as other var":         {"", "seen := map[int]bool{}", "var m = seen\n\t\tkept = m"},
+		"sent on channel":               {"", "seen := map[int]bool{}\n\tch := make(chan map[int]bool, len(src))\n\tkept = ch", "ch <- seen"},
+		"address taken":                 {"", "seen := map[int]bool{}", "kept = &seen"},
+		"alias beside discarded read":   {"", "seen := map[int]bool{}\n\tvar m map[int]bool", "m, _ = seen, seen\n\t\tclear(m)"},
+		"defined beside discarded read": {"", "seen := map[int]bool{}", "m, _ := seen, seen\n\t\tclear(m)"},
+		"alias defined":                 {"", "seen := map[int]bool{}", "m := seen\n\t\tclear(m)"},
+		"alias assigned":                {"", "seen := map[int]bool{}\n\tvar m map[int]bool", "m = seen\n\t\tclear(m)"},
+		"ranged into":                   {"", "seen := map[int]bool{}\n\tmaps := []map[int]bool{given}", "for _, seen = range maps {\n\t\t}\n\t\tclear(given)"},
+		"second of pair from call":      {"var shared = map[int]bool{}\n\nfunc pair() (int, map[int]bool) { return 0, shared }\n", "n, seen := pair()\n\tkept = n", "clear(shared)"},
 	}
 	for name, parts := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -4087,11 +4092,12 @@ func TestMapIterationOrderAcceptsDedupWhoseMapIsNotItsOwn(t *testing.T) {
 // declaration with no value - is its own: the first owner of a slot wins.
 func TestMapIterationOrderReportsDedupWinnerOnFreshMap(t *testing.T) {
 	decls := map[string]string{
-		"made":              "seen := make(map[int]bool, len(src))",
-		"literal":           "seen := map[int]bool{}",
-		"declared literal":  "var seen = map[int]bool{}",
-		"made beside other": "n, seen := 0, make(map[int]bool)\n\tkept = n",
-		"declared nil":      "var seen map[int]bool",
+		"made":                "seen := make(map[int]bool, len(src))",
+		"literal":             "seen := map[int]bool{}",
+		"declared literal":    "var seen = map[int]bool{}",
+		"made beside other":   "n, seen := 0, make(map[int]bool)\n\tkept = n",
+		"made in parentheses": "seen := (make(map[int]bool))",
+		"declared nil":        "var seen map[int]bool",
 	}
 	for name, decl := range decls {
 		t.Run(name, func(t *testing.T) {

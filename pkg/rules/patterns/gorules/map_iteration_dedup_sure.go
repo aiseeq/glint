@@ -136,6 +136,12 @@ func onlyMarked(fn *ast.FuncDecl, guard dedupGuard, info *types.Info) bool {
 	parents := helpers.ParentMap(fn.Body)
 	marked := true
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		// Returning false only skips the children of a node: its siblings
+		// are still visited, and one use that only marks must not undo a
+		// use found before that does not.
+		if !marked {
+			return false
+		}
 		if def, ok := n.(*ast.Ident); ok && info.Defs[def] == seen {
 			marked = madeFresh(def, parents[def], info)
 		}
