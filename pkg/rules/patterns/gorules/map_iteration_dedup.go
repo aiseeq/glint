@@ -673,7 +673,7 @@ func (c *dedupCallee) keepsEntry(fn *ast.FuncDecl, guard dedupGuard, entry map[t
 	}
 	then, els := guard.outcomes(info)
 	body := guardBody(c.body, guard.test)
-	if then == 0 || !c.pathsSure(guard, body, writes, info) {
+	if then == 0 || !c.pathsSure(fn, guard, body, writes, info) {
 		return keptInSpan(guard, c.body, writes)
 	}
 	flow := &dedupFlow{guard: guard, then: then, els: els, writes: map[ast.Stmt]bool{}}
