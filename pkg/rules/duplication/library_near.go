@@ -68,6 +68,11 @@ func (b *nearBodyBuilder) field(field, root int) {
 // jump in Vars.
 const nearAnchor = -2
 
+// nearKey marks in Vars the key of a TypeScript object pattern or literal,
+// which names the property its value reads or builds: { bid: b, ask: a }
+// is another object than { ask: b, bid: a }.
+const nearKey = -3
+
 // nearFieldBase numbers the fields of the variables of a Go function, which
 // stand in the roles as variables of their own, apart from the variables.
 const nearFieldBase = 1 << 20
@@ -109,6 +114,19 @@ type nearRole struct {
 	// among the statements.
 	Fixed  bool `json:"x,omitempty"`
 	Parent int  `json:"p"`
+	// Update is the kind of an update of one integer variable that commutes
+	// with another update of its kind — "+" for +=, -=, ++ and --, "*", "|",
+	// "&" or "^" for the assignment with that operator — and is empty for
+	// another statement: w *= f; w += 1 is another function than
+	// w += 1; w *= f, and so is r += "["; r += w of r += w; r += "[".
+	Update string `json:"u,omitempty"`
+	// Jump marks a jump: a return, a break, a continue, a goto or a throw;
+	// Scope is the statement it leaves, a loop or a switch, -1 for the
+	// function. The statements in Scope run or not by where they stand
+	// against the jump: c++ before if v < 0 { continue } counts every
+	// value, after it only those it does not skip.
+	Jump  bool `json:"j,omitempty"`
+	Scope int  `json:"k,omitempty"`
 }
 
 // nearBodyBuilder collects a nearBody in one pass over the body: every token
@@ -176,6 +194,34 @@ func (b *nearBodyBuilder) fix() {
 		b.open[len(b.open)-1].role.Fixed = true
 	}
 }
+
+// jump marks the innermost open statement as a jump out of the statement
+// opened as scope (openID), -1 for the function.
+func (b *nearBodyBuilder) jump(scope int) {
+	if b.detailed && len(b.open) > 0 {
+		top := &b.open[len(b.open)-1]
+		top.role.Jump, top.role.Scope = true, scope
+	}
+}
+
+// update marks the innermost open statement as an update of the kind.
+func (b *nearBodyBuilder) update(kind string) {
+	if b.detailed && len(b.open) > 0 {
+		b.open[len(b.open)-1].role.Update = kind
+	}
+}
+
+// openID is the order of opening of the innermost open statement, -1 for
+// none.
+func (b *nearBodyBuilder) openID() int {
+	if len(b.open) == 0 {
+		return -1
+	}
+	return b.open[len(b.open)-1].id
+}
+
+// emitKey adds the key of an object pattern or literal.
+func (b *nearBodyBuilder) emitKey(name string) { b.add(name, name, "", nearKey) }
 
 // emitAnchor adds a literal or the name of a called function: tok in the
 // sequence, value among the anchors of its statement, mask in its shape.
@@ -291,6 +337,9 @@ func (b *nearBodyBuilder) orderRoles() {
 	for i := range roles {
 		if parent := roles[i].Parent; parent >= 0 {
 			roles[i].Parent = final[parent]
+		}
+		if scope := roles[i].Scope; roles[i].Jump && scope >= 0 {
+			roles[i].Scope = final[scope]
 		}
 	}
 	for i, id := range b.body.Owners {
@@ -481,6 +530,19 @@ type goNearWalker struct {
 	// it names.
 	assigns *goAssigned
 	aliases map[types.Object]ast.Expr
+	// scopes are the loops and switches open, which a break or a continue
+	// leaves.
+	scopes []goScope
+	// bodyWrites is what the body writes (goWrites), once a second name of
+	// a value another name may reach needs it.
+	bodyWrites map[ast.Node]bool
+}
+
+// goScope is a loop or a switch open: the statement opened and whether a
+// continue leaves it.
+type goScope struct {
+	id   int
+	loop bool
 }
 
 type calleeName struct{ sel, name ast.Node }
@@ -497,6 +559,9 @@ func (w *goNearWalker) walk(root ast.Node) {
 			w.b.emit(")")
 			if isNearStmt(top) {
 				w.b.closeStmt()
+			}
+			if _, scope := goScopeOf(top); scope && w.b.detailed {
+				w.scopes = w.scopes[:len(w.scopes)-1]
 			}
 			return false
 		}
@@ -576,6 +641,7 @@ func (w *goNearWalker) walk(root ast.Node) {
 		if isNearStmt(node) {
 			w.openStmt(node)
 			w.note(node)
+			w.control(node)
 		}
 		w.openNode(node)
 		if isElseBlock(node, stack) {
@@ -585,6 +651,83 @@ func (w *goNearWalker) walk(root ast.Node) {
 		stack = append(stack, node)
 		return true
 	})
+}
+
+// goScopeOf reports whether a break leaves node, a loop or a switch, and
+// whether a continue does, a loop.
+func goScopeOf(node ast.Node) (loop, scope bool) {
+	switch node.(type) {
+	case *ast.ForStmt, *ast.RangeStmt:
+		return true, true
+	case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+		return false, true
+	}
+	return false, false
+}
+
+// control records what the statement node just opened means for the order
+// of the statements: the loop or the switch it opens, the scope it jumps
+// out of, the kind of update it makes.
+func (w *goNearWalker) control(node ast.Node) {
+	if !w.b.detailed {
+		return
+	}
+	if loop, scope := goScopeOf(node); scope {
+		w.scopes = append(w.scopes, goScope{id: w.b.openID(), loop: loop})
+	}
+	switch x := node.(type) {
+	case *ast.ReturnStmt:
+		w.b.jump(-1)
+	case *ast.BranchStmt:
+		w.b.jump(w.jumpScope(x))
+	case *ast.AssignStmt:
+		if len(x.Lhs) == 1 {
+			w.b.update(w.updateKind(goUpdateOps[x.Tok], x.Lhs[0]))
+		}
+	case *ast.IncDecStmt:
+		w.b.update(w.updateKind("+", x.X))
+	}
+}
+
+// goUpdateOps are the kinds of the assignments that update a variable in a
+// way that commutes with another update of their kind.
+var goUpdateOps = map[token.Token]string{
+	token.ADD_ASSIGN: "+", token.SUB_ASSIGN: "+", token.MUL_ASSIGN: "*",
+	token.OR_ASSIGN: "|", token.AND_ASSIGN: "&", token.XOR_ASSIGN: "^",
+}
+
+// updateKind is kind for an update of an integer, which commutes with
+// another update of its kind; a sum of floats rounds by its order, a sum of
+// texts is another text.
+func (w *goNearWalker) updateKind(kind string, target ast.Expr) string {
+	if kind == "" {
+		return ""
+	}
+	t := w.n.info.TypeOf(target)
+	if t == nil {
+		return ""
+	}
+	basic, ok := t.Underlying().(*types.Basic)
+	if !ok || basic.Info()&types.IsInteger == 0 {
+		return ""
+	}
+	return kind
+}
+
+// jumpScope is the statement a break, a continue or a fallthrough leaves:
+// the innermost loop for a continue, the innermost loop or switch for
+// another; -1, the function, for a goto, a jump to a label or one outside
+// any.
+func (w *goNearWalker) jumpScope(x *ast.BranchStmt) int {
+	if x.Label != nil || x.Tok == token.GOTO {
+		return -1
+	}
+	for k := len(w.scopes) - 1; k >= 0; k-- {
+		if w.scopes[k].loop || x.Tok != token.CONTINUE {
+			return w.scopes[k].id
+		}
+	}
+	return -1
 }
 
 // openNode emits the kind of node; an operator of an expression, an
@@ -637,15 +780,25 @@ func (w *goNearWalker) alias(assign *ast.AssignStmt) bool {
 // untouchedWhileNamed reports whether nothing may change what assign names
 // a second time while obj names it: nothing after assign in the scope of
 // obj calls or takes an address (goEffect), since a call may change a value
-// a name of its own keeps.
+// a name of its own keeps; and, when what it names is a field through a
+// pointer, nothing writes what another name may reach too (goReaches):
+// old := a.N; b.N = top; v := old * 2 reads the old a.N when a and b point
+// to one value, where v := a.N * 2 reads top.
 func (w *goNearWalker) untouchedWhileNamed(assign *ast.AssignStmt, obj types.Object) bool {
 	from, to := assign.End(), obj.Parent().End()
+	var written map[ast.Node]bool
+	if sel, ok := assign.Rhs[0].(*ast.SelectorExpr); ok && goReaches(w.n.info, sel) {
+		if w.bodyWrites == nil {
+			w.bodyWrites = goWrites(w.body)
+		}
+		written = w.bodyWrites
+	}
 	free := true
 	ast.Inspect(w.body, func(node ast.Node) bool {
 		if !free || node == nil || node.End() <= from || node.Pos() >= to {
 			return false
 		}
-		free = node.Pos() < from || !goEffect(w.n.info, node)
+		free = node.Pos() < from || !goEffect(w.n.info, node) && !(written[node] && goReaches(w.n.info, node))
 		return free
 	})
 	return free
@@ -1411,14 +1564,17 @@ func keepsParallel(roles, lib []nearRole, partner []int) bool {
 // where nothing proves them independent. A statement that keeps its place
 // (Fixed) on either side, or holds one, runs after every statement whose
 // partner runs before its partner and before every one whose partner runs
-// after. Other statements depend on each other when one writes a variable
-// the other reads without writing it. A field stands for its variable as
-// well: writing the variable writes its fields, writing a field writes the
-// variable for the statements that read it, but two fields of one variable
-// are apart. A copy may swap two lookups, two counts or two rewrites of one
-// value, but not a rewrite of a value and a statement that reads it, which
-// then reads another value. A statement opens before the statements it
-// holds, on both sides, so the two keep their order.
+// after; so does a jump (keepsJumps) for the statements of the loop, the
+// switch or the function it leaves. Other statements depend on each other
+// when one writes a variable the other reads without writing it, or both
+// write it, unless both update it in a way that commutes (nearRole.Update).
+// A field stands for its variable as well: writing the variable writes its
+// fields, writing a field writes the variable, but two fields of one
+// variable are apart. A copy may swap two lookups, two counts or two sums
+// into one integer, but not a rewrite of a value and a statement that
+// reads it, which then reads another value, nor two rewrites of one value
+// that do not commute. A statement opens before the statements it holds,
+// on both sides, so the two keep their order.
 func keepsDependentOrder(roles, lib []nearRole, partner []int, roots map[int]int) bool {
 	last := -1
 	inOrder := true
@@ -1431,7 +1587,7 @@ func keepsDependentOrder(roles, lib []nearRole, partner []int, roots map[int]int
 	if inOrder {
 		return true
 	}
-	if !keepsFixedPlaces(heldFixed(roles), heldFixed(lib), partner) {
+	if !keepsFixedPlaces(heldFixed(roles), heldFixed(lib), partner) || !keepsJumps(roles, partner) || !keepsJumps(lib, inversePartner(partner, len(lib))) {
 		return false
 	}
 	vars := statementVars(roles)
@@ -1448,6 +1604,7 @@ func keepsDependentOrder(roles, lib []nearRole, partner []int, roots map[int]int
 		}
 		for v := range sv.writes {
 			at(v).writers = append(at(v).writers, i)
+			at(v).updates = append(at(v).updates, updateOf(roles[i], v))
 			if root, field := roots[v]; field {
 				at(root).fieldWriters = append(at(root).fieldWriters, i)
 			}
@@ -1505,10 +1662,74 @@ func keepsFixedPlaces(own, lib []bool, partner []int) bool {
 	return true
 }
 
+// updateOf is the kind of the update role makes of v (nearRole.Update),
+// empty unless that is all role does to v: it writes v alone and reads it
+// only to update it. w += w doubles w, which does not commute with w += 1.
+func updateOf(role nearRole, v int) string {
+	if role.Update == "" || len(role.Writes) != 1 || role.Writes[0] != v {
+		return ""
+	}
+	reads := 0
+	for _, local := range role.Locals {
+		if local == v {
+			reads++
+		}
+	}
+	if reads != 1 {
+		return ""
+	}
+	return role.Update
+}
+
+// inversePartner is the partner in the body of every statement of the
+// library function, n of them, the first one when several stand for it.
+func inversePartner(partner []int, n int) []int {
+	out := unpaired(n)
+	for i, p := range partner {
+		if p >= 0 && out[p] < 0 {
+			out[p] = i
+		}
+	}
+	return out
+}
+
+// keepsJumps reports whether every jump of roles with a partner keeps its
+// place against the statements with a partner in the loop, the switch or
+// the function it leaves: those before it have partners before its
+// partner, those after it partners after it. Roles open a statement before
+// the statements it holds, so the statements a statement holds follow it in
+// one run, which ends at end.
+func keepsJumps(roles []nearRole, partner []int) bool {
+	end := make([]int, len(roles))
+	for i := len(roles) - 1; i >= 0; i-- {
+		end[i] = max(end[i], i)
+		if p := roles[i].Parent; p >= 0 {
+			end[p] = max(end[p], end[i])
+		}
+	}
+	for j, role := range roles {
+		if !role.Jump || partner[j] < 0 {
+			continue
+		}
+		from, to := 0, len(roles)-1
+		if role.Scope >= 0 {
+			from, to = role.Scope+1, end[role.Scope]
+		}
+		for x := from; x <= to; x++ {
+			if partner[x] >= 0 && !keptPair(partner, j, x) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // varAccess is how the statements use one variable: those that write it,
-// read it, and, for a variable with fields, write or read a field of it.
+// with the kind of their update, read it, and, for a variable with fields,
+// write or read a field of it.
 type varAccess struct {
 	writers, fieldWriters []int
+	updates               []string
 	readers, fieldReaders []int
 }
 
@@ -1519,7 +1740,18 @@ func keptPair(partner []int, x, y int) bool {
 }
 
 func (a *varAccess) inOrder(partner []int) bool {
-	for _, w := range a.writers {
+	for k, w := range a.writers {
+		for l := k + 1; l < len(a.writers); l++ {
+			commute := a.updates[k] != "" && a.updates[k] == a.updates[l]
+			if !commute && !keptPair(partner, w, a.writers[l]) {
+				return false
+			}
+		}
+		for _, f := range a.fieldWriters {
+			if !keptPair(partner, w, f) {
+				return false
+			}
+		}
 		for _, r := range a.readers {
 			if !keptPair(partner, w, r) {
 				return false
@@ -1764,13 +1996,14 @@ func keptApart(edges map[[2]int]bool, libVars, ownVars map[int]bool, libRoots, o
 	return true
 }
 
-// skipToken records a literal or a called function the alignment skips in
-// left, a variable in vars, and reports whether tok is either.
+// skipToken records a literal, a called function or the key of an object
+// the alignment skips in left, a variable in vars, and reports whether tok
+// is one of them.
 func skipToken(tok nearToken, left map[string]bool, vars map[int]bool) bool {
 	switch {
 	case tok.vr >= 0:
 		vars[tok.vr] = true
-	case tok.vr == nearAnchor:
+	case tok.vr == nearAnchor, tok.vr == nearKey:
 		left[tok.text] = true
 	default:
 		return false

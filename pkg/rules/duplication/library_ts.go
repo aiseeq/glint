@@ -213,16 +213,18 @@ type tsFunc struct {
 }
 
 // tsSource is the tokens of a file, the matching bracket of every bracket,
-// its functions and the identifiers it declares, in order.
+// its functions and the identifiers it declares, in order, and the names of
+// an object pattern or literal that name a property too (markShorthand).
 type tsSource struct {
-	toks  []tsToken
-	match []int
-	funcs []tsFunc
-	decls []int
+	toks      []tsToken
+	match     []int
+	funcs     []tsFunc
+	decls     []int
+	shorthand map[int]bool
 }
 
 func parseTSSource(lines []string) *tsSource {
-	s := &tsSource{toks: tsTokens(lines)}
+	s := &tsSource{toks: tsTokens(lines), shorthand: make(map[int]bool)}
 	s.match = tsBrackets(s.toks)
 	for i := range s.toks {
 		s.scan(i)
@@ -278,6 +280,40 @@ func (s *tsSource) scan(i int) {
 		}
 	case tok.kind == tsIdent && (tok.text == "let" || tok.text == "const" || tok.text == "var"):
 		s.scanDeclaration(i + 1)
+	case tok.kind == tsPunct && tok.text == "{" && tsObjectBefore[s.text(i-1)]:
+		s.markShorthand(i)
+	}
+}
+
+// tsObjectBefore are the tokens after which a brace opens an object, not a
+// block.
+var tsObjectBefore = map[string]bool{
+	"(": true, "[": true, ",": true, "=": true, "return": true, "?": true,
+	"??": true, "||": true, "&&": true, "...": true,
+}
+
+// markShorthand marks the names of the object pattern or literal that opens
+// at open, and of the objects in it, written without a key: { bid, ask }
+// reads, or builds, the properties bid and ask, as { bid: bid, ask: ask }
+// does; { ask, bid } with the names in the other roles is another object.
+func (s *tsSource) markShorthand(open int) {
+	end := s.match[open]
+	object := s.text(open) == "{"
+	for j := open + 1; j < end; j++ {
+		switch s.text(j) {
+		case "{", "[":
+			s.markShorthand(j)
+		case "(":
+		default:
+			prev, next := s.text(j-1), s.text(j+1)
+			if object && s.isIdent(j) && (prev == "{" || prev == ",") && (next == "," || next == "}" || next == "=") {
+				s.shorthand[j] = true
+			}
+			continue
+		}
+		if s.match[j] > j {
+			j = s.match[j]
+		}
 	}
 }
 
@@ -511,6 +547,7 @@ func (s *tsSource) scanDeclaration(i int) {
 				s.decls = append(s.decls, j)
 			}
 		}
+		s.markShorthand(i)
 	}
 }
 
@@ -531,7 +568,7 @@ func (s *tsSource) tsNearBody(f tsFunc, detailed bool) nearBody {
 		}
 		locals.numbers[s.toks[d].text] = -1
 	}
-	w := &tsNearWalker{s: s, b: newNearBodyBuilder(detailed), blocks: []tsBlock{{seed: fnvOffset64, parent: -1}}}
+	w := &tsNearWalker{s: s, b: newNearBodyBuilder(detailed), blocks: []tsBlock{{seed: fnvOffset64, parent: -1}}, scopes: make(map[int]bool)}
 	w.reopen()
 	for i := f.bodyOpen + 1; i < f.bodyClose; i++ {
 		tok := s.toks[i]
@@ -539,6 +576,7 @@ func (s *tsSource) tsNearBody(f tsFunc, detailed bool) nearBody {
 			w.endStmt()
 		}
 		w.markHead(i)
+		w.markJump(i)
 		if s.effect(i) {
 			w.b.fix()
 		}
@@ -580,6 +618,10 @@ type tsNearWalker struct {
 	// head is set while the condition of a check or a loop that opens the
 	// statement is read.
 	head bool
+	// scopes holds the statements a break leaves, by their order of
+	// opening: true for a loop, which a continue leaves too, false for a
+	// switch.
+	scopes map[int]bool
 }
 
 type tsBlock struct {
@@ -622,8 +664,50 @@ func (w *tsNearWalker) markHead(i int) {
 	case "if":
 		w.head = w.head || w.b.fresh()
 	case "for", "while":
-		w.head = w.head || w.b.fresh() && w.s.text(i-1) != "}"
+		if w.b.fresh() && w.s.text(i-1) != "}" {
+			w.head = true
+			w.scopes[w.b.openID()] = true
+		}
+	case "do":
+		if w.b.fresh() {
+			w.scopes[w.b.openID()] = true
+		}
+	case "switch":
+		if w.b.fresh() {
+			w.scopes[w.b.openID()] = false
+		}
 	}
+}
+
+// markJump marks the statement a return, a throw, a break or a continue at
+// i opens as a jump out of the function, or of the innermost loop or switch
+// it leaves (tsNearWalker.scopes); a jump to a label leaves the function.
+// A property of the name, gen.return(), reads a property, which keeps the
+// statement in its place (Fixed) anyway.
+func (w *tsNearWalker) markJump(i int) {
+	if w.s.toks[i].kind != tsIdent {
+		return
+	}
+	text := w.s.text(i)
+	switch text {
+	case "return", "throw":
+		w.b.jump(-1)
+		return
+	case "break", "continue":
+	default:
+		return
+	}
+	if w.s.isIdent(i+1) && w.s.toks[i+1].line == w.s.toks[i].line {
+		w.b.jump(-1)
+		return
+	}
+	for k := len(w.blocks) - 1; k >= 0; k-- {
+		if loop, scope := w.scopes[w.blocks[k].parent]; scope && (loop || text == "break") {
+			w.b.jump(w.blocks[k].parent)
+			return
+		}
+	}
+	w.b.jump(-1)
 }
 
 func (w *tsNearWalker) punct(i int) {
@@ -674,17 +758,23 @@ func (l *tsLocals) number(name string) int {
 	return num
 }
 
-// emitName emits the name at i: a property after a dot or the key of an
-// object literal as written, though a variable may be called so, the name
+// emitName emits the name at i: a property after a dot as written, the key
+// of an object pattern or literal, written or not (markShorthand), as a key
+// (nearKey), though a variable may be called so, the name
 // of a called function as an anchor, a variable by its number, a field read
 // of a variable, v.name, as a variable of its own; it returns the number of
 // the tokens after i it emitted too.
 func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) int {
 	name := s.text(i)
-	property := s.text(i-1) == "." || s.text(i-1) == "?." ||
-		s.text(i+1) == ":" && (s.text(i-1) == "{" || s.text(i-1) == ",")
+	key := s.text(i+1) == ":" && (s.text(i-1) == "{" || s.text(i-1) == ",")
+	property := s.text(i-1) == "." || s.text(i-1) == "?." || key
 	call := s.text(i+1) == "(" || s.text(i+1) == "?." && s.text(i+2) == "("
 	_, local := locals.numbers[name]
+	if s.shorthand[i] {
+		// The key of { bid } is a property, as in { bid: bid }.
+		b.emitKey(name)
+		b.emit(":")
+	}
 	if !property && tsOperators[name] {
 		b.ops[name] = true
 	}
@@ -693,6 +783,8 @@ func (s *tsSource) emitName(b *nearBodyBuilder, i int, locals *tsLocals) int {
 		// A property may be named like a keyword: set.delete(key).
 		b.calls["."+name] = true
 		b.emitAnchor(name, "."+name, nearCallMask)
+	case key:
+		b.emitKey(name)
 	case property:
 		b.emit(name)
 	case name == "break" || name == "continue" || name == "return":

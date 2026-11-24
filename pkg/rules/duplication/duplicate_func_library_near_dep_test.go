@@ -712,10 +712,11 @@ func TestKeepsOwnValues(t *testing.T) {
 }
 
 // keepsDependentOrder lets two statements trade places unless one writes
-// what the other reads or one keeps its place, on either side; a field is
-// read and written with its variable, two fields of one variable are apart,
-// two rewrites of one value may trade places, and two statements that stand
-// for one statement of the library function keep no order.
+// what the other reads, both write one value, or one keeps its place, on
+// either side; a field is read and written with its variable, two fields of
+// one variable are apart, two updates of one value of one kind may trade
+// places, and two statements that stand for one statement of the library
+// function keep no order.
 func TestKeepsDependentOrder(t *testing.T) {
 	roots := map[int]int{10: 1, 11: 1}
 	role := func(locals, writes []int) nearRole {
@@ -723,6 +724,11 @@ func TestKeepsDependentOrder(t *testing.T) {
 	}
 	fixed := func(r nearRole) nearRole {
 		r.Fixed = true
+		return r
+	}
+	update := func(kind string, locals []int, v int) nearRole {
+		r := role(locals, []int{v})
+		r.Update = kind
 		return r
 	}
 	plain := []nearRole{role(nil, nil), role(nil, nil), role(nil, nil), role(nil, nil)}
@@ -736,10 +742,23 @@ func TestKeepsDependentOrder(t *testing.T) {
 		"variable written, field read":    {[]nearRole{role(nil, []int{1}), role([]int{10}, nil)}, plain, []int{1, 0}, false},
 		"field written, variable read":    {[]nearRole{role(nil, []int{10}), role([]int{1}, nil)}, plain, []int{1, 0}, false},
 		"field written, other field read": {[]nearRole{role(nil, []int{10}), role([]int{11}, nil)}, plain, []int{1, 0}, true},
-		"two rewrites":                    {[]nearRole{role(nil, []int{1}), role(nil, []int{1})}, plain, []int{1, 0}, true},
-		"variable and field rewritten":    {[]nearRole{role(nil, []int{1}), role(nil, []int{10})}, plain, []int{1, 0}, true},
+		"two rewrites":                    {[]nearRole{role(nil, []int{1}), role(nil, []int{1})}, plain, []int{1, 0}, false},
+		"two sums into one value":         {[]nearRole{update("+", []int{2}, 1), update("+", []int{3}, 1)}, plain, []int{1, 0}, true},
+		"a sum and a product":             {[]nearRole{update("+", []int{2}, 1), update("*", []int{3}, 1)}, plain, []int{1, 0}, false},
+		"a sum and a rewrite":             {[]nearRole{update("+", []int{2}, 1), role([]int{3}, []int{1})}, plain, []int{1, 0}, false},
+		"a sum of the value itself":       {[]nearRole{update("+", []int{2}, 1), update("+", []int{1}, 1)}, plain, []int{1, 0}, false},
+		"a sum into two values":           {[]nearRole{update("+", []int{2}, 1), {Locals: []int{1, 4}, Writes: []int{1, 4}, Update: "+", Parent: -1}}, plain, []int{1, 0}, false},
+		"sums in place":                   {[]nearRole{update("+", []int{2}, 1), update("*", []int{3}, 1)}, plain, []int{0, 1}, true},
+		"variable and field rewritten":    {[]nearRole{role(nil, []int{1}), role(nil, []int{10})}, plain, []int{1, 0}, false},
+		"field and variable rewritten":    {[]nearRole{role(nil, []int{10}), role(nil, []int{1})}, plain, []int{1, 0}, false},
+		"two fields rewritten":            {[]nearRole{role(nil, []int{10}), role(nil, []int{11})}, plain, []int{1, 0}, true},
 		"one statement split in two":      {[]nearRole{role(nil, []int{1}), role([]int{1}, nil), role([]int{2}, nil), role([]int{3}, nil)}, plain, []int{0, 0, 2, 1}, true},
-		"held rewrite":                    {[]nearRole{role(nil, nil), {Locals: []int{1}, Writes: []int{1}, Parent: 0}, role(nil, []int{1})}, plain, []int{1, 2, 0}, true},
+		"held rewrite":                    {[]nearRole{role(nil, nil), {Locals: []int{1}, Writes: []int{1}, Parent: 0}, role(nil, []int{1})}, plain, []int{1, 2, 0}, false},
+		"held sum":                        {[]nearRole{role(nil, nil), {Locals: []int{1}, Writes: []int{1}, Update: "+", Parent: 0}, update("+", nil, 1)}, plain, []int{1, 2, 0}, false},
+		"held rewrite of another value":   {[]nearRole{role(nil, nil), {Locals: []int{1}, Writes: []int{1}, Parent: 0}, role(nil, []int{2})}, plain, []int{1, 2, 0}, true},
+		"sum that holds a sum of another": {[]nearRole{update("+", []int{2}, 1), {Locals: []int{2}, Writes: []int{2}, Update: "+", Parent: 0}, update("+", nil, 2)}, plain, []int{1, 2, 0}, false},
+		"jump of the body moved":          {[]nearRole{role([]int{2}, nil), {Jump: true, Scope: -1, Parent: -1}}, plain, []int{1, 0}, false},
+		"jump of the library moved":       {[]nearRole{role([]int{2}, nil), role([]int{3}, nil)}, []nearRole{{Jump: true, Scope: -1, Parent: -1}, role(nil, nil)}, []int{1, 0}, false},
 		"fixed statement moved down":      {[]nearRole{fixed(role([]int{1}, nil)), role([]int{2}, nil)}, plain, []int{1, 0}, false},
 		"fixed statement moved up":        {[]nearRole{role([]int{2}, nil), fixed(role([]int{1}, nil))}, plain, []int{1, 0}, false},
 		"partner of a fixed one moved":    {[]nearRole{role([]int{1}, nil), role([]int{2}, nil)}, []nearRole{fixed(role(nil, nil)), role(nil, nil)}, []int{1, 0}, false},
@@ -754,6 +773,41 @@ func TestKeepsDependentOrder(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.kept, keepsDependentOrder(tc.roles, tc.lib, tc.partner, roots))
+		})
+	}
+}
+
+// The partner in the body of a statement of the library function is the
+// first statement that stands for it.
+func TestInversePartner(t *testing.T) {
+	assert.Equal(t, []int{0, 2, -1}, inversePartner([]int{0, 0, 1, -1}, 3))
+}
+
+// A jump keeps its place against the statements of the loop, the switch or
+// the function it leaves, on either side, but not against the statements
+// outside what it leaves.
+func TestKeepsJumps(t *testing.T) {
+	stmt := func(parent int) nearRole { return nearRole{Parent: parent} }
+	jump := func(parent, scope int) nearRole { return nearRole{Parent: parent, Jump: true, Scope: scope} }
+	// for { if c { continue }; n++ }; m++ in the order of the library.
+	loop := []nearRole{stmt(-1), stmt(0), jump(1, 0), stmt(0), stmt(-1)}
+	// for { if c { return } }; n++ with the return leaving the function.
+	returns := []nearRole{stmt(-1), stmt(0), jump(1, -1), stmt(-1)}
+	plain := []nearRole{stmt(-1), stmt(0), stmt(1), stmt(0), stmt(-1)}
+	for name, tc := range map[string]struct {
+		roles, lib []nearRole
+		partner    []int
+		kept       bool
+	}{
+		"in order":                          {loop, loop, []int{0, 1, 2, 3, 4}, true},
+		"count moved before the continue":   {[]nearRole{stmt(-1), stmt(0), stmt(0), jump(2, 0), stmt(-1)}, loop, []int{0, 3, 1, 2, 4}, false},
+		"count moved past the library jump": {[]nearRole{stmt(-1), stmt(0), stmt(0), stmt(2), stmt(-1)}, loop, []int{0, 3, 1, 2, 4}, false},
+		"statement after the loop moved up": {[]nearRole{stmt(-1), stmt(-1), stmt(1), jump(2, 1), stmt(1)}, loop, []int{4, 0, 1, 2, 3}, true},
+		"statement moved past a return":     {[]nearRole{stmt(-1), stmt(-1), stmt(1), jump(2, -1)}, returns, []int{3, 0, 1, 2}, false},
+		"jump without a partner":            {[]nearRole{stmt(-1), stmt(0), stmt(0), jump(2, 0), stmt(-1)}, plain, []int{0, 3, 1, -1, 4}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.kept, keepsJumps(tc.roles, tc.partner) && keepsJumps(tc.lib, inversePartner(tc.partner, len(tc.lib))))
 		})
 	}
 }

@@ -829,12 +829,14 @@ func PageOf(rows []string, start, end int) []string {
 }
 `
 
-// A copy may name its variables otherwise, check in another order, write
-// the second check as an else branch, run over a field of its receiver or
-// repeat a statement of the library function: each variable keeps its role.
+// A copy may name its variables otherwise, write the second check as an
+// else branch, run over a field of its receiver or repeat a statement of
+// the library function: each variable keeps its role. Two checks that set
+// one value, checked in the other order, give another value when the bounds
+// cross: no copy.
 func TestDuplicateFuncOfLibraryNearCopyKeepsRolesOfRenamedLocals(t *testing.T) {
 	for name, tc := range map[string]struct{ lib, source, subject string }{
-		"renamed and reordered": {libraryLimitSource, `package app
+		"renamed, bounds checked in the other order": {libraryLimitSource, `package app
 
 func payprovBound(values []int, lo, hi int) []int {
 	res := make([]int, 0, len(values))
@@ -849,7 +851,7 @@ func payprovBound(values []int, lo, hi int) []int {
 	}
 	return res
 }
-`, "Function payprovBound is a near copy"},
+`, ""},
 		"else branch": {libraryLimitSource, `package app
 
 func payprovBound(values []int, lo, hi int) []int {
@@ -903,7 +905,9 @@ func tidyReference(raw string) string {
 			violations := nearLibraryFindings(t, tc.lib, tc.source)
 			if tc.subject == "" {
 				// A call the library function does not make, where it
-				// makes none, is an effect nothing proves it may add.
+				// makes none, is an effect nothing proves it may add; the
+				// bounds checked in the other order set the value in
+				// another order.
 				assert.Empty(t, violations)
 				return
 			}
@@ -1015,10 +1019,12 @@ func (payprovLimiter) bound(amounts []int, floor, ceiling int) []int {
 }
 
 // TypeScript copies keep the roles of their variables and the places of
-// their calls and literals; a renamed copy with reordered checks is one.
+// their calls and literals; a renamed copy that checks the bounds in the
+// other order sets the value in another order, which gives another value
+// when the bounds cross: no copy.
 func TestDuplicateFuncOfLibraryTypeScriptRolesAndPlaces(t *testing.T) {
 	for name, tc := range map[string]struct{ source, subject string }{
-		"renamed and reordered": {`function payprovBound(xs: number[], lo: number, hi: number): number[] {
+		"renamed, bounds checked in the other order": {`function payprovBound(xs: number[], lo: number, hi: number): number[] {
   const res: number[] = []
   for (let x of xs) {
     if (x > hi) x = hi
@@ -1027,7 +1033,17 @@ func TestDuplicateFuncOfLibraryTypeScriptRolesAndPlaces(t *testing.T) {
   }
   return res
 }
-`, "Function payprovBound is a near copy (100% alike) of function limitAmounts"},
+`, ""},
+		"renamed in order": {`function payprovBound(xs: number[], lo: number, hi: number): number[] {
+  const res: number[] = []
+  for (let x of xs) {
+    if (x < lo) x = lo
+    if (x > hi) x = hi
+    res.push(x)
+  }
+  return res
+}
+`, "Function payprovBound duplicates function limitAmounts"},
 		"renamed": {`function payprovFlip<T>(source: ReadonlySet<T>, item: T): Set<T> {
   const copy = new Set(source)
   if (copy.has(item)) copy.delete(item)
@@ -1636,11 +1652,29 @@ func Offsets(xs []int, base, step int) []int {
 `
 
 // A field read in the place of another, an operator or a jump in the place
-// of another, and a jump dropped make another function; a copy that renames
-// the span or checks the bounds in the other order is a copy.
+// of another, a jump dropped and the bounds checked in the other order make
+// another function; a copy that renames the span is a copy.
 func TestDuplicateFuncOfLibraryNearCopyFieldsOperatorsAndJumps(t *testing.T) {
 	for name, tc := range map[string]struct{ source, subject string }{
-		"renamed and reordered": {`package app
+		"renamed": {`package app
+
+import "example.com/owner/lib"
+
+func payprovLimit(xs []int, r lib.Span) []int {
+	res := make([]int, 0, len(xs))
+	for _, x := range xs {
+		if x < r.Low {
+			x = r.Low
+		}
+		if x > r.High {
+			x = r.High
+		}
+		res = append(res, x)
+	}
+	return res
+}
+`, "Function payprovLimit duplicates function Limit"},
+		"bounds checked in the other order": {`package app
 
 import "example.com/owner/lib"
 
@@ -1657,7 +1691,7 @@ func payprovLimit(xs []int, r lib.Span) []int {
 	}
 	return res
 }
-`, "Function payprovLimit is a near copy (100% alike) of function Limit"},
+`, ""},
 		"fields trade places": {`package app
 
 import "example.com/owner/lib"
