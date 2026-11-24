@@ -67,6 +67,14 @@ while poll-once; do sleep 5; done
 trap 'eval "$on_stop" || rm -f "$tmp"' TERM
 while poll-once; do sleep 5; done
 `,
+		"true_and_exit.sh": `#!/bin/bash
+trap 'rm -f "$tmp"; true && exit 0' TERM
+while poll-once; do sleep 5; done
+`,
+		"colon_and_exit.sh": `#!/bin/bash
+trap 'rm -f "$tmp"; : && exit 0' TERM
+while poll-once; do sleep 5; done
+`,
 		"eval_in_then_branch.sh": `#!/bin/bash
 trap 'if [ -n "$on_stop" ]; then eval "$on_stop"; else rm -f "$tmp"; fi' TERM
 while poll-once; do sleep 5; done
@@ -105,6 +113,11 @@ stop() {
   return
 }
 trap 'stop || exit 1' TERM # want
+while poll-once; do sleep 5; done
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "u01_and_exit_or_echo.sh", `#!/bin/bash
+trap 'rm -f "$tmp" && exit 0 || echo "cleanup failed" >&2' TERM # want
+tmp=$(mktemp)
 while poll-once; do sleep 5; done
 `)
 	shellWanted(t, "shell-trap-signal-without-exit", "case_and_exit.sh", `#!/bin/bash
@@ -360,5 +373,180 @@ setup() {
 }
 setup
 while poll-once; do sleep 5; done
+`)
+}
+
+// Inside if, case and { } the branches run in order: a loop that comes
+// after the trap is replaced in the same branch runs under the new handler.
+func TestShellTrapSignalWithoutExitReplaceThenLoop(t *testing.T) {
+	for name, source := range map[string]string{
+		"t01_replace_then_loop_in_if.sh": `#!/bin/bash
+trap 'echo "interrupted" >&2' TERM
+if [ "${1:-}" = daemon ]; then
+  trap 'echo "stopping" >&2; exit 143' TERM
+  while poll-once; do sleep 5; done
+fi
+`,
+		"t02_reset_then_loop_in_brace.sh": `#!/bin/bash
+trap 'echo "interrupted" >&2' TERM
+{
+  trap - TERM
+  while poll-once; do sleep 5; done
+} >> watch.log 2>&1
+`,
+		"t04_case_replace_then_loop.sh": `#!/bin/bash
+trap 'rm -f "$pidfile"' TERM
+case "${1:-}" in
+  watch)
+    trap 'rm -f "$pidfile"; exit 143' TERM
+    while poll-once; do sleep 5; done
+    ;;
+  *) echo "usage: $0 watch" ;;
+esac
+`,
+		"replace_in_condition_then_loop.sh": `#!/bin/bash
+trap 'echo bye' TERM
+if trap - TERM; then
+  while poll-once; do sleep 5; done
+fi
+`,
+		"replace_left_of_and_then_loop.sh": `#!/bin/bash
+trap 'echo bye' TERM
+trap - TERM && while poll-once; do sleep 5; done
+`,
+		"replace_in_elif_branch_then_loop.sh": `#!/bin/bash
+trap 'echo bye' TERM
+if [ "$1" = a ]; then
+  echo a
+elif [ "$1" = b ]; then
+  trap - TERM
+  while poll-once; do sleep 5; done
+fi
+`,
+	} {
+		shellWanted(t, "shell-trap-signal-without-exit", name, source)
+	}
+	shellWanted(t, "shell-trap-signal-without-exit", "t03_loop_then_reset_in_brace.sh", `#!/bin/bash
+trap 'echo "interrupted" >&2' TERM # want
+{
+  while poll-once; do sleep 5; done
+  trap - TERM
+} >> watch.log 2>&1
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "loop_in_other_branch.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+if [ -n "$strict" ]; then
+  trap - TERM
+else
+  while poll-once; do sleep 5; done
+fi
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "loop_in_else_after_elif_replace.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+if [ "$1" = a ]; then
+  trap - TERM
+elif [ "$1" = b ]; then
+  trap - TERM
+else
+  while poll-once; do sleep 5; done
+fi
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "case_no_match_then_loop.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+case "$1" in
+  strict) trap - TERM ;;
+esac
+while poll-once; do sleep 5; done
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "replace_other_signal_then_loop.sh", `#!/bin/bash
+trap 'echo bye' INT TERM # want
+{
+  trap - INT
+  while poll-once; do sleep 5; done
+}
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "replace_right_of_and_then_loop.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+[ -n "$strict" ] && trap - TERM
+while poll-once; do sleep 5; done
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "replace_in_subshell_then_loop.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+( trap - TERM; while poll-once; do sleep 5; done )
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "work_then_echo_in_brace.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+{ prepare-cache; echo done; } >&2
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "work_in_then_only.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+if [ -n "$warm" ]; then
+  prepare-cache
+fi
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "work_in_if_condition.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+if prepare-cache; then
+  echo ready
+fi
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "loop_in_if_condition.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+if until ready; do sleep 1; done; then
+  echo ready
+fi
+`)
+	// The right of && runs with what its left side kept, and its own
+	// replacement does not carry over the path where it does not run.
+	shellWanted(t, "shell-trap-signal-without-exit", "replace_and_replace_rest.sh", `#!/bin/bash
+trap 'echo bye' INT TERM
+trap - TERM && trap - INT
+trap - INT
+while poll-once; do sleep 5; done
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "replace_cond_then_branch_rest.sh", `#!/bin/bash
+trap 'echo bye' INT TERM
+if trap - TERM; then
+  trap - INT
+fi
+trap - INT
+while poll-once; do sleep 5; done
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "loop_right_of_and.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+[ "$1" = watch ] && while poll-once; do sleep 5; done
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "case_word_subst.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+case $(long-fetch) in a) echo a ;; esac
+`)
+	// As in a sequence, work before the handler is replaced everywhere
+	// does not count.
+	shellWanted(t, "shell-trap-signal-without-exit", "replace_in_case_after_word_subst.sh", `#!/bin/bash
+trap 'echo bye' TERM
+case $(long-fetch) in
+  *) trap - TERM ;;
+esac
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "case_word_subst_other_item.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+case $(long-fetch) in
+  a) trap - TERM ;;
+  *) echo other ;;
+esac
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "loop_in_case_word.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+case $(while ! ready; do sleep 1; done) in
+  *) trap - TERM ;;
+esac
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "if_cond_subst.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+if [ -n "$(long-fetch)" ]; then echo a; fi
+`)
+	shellWanted(t, "shell-trap-signal-without-exit", "loop_in_cmdsubst.sh", `#!/bin/bash
+trap 'echo bye' TERM # want
+out=$(while poll-once; do sleep 5; done)
 `)
 }
