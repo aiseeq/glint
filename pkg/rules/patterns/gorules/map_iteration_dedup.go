@@ -651,7 +651,7 @@ func (c *dedupCallee) entryParams(tainted map[string]bool) map[types.Object]bool
 // only past a free slot follows the paths through the function that holds the
 // guard: the branch the test sends a free slot to, by its polarity, and
 // whatever a taken slot skips by leaving - return, continue, break, a goto
-// forward. Where the paths do not tell (dedupGuard.pathsTell), the free span
+// forward. Where the paths are not sure (dedupCallee.pathsSure), the free span
 // of the guard decides, as it did before the paths were followed.
 func (c *dedupCallee) keepsEntry(fn *ast.FuncDecl, guard dedupGuard, entry map[types.Object]bool, slot map[string]bool, info *types.Info) bool {
 	var writes []ast.Stmt
@@ -673,7 +673,7 @@ func (c *dedupCallee) keepsEntry(fn *ast.FuncDecl, guard dedupGuard, entry map[t
 	}
 	then, els := guard.outcomes(info)
 	body := guardBody(c.body, guard.test)
-	if then == 0 || !guard.pathsTell(c.body, body, writes, info) {
+	if then == 0 || !c.pathsSure(guard, body, writes, info) {
 		return keptInSpan(guard, c.body, writes)
 	}
 	flow := &dedupFlow{guard: guard, then: then, els: els, writes: map[ast.Stmt]bool{}}
