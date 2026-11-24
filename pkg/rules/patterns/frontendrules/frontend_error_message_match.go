@@ -619,16 +619,19 @@ func (r *FrontendErrorMessageMatchRule) helperDecls(code []string, lineStarts []
 
 // helperBodies finds where the bodies of the helpers end in the file's code
 // joined by newlines, its brackets paired once by pairBrackets, when a name
-// is first looked up in them.
+// is first looked up in them. The end of a body is found by braces only: the
+// mask leaves the text of JSX as it is, where a ';', a parenthesis or a word
+// of a statement is text, but a brace never is.
 type helperBodies struct {
 	lines []string
 	decls []helperDecl
 	// scoped returns the declarations that have a body, by start: a
 	// declaration found later on a line starts later, as no name or '(' of
 	// one comes between "const name = (" and its parameter.
-	scoped   func() []helperDecl
-	code     string
-	brackets bracketPairs
+	scoped func() []helperDecl
+	code   string
+	// parens pairs the '(' and '[' of the code, braces its '{'.
+	parens, braces bracketPairs
 	// inner holds, for each body of scoped, the bodies right inside it whose
 	// first parameter has the same name.
 	inner [][]int
@@ -637,9 +640,11 @@ type helperBodies struct {
 func (h *helperBodies) withBodies() []helperDecl {
 	var bodies []helperDecl
 	h.code = strings.Join(h.lines, "\n")
-	h.brackets = pairBrackets(h.code)
+	h.parens = pairBrackets(h.code, "([", ")]")
+	h.braces = pairBrackets(h.code, "{", "}")
+	blockEnd := h.blockEnds()
 	for _, decl := range h.decls {
-		if decl.end = h.end(decl.start, decl.arrow); decl.end >= 0 {
+		if decl.end = h.end(decl.start, decl.arrow, blockEnd); decl.end >= 0 {
 			bodies = append(bodies, decl)
 		}
 	}
@@ -661,9 +666,10 @@ func (h *helperBodies) withBodies() []helperDecl {
 
 // end returns the end of the body of the function whose parameters open at
 // paren, -1 when there is none. A body in braces ends after its closing
-// brace, an arrow's expression as expressionEnd finds.
-func (h *helperBodies) end(paren int, arrow bool) int {
-	closing, ok := h.brackets.closing(paren)
+// brace; an arrow's body without braces at the end of the block around it,
+// as blockEnd finds.
+func (h *helperBodies) end(paren int, arrow bool, blockEnd func(int) int) int {
+	closing, ok := h.parens.closing(paren)
 	if !ok {
 		return -1
 	}
@@ -686,60 +692,36 @@ func (h *helperBodies) end(paren int, arrow bool) int {
 	if !arrow {
 		return -1
 	}
-	return h.expressionEnd(pos)
+	return blockEnd(paren)
 }
 
-// expressionEnd returns the end of an arrow's body without braces that
-// starts at pos: a ';', the closer of a bracket opened before it, or a line
-// break after which a line starts with a statement (see statementAt). The
-// brackets it opens it passes whole, and a bracket nothing pairs, as one in
-// the text of JSX, it passes over; an operator, JSX, a cast or a template
-// over lines does not end it. A body is read too long rather than too short:
-// a name past its true end is still the variable of the file.
-func (h *helperBodies) expressionEnd(pos int) int {
-	for pos < len(h.code) {
-		c := h.code[pos]
-		switch kind := bracketKind(c); {
-		case kind >= 0 && kind < 3:
-			if closing, ok := h.brackets.closing(pos); ok {
-				pos = closing
+// blockEnds returns blockEnd, which takes offsets in increasing order and
+// returns the end of the block around each: the '}' that closes the innermost
+// '{' open there, the end of the code at the top level. Where the braces of
+// the code do not pair every block ends at the end of the code: an
+// apostrophe in the text of JSX masks the rest of its line as a string, a
+// '{' there too, and the '}' that closes it would end the block around it.
+func (h *helperBodies) blockEnds() func(int) int {
+	if h.braces.paired != len(h.braces.opens) || h.braces.unpaired > 0 {
+		return func(int) int { return len(h.code) }
+	}
+	var open []int // the closers of the braces open, innermost last
+	at, next := 0, 0
+	return func(pos int) int {
+		for ; at < pos; at++ {
+			switch h.code[at] {
+			case '{':
+				open = append(open, h.braces.closes[next])
+				next++
+			case '}':
+				open = open[:len(open)-1]
 			}
-			pos++
-		case kind >= 3:
-			if h.brackets.closer(pos) {
-				return pos
-			}
-			pos++
-		case c == ';':
-			return pos
-		case c == '\n':
-			next := h.skipSpace(pos)
-			if h.statementAt(next) {
-				return pos
-			}
-			pos = next
-		default:
-			pos++
 		}
-	}
-	return pos
-}
-
-// statements are the words a statement or a declaration starts with.
-var statements = []string{"const", "let", "var", "function", "class", "export", "import", "return", "if", "for", "while", "switch", "try", "throw"}
-
-// statementAt reports whether a statement starts at pos: one of statements as
-// a whole word, or a '}'.
-func (h *helperBodies) statementAt(pos int) bool {
-	if h.at(pos, "}") {
-		return true
-	}
-	for _, word := range statements {
-		if h.at(pos, word) && (pos+len(word) == len(h.code) || !identifierByte(h.code[pos+len(word)])) {
-			return true
+		if len(open) == 0 {
+			return len(h.code)
 		}
+		return open[len(open)-1]
 	}
-	return false
 }
 
 // afterReturnType returns, for a return type whose ':' is at pos, where the body
@@ -781,7 +763,11 @@ func (h *helperBodies) afterReturnType(pos int, arrow bool) int {
 // after returns the offset after the bracket that closes the one at open,
 // the end of the code when none does.
 func (h *helperBodies) after(open int) int {
-	if closing, ok := h.brackets.closing(open); ok {
+	pairs := h.parens
+	if h.code[open] == '{' {
+		pairs = h.braces
+	}
+	if closing, ok := pairs.closing(open); ok {
 		return closing + 1
 	}
 	return len(h.code)
@@ -798,45 +784,48 @@ func (h *helperBodies) skipSpace(pos int) int {
 	return pos
 }
 
-// bracketPairs holds the '(', '[' and '{' of a code in order with the
-// offsets of their closers, -1 for none.
+// bracketPairs holds the brackets of a code in order with the offsets of
+// their closers, -1 for none.
 type bracketPairs struct {
 	opens, closes []int
-	// closers are the offsets of the closers that close a bracket, in order.
-	closers []int
+	// paired counts the closers that close a bracket, unpaired those that
+	// close none.
+	paired, unpaired int
 }
 
-// pairBrackets pairs each closer with the nearest open bracket of its kind:
-// the brackets opened after that one stay unclosed, and a closer with none of
-// its kind open is passed over. So a parenthesis in the text of JSX, as in
-// "1) Retry" or "Nothing :(", moves no end of a block around it.
-func pairBrackets(code string) bracketPairs {
+// pairBrackets pairs the brackets opens of code with closers, the closer of
+// each kind at the same index: each closer with the nearest open bracket of
+// its kind. The brackets opened after that one stay unclosed, and a closer
+// with none of its kind open is passed over. So a parenthesis in the text of
+// JSX, as in "1) Retry" or "Nothing :(", pairs no other one wrong.
+func pairBrackets(code, opens, closers string) bracketPairs {
 	var p bracketPairs
 	var stack []int
-	var open [3]int // the brackets of each kind on stack
+	open := make([]int, len(opens)) // the brackets of each kind on stack
 	for i := 0; i < len(code); i++ {
-		kind := bracketKind(code[i])
-		if kind < 0 {
-			continue
-		}
-		if kind < 3 {
+		if kind := strings.IndexByte(opens, code[i]); kind >= 0 {
 			p.opens = append(p.opens, i)
 			p.closes = append(p.closes, -1)
 			stack = append(stack, len(p.opens)-1)
 			open[kind]++
 			continue
 		}
-		if open[kind-3] == 0 {
+		kind := strings.IndexByte(closers, code[i])
+		if kind < 0 {
+			continue
+		}
+		if open[kind] == 0 {
+			p.unpaired++
 			continue
 		}
 		for {
 			top := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			k := bracketKind(code[p.opens[top]])
+			k := strings.IndexByte(opens, code[p.opens[top]])
 			open[k]--
-			if k == kind-3 {
+			if k == kind {
 				p.closes[top] = i
-				p.closers = append(p.closers, i)
+				p.paired++
 				break
 			}
 		}
@@ -844,37 +833,11 @@ func pairBrackets(code string) bracketPairs {
 	return p
 }
 
-// bracketKind numbers '(', '[', '{' 0 to 2 and their closers 3 to 5, -1 for
-// any other byte.
-func bracketKind(c byte) int {
-	switch c {
-	case '(':
-		return 0
-	case '[':
-		return 1
-	case '{':
-		return 2
-	case ')':
-		return 3
-	case ']':
-		return 4
-	case '}':
-		return 5
-	}
-	return -1
-}
-
 // closing returns the offset of the closer of the bracket at open, which
 // must be the offset of a bracket.
 func (p bracketPairs) closing(open int) (int, bool) {
 	i := sort.SearchInts(p.opens, open)
 	return p.closes[i], p.closes[i] >= 0
-}
-
-// closer reports whether the closer at pos closes a bracket.
-func (p bracketPairs) closer(pos int) bool {
-	i := sort.SearchInts(p.closers, pos)
-	return i < len(p.closers) && p.closers[i] == pos
 }
 
 // spanHolds reports whether one of matches, sorted and not overlapping, lies
