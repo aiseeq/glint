@@ -175,11 +175,11 @@ render-config > "$tmp"
 exec my-server --config "$tmp"
 `)
 	shellWanted(t, "shell-trap-signal-without-exit", "flag_unused.sh", `#!/bin/bash
-trap 'stop=1' TERM
+trap 'stop=1' TERM # want
 while true; do echo "$stop"; sleep 1; done
 `)
 	shellWanted(t, "shell-trap-signal-without-exit", "flag_logged.sh", `#!/bin/bash
-trap 'stop=1' TERM
+trap 'stop=1' TERM # want
 while echo "$stop"; do sleep 1; done
 `)
 	shellWanted(t, "shell-trap-signal-without-exit", "inner_break.sh", `#!/bin/bash
@@ -193,16 +193,16 @@ trap 'stop=1' TERM # want
 while true; do sleep 1; done
 `)
 	shellWanted(t, "shell-trap-signal-without-exit", "mixed.sh", `#!/bin/bash
-trap 'stop=1; echo stopped' TERM
+trap 'stop=1; echo stopped' TERM # want
 while true; do echo "$stop"; sleep 1; done
 `)
 	shellWanted(t, "shell-trap-signal-without-exit", "function_read.sh", `#!/bin/bash
-trap 'stop=1' TERM
+trap 'stop=1' TERM # want
 report() { echo "${stop}"; }
 while true; do sleep 1; done
 `)
 	shellWanted(t, "shell-trap-signal-without-exit", "multiple_flags.sh", `#!/bin/bash
-trap 'first=1; second=1' TERM
+trap 'first=1; second=1' TERM # want
 show() { echo "${second}"; }
 while true; do sleep 1; done
 `)

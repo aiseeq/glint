@@ -56,34 +56,6 @@ func signalTrapCall(call *syntax.CallExpr) (signalTrap, bool) {
 	return signalTrap{action: action, signals: signals, line: int(call.Pos().Line())}, signals != 0
 }
 
-// containsExit follows calls to locally defined handlers as well as inline
-// commands in functions defined in the same script.
-func containsExit(node syntax.Node, funcs map[string]*syntax.Stmt, seen map[string]bool) bool {
-	found := false
-	syntax.Walk(node, func(n syntax.Node) bool {
-		if found {
-			return false
-		}
-		call, ok := n.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return true
-		}
-		name := wordLit(call.Args[0])
-		if name == "exit" {
-			found = true
-			return false
-		}
-		if body, ok := funcs[name]; ok && !seen[name] {
-			seen[name] = true
-			if containsExit(body, funcs, seen) {
-				found = true
-			}
-		}
-		return true
-	})
-	return found
-}
-
 func checkTrapSignalWithoutExit(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
 	if src.Make {
 		return nil
@@ -109,87 +81,51 @@ func checkTrapSignalWithoutExit(r *shellRule, src *patternkit.ShellSource) []*co
 		}
 		return true
 	})
+	flow := newTrapFlow(file)
+	exits := newExitScan(funcs)
+	var prints map[*syntax.Stmt]bool
 	var out []*core.Violation
-	syntax.Walk(file, func(n syntax.Node) bool {
-		var stmts []*syntax.Stmt
-		switch x := n.(type) {
-		case *syntax.File:
-			stmts = x.Stmts
-		case *syntax.Block:
-			stmts = x.Stmts
-		default:
-			return true
+	for _, stmt := range flow.order {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || stmt.Background {
+			continue
 		}
-		for i, stmt := range stmts {
-			call, ok := stmt.Cmd.(*syntax.CallExpr)
-			if !ok || stmt.Background {
-				continue
-			}
-			trap, ok := signalTrapCall(call)
-			if !ok || trap.action == "" || trap.action == "-" {
-				continue
-			}
-			action, err := syntax.NewParser().Parse(strings.NewReader(trap.action), "")
-			if err != nil || containsExit(action, funcs, map[string]bool{}) {
-				continue
-			}
-			if sourced && unknownTrapHandler(action.Stmts, funcs) {
-				continue
-			}
-			handled, flags, handlerBodies := trapHandlerEffects(action, funcs)
-			handlerBodies[stmt] = true
-			if trap.signals&^handled == 0 || (len(flags) > 0 && readsTrapFlag(file, flags, handlerBodies)) {
-				continue
-			}
-			if !trapFollowedByWork(stmts[i+1:], trap.signals&^handled) {
-				continue
-			}
-			signals := trapSignalNames(trap.signals &^ handled)
-			out = appendReport(out, src.Report(r, trap.line, fmt.Sprintf("%s trap does not exit, so the script can continue after the signal", signals), trapSignalSuggestion))
+		trap, ok := signalTrapCall(call)
+		if !ok || trap.action == "" || trap.action == "-" {
+			continue
 		}
-		return true
-	})
+		action, err := syntax.NewParser().Parse(strings.NewReader(trap.action), "")
+		if err != nil {
+			// Expected for an action that is not a whole command: what it
+			// runs is not known, so the trap is left alone.
+			continue
+		}
+		if exitsAlways, sure := exits.handler(action).alwaysExits(); exitsAlways || !sure {
+			continue
+		}
+		if sourced && unknownTrapHandler(action.Stmts, funcs) {
+			continue
+		}
+		handled, flags, handlerBodies := trapHandlerEffects(action, funcs)
+		handlerBodies[stmt] = true
+		if trap.signals&^handled == 0 {
+			continue
+		}
+		if len(flags) > 0 {
+			if prints == nil {
+				prints = printOnlyStmts(file, funcs)
+			}
+			if readsTrapFlag(file, flags, handlerBodies, prints) {
+				continue
+			}
+		}
+		if !flow.followedByWork(stmt, trap.signals&^handled) {
+			continue
+		}
+		signals := trapSignalNames(trap.signals &^ handled)
+		out = appendReport(out, src.Report(r, trap.line, fmt.Sprintf("%s trap does not exit, so the script can continue after the signal", signals), trapSignalSuggestion))
+	}
 	return out
-}
-
-// Restrict the check to straight-line statement lists. A later trap replaces
-// the handler for its signals. A loop before that replacement is long-lived;
-// for other commands, report only if the handler remains active afterwards.
-func trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool {
-	if waitThenCleanup(stmts) {
-		return false
-	}
-	work := false
-	for _, stmt := range stmts {
-		if stmt.Background {
-			continue
-		}
-		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
-			if later, ok := signalTrapCall(call); ok {
-				signals &^= later.signals
-				if signals == 0 {
-					return false
-				}
-				continue
-			}
-			if len(call.Args) == 0 {
-				continue
-			}
-			switch wordLit(call.Args[0]) {
-			case "wait", "trap", "exit", "return", "echo", "printf", ":", "true", "false":
-				continue
-			}
-			if !stmt.Background {
-				work = true
-			}
-			continue
-		}
-		switch stmt.Cmd.(type) {
-		case *syntax.WhileClause, *syntax.ForClause:
-			return true
-		}
-	}
-	return work
 }
 
 // trapHandlerEffects finds flags and reset-then-reraise actions, following
@@ -396,10 +332,12 @@ func isCurrentShellPID(word *syntax.Word) bool {
 	return false
 }
 
-func readsTrapFlag(node syntax.Node, flags map[string]bool, handlerBodies map[*syntax.Stmt]bool) bool {
+// readsTrapFlag looks for a read of a flag outside the handler and outside
+// a command that only prints it.
+func readsTrapFlag(node syntax.Node, flags map[string]bool, handlerBodies, prints map[*syntax.Stmt]bool) bool {
 	found := false
 	syntax.Walk(node, func(n syntax.Node) bool {
-		if stmt, ok := n.(*syntax.Stmt); ok && handlerBodies[stmt] {
+		if stmt, ok := n.(*syntax.Stmt); ok && (handlerBodies[stmt] || prints[stmt]) {
 			return false
 		}
 		if p, ok := n.(*syntax.ParamExp); ok && p.Param != nil && flags[p.Param.Value] {
