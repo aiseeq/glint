@@ -63,6 +63,13 @@ if [ -n "$watch" ]; then
 fi
 trap 'exit 143' TERM
 `)
+	shellWanted(t, "shell-trap-signal-without-exit", "conditional_replace.sh", `#!/bin/bash
+trap 'echo interrupted' TERM # want
+if [ -n "$strict" ]; then
+  trap 'exit 143' TERM
+fi
+while true; do sleep 1; done
+`)
 	shellWanted(t, "shell-trap-signal-without-exit", "echo_subst.sh", `#!/bin/bash
 trap 'echo interrupted' TERM # want
 echo "$(run-benchmark --duration 600)"
@@ -121,13 +128,6 @@ fi
 		"exit_before_work.sh": `#!/bin/bash
 trap 'echo interrupted' TERM
 exit 0
-while true; do sleep 1; done
-`,
-		"conditional_replace.sh": `#!/bin/bash
-trap 'echo interrupted' TERM
-if [ -n "$strict" ]; then
-  trap 'exit 143' TERM
-fi
 while true; do sleep 1; done
 `,
 		"func_def_after.sh": `#!/bin/bash

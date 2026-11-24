@@ -3,16 +3,33 @@ package shellrules
 import "mvdan.cc/sh/v3/syntax"
 
 // handlerPaths says how the paths through a piece of a trap handler end:
-// some exit the script, some go on to the next command, some return from
-// the function, and unknown marks a structure whose paths are not followed.
+// some exit the script, some go on to the next command with status zero
+// (ok) or non-zero (failed), some return from the function, and unknown
+// marks a structure whose paths are not followed. The status decides which
+// side of && and || and which branch of if runs next.
 type handlerPaths struct {
-	exit, fall, ret, unknown bool
+	exit, ok, failed, ret, unknown bool
 }
 
 var (
-	pathsFall    = handlerPaths{fall: true}
+	pathsFall    = handlerPaths{ok: true, failed: true}
 	pathsUnknown = handlerPaths{unknown: true}
 )
+
+func (p handlerPaths) fall() bool {
+	return p.ok || p.failed
+}
+
+// join holds the paths of either of two pieces.
+func (p handlerPaths) join(q handlerPaths) handlerPaths {
+	return handlerPaths{
+		exit:    p.exit || q.exit,
+		ok:      p.ok || q.ok,
+		failed:  p.failed || q.failed,
+		ret:     p.ret || q.ret,
+		unknown: p.unknown || q.unknown,
+	}
+}
 
 // alwaysExits holds for a handler that exits on every path; sure is false
 // where the rule cannot tell, and then the trap is left alone.
@@ -20,7 +37,7 @@ func (p handlerPaths) alwaysExits() (exits, sure bool) {
 	if p.unknown {
 		return false, false
 	}
-	return p.exit && !p.fall, true
+	return p.exit && !p.fall(), true
 }
 
 // returned maps a return to the caller going on, as at the end of a
@@ -30,7 +47,7 @@ func (p handlerPaths) returned() handlerPaths {
 	if p.ret && p.exit {
 		return pathsUnknown
 	}
-	return handlerPaths{exit: p.exit, fall: p.fall || p.ret, unknown: p.unknown}
+	return handlerPaths{exit: p.exit, ok: p.ok || p.ret, failed: p.failed || p.ret, unknown: p.unknown}
 }
 
 // handler follows the paths of a trap action.
@@ -53,7 +70,7 @@ func newExitScan(funcs map[string]*syntax.Stmt) *exitScan {
 func (s *exitScan) list(stmts []*syntax.Stmt) handlerPaths {
 	out := pathsFall
 	for _, stmt := range stmts {
-		if !out.fall {
+		if !out.fall() {
 			break
 		}
 		next := s.stmt(stmt)
@@ -61,7 +78,8 @@ func (s *exitScan) list(stmts []*syntax.Stmt) handlerPaths {
 			exit:    out.exit || next.exit,
 			ret:     out.ret || next.ret,
 			unknown: out.unknown || next.unknown,
-			fall:    next.fall,
+			ok:      next.ok,
+			failed:  next.failed,
 		}
 	}
 	return out
@@ -69,7 +87,16 @@ func (s *exitScan) list(stmts []*syntax.Stmt) handlerPaths {
 
 // stmt treats a subshell, a pipeline, a command substitution and a
 // background command as not exiting: exit there ends only a child shell.
+// ! swaps the status the command goes on with.
 func (s *exitScan) stmt(stmt *syntax.Stmt) handlerPaths {
+	paths := s.command(stmt)
+	if stmt.Negated {
+		paths.ok, paths.failed = paths.failed, paths.ok
+	}
+	return paths
+}
+
+func (s *exitScan) command(stmt *syntax.Stmt) handlerPaths {
 	if stmt.Background || stmt.Coprocess || stmt.Disown {
 		return pathsFall
 	}
@@ -135,38 +162,51 @@ func (s *exitScan) function(name string, body *syntax.Stmt) handlerPaths {
 
 func (s *exitScan) ifClause(x *syntax.IfClause) handlerPaths {
 	cond := s.list(x.Cond)
-	if !cond.fall || cond.unknown {
+	if cond.unknown {
 		return cond
 	}
-	then := s.list(x.Then)
-	other := pathsFall
-	switch {
-	case x.Else == nil:
-	case len(x.Else.Cond) == 0:
-		other = s.list(x.Else.Then)
-	default:
-		other = s.ifClause(x.Else)
+	out := handlerPaths{exit: cond.exit, ret: cond.ret}
+	if cond.ok {
+		out = out.join(s.list(x.Then))
 	}
-	return handlerPaths{
-		exit:    cond.exit || then.exit || other.exit,
-		ret:     cond.ret || then.ret || other.ret,
-		fall:    then.fall || other.fall,
-		unknown: then.unknown || other.unknown,
+	if cond.failed {
+		switch {
+		case x.Else == nil:
+			// if without a branch taken has status zero.
+			out.ok = true
+		case len(x.Else.Cond) == 0:
+			out = out.join(s.list(x.Else.Then))
+		default:
+			out = out.join(s.ifClause(x.Else))
+		}
 	}
+	return out
 }
 
-// binary: an exit on the right of && or || runs only on one outcome of the
-// left side; a pipeline runs its commands in child shells.
+// binary: the right side of && runs where the left goes on with status
+// zero, that of || where it goes on with a non-zero one, so
+// "cmd && exit 0 || exit 1" exits on every path; a pipeline runs its
+// commands in child shells.
 func (s *exitScan) binary(x *syntax.BinaryCmd) handlerPaths {
 	if x.Op != syntax.AndStmt && x.Op != syntax.OrStmt {
 		return pathsFall
 	}
 	left := s.stmt(x.X)
-	if !left.fall || left.unknown {
+	if left.unknown {
 		return left
 	}
-	right := s.stmt(x.Y)
-	return handlerPaths{exit: left.exit || right.exit, ret: left.ret || right.ret, unknown: right.unknown, fall: true}
+	out := handlerPaths{exit: left.exit, ret: left.ret}
+	runs := left.ok
+	if x.Op == syntax.AndStmt {
+		out.failed = left.failed
+	} else {
+		out.ok = left.ok
+		runs = left.failed
+	}
+	if runs {
+		out = out.join(s.stmt(x.Y))
+	}
+	return out
 }
 
 // caseClause follows a case only where every item exits, with a default
@@ -180,7 +220,7 @@ func (s *exitScan) caseClause(x *syntax.CaseClause) handlerPaths {
 		if paths.unknown {
 			return pathsUnknown
 		}
-		exits := paths.exit && !paths.fall && !paths.ret
+		exits := paths.exit && !paths.fall() && !paths.ret
 		allExit = allExit && exits
 		anyExit = anyExit || paths.exit
 		out.ret = out.ret || paths.ret
@@ -190,7 +230,7 @@ func (s *exitScan) caseClause(x *syntax.CaseClause) handlerPaths {
 	}
 	switch {
 	case !anyExit:
-		out.fall = true
+		out.ok, out.failed = true, true
 		return out
 	case allExit && hasDefault:
 		return handlerPaths{exit: true}
@@ -198,11 +238,11 @@ func (s *exitScan) caseClause(x *syntax.CaseClause) handlerPaths {
 	return pathsUnknown
 }
 
-// loopPaths does not follow an exit or return inside a loop: whether the
-// loop runs it depends on the data.
+// loopPaths does not follow an exit inside a loop: whether the loop runs
+// it depends on the data. A loop that can only return or go on does both.
 func loopPaths(body handlerPaths) handlerPaths {
-	if body.exit || body.ret || body.unknown {
+	if body.exit || body.unknown {
 		return pathsUnknown
 	}
-	return pathsFall
+	return handlerPaths{ok: true, failed: true, ret: body.ret}
 }

@@ -193,10 +193,10 @@ func callName(call *syntax.CallExpr) string {
 }
 
 // trapFollowedByWork walks one sequence after the trap. A later trap
-// replaces the handler for its signals; one set only on some path makes the
-// rest uncertain. A loop before the replacement is long-lived; other work
-// counts if the handler remains active afterwards. exit and return end the
-// sequence.
+// replaces the handler for its signals where it is set on every path. A
+// loop before the replacement is long-lived; other work counts if the
+// handler remains active afterwards. exit, return and exec of a command
+// end the sequence.
 func trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool {
 	if waitThenCleanup(stmts) {
 		return false
@@ -206,31 +206,42 @@ func trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool {
 		if stmt.Background {
 			continue
 		}
-		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
-			if later, ok := signalTrapCall(call); ok {
-				signals &^= later.signals
-				if signals == 0 {
-					return false
-				}
-				continue
-			}
-			if name := callName(call); name == "exit" || name == "return" {
-				return work
-			}
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && endsShell(call) {
+			return work
 		}
 		switch stmt.Cmd.(type) {
 		case *syntax.WhileClause, *syntax.ForClause:
 			return true
 		}
-		if setsSignalTrap(stmt, signals) {
-			return work
-		}
 		if runsLoop(stmt) {
 			return true
 		}
 		work = work || doesWork(stmt)
+		signals &^= replacedSignals(stmt)
+		if signals == 0 {
+			return false
+		}
 	}
 	return work
+}
+
+// endsShell holds for exit, return and exec of a command, which replaces
+// the shell; exec with redirections only goes on.
+func endsShell(call *syntax.CallExpr) bool {
+	args := call.Args
+	for len(args) > 0 && (wordLit(args[0]) == "builtin" || wordLit(args[0]) == "command") {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		return false
+	}
+	switch wordLit(args[0]) {
+	case "exit", "return":
+		return true
+	case "exec":
+		return len(args) > 1
+	}
+	return false
 }
 
 // foregroundWalk visits what runs in the foreground of stmt, leaving out
@@ -255,20 +266,65 @@ func foregroundWalk(stmt *syntax.Stmt, visit func(syntax.Node) bool) bool {
 	return found
 }
 
-func setsSignalTrap(stmt *syntax.Stmt, signals uint8) bool {
-	found := false
-	syntax.Walk(stmt, func(n syntax.Node) bool {
-		switch x := n.(type) {
-		case *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst, *syntax.FuncDecl:
-			return false
-		case *syntax.CallExpr:
-			if later, ok := signalTrapCall(x); ok && later.signals&signals != 0 {
-				found = true
-			}
+// replacedSignals are the signals stmt sets a new trap for on every path
+// through it: in a brace group, in the condition of an if, on the left of
+// && and ||, in every branch of an if with else or of a case with a default
+// item. A subshell, a background command and a function definition replace
+// nothing in the script.
+func replacedSignals(stmt *syntax.Stmt) uint8 {
+	if stmt.Background {
+		return 0
+	}
+	switch x := stmt.Cmd.(type) {
+	case *syntax.CallExpr:
+		if later, ok := signalTrapCall(x); ok {
+			return later.signals
 		}
-		return !found
-	})
-	return found
+	case *syntax.Block:
+		return listReplaced(x.Stmts)
+	case *syntax.IfClause:
+		return listReplaced(x.Cond) | branchesReplaced(x)
+	case *syntax.CaseClause:
+		return caseReplaced(x)
+	case *syntax.BinaryCmd:
+		if x.Op == syntax.AndStmt || x.Op == syntax.OrStmt {
+			return replacedSignals(x.X)
+		}
+	}
+	return 0
+}
+
+func listReplaced(stmts []*syntax.Stmt) uint8 {
+	var signals uint8
+	for _, stmt := range stmts {
+		signals |= replacedSignals(stmt)
+	}
+	return signals
+}
+
+func branchesReplaced(x *syntax.IfClause) uint8 {
+	then := listReplaced(x.Then)
+	switch {
+	case x.Else == nil:
+		return 0
+	case len(x.Else.Cond) == 0:
+		return then & listReplaced(x.Else.Then)
+	}
+	return then & (listReplaced(x.Else.Cond) | branchesReplaced(x.Else))
+}
+
+func caseReplaced(x *syntax.CaseClause) uint8 {
+	signals, hasDefault := ^uint8(0), false
+	for _, item := range x.Items {
+		signals &= listReplaced(item.Stmts)
+		for _, pattern := range item.Patterns {
+			hasDefault = hasDefault || wordLit(pattern) == "*"
+		}
+	}
+	if !hasDefault {
+		return 0
+	}
+	return signals
 }
 
 func runsLoop(stmt *syntax.Stmt) bool {
@@ -290,7 +346,7 @@ func doesWork(stmt *syntax.Stmt) bool {
 			return false
 		}
 		switch wordLit(call.Args[0]) {
-		case "wait", "trap", "exit", "return", "echo", "printf", ":", "true", "false", "[", "test":
+		case "wait", "trap", "exit", "return", "exec", "echo", "printf", ":", "true", "false", "[", "test":
 			return false
 		}
 		return true
