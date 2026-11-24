@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/constant"
 	"go/token"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -45,34 +46,144 @@ func NewTSConstantCopiesGoConstantRule() *TSConstantCopiesGoConstantRule {
 // ResetState clears the constants collected from the current project.
 func (r *TSConstantCopiesGoConstantRule) ResetState() { r.goConstants = nil }
 
-// UseProjectFiles collects numeric constants from production Go files.
+// UseProjectFiles collects numeric constants from production Go files. An
+// unexported constant its package only steps its own reads with is left out:
+// it is not a contract of the API.
 func (r *TSConstantCopiesGoConstantRule) UseProjectFiles(files []*core.FileContext) {
 	r.ResetState()
+	packages := make(map[string][]*ast.File)
+	private := make(map[string]map[*ast.Ident]float64)
 	for _, ctx := range files {
 		if !patternkit.ProductionGoFile(ctx) || ctx.IsGenerated() || strings.Contains(ctx.RelPath, "generated") {
 			continue
 		}
-		for _, decl := range ctx.GoAST.Decls {
-			gen, ok := decl.(*ast.GenDecl)
-			if !ok || gen.Tok != token.CONST {
+		pkg := filepath.Dir(ctx.RelPath)
+		packages[pkg] = append(packages[pkg], ctx.GoAST)
+		for _, c := range goNumericConstants(ctx.GoAST) {
+			if c.ident.IsExported() {
+				r.goConstants = append(r.goConstants, goNumericConstant{name: c.ident.Name, value: c.value})
 				continue
 			}
-			for _, spec := range gen.Specs {
-				valueSpec, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
-				}
-				if len(valueSpec.Values) != len(valueSpec.Names) {
-					continue
-				}
-				for i, name := range valueSpec.Names {
-					if value, ok := goNumericValue(valueSpec.Values[i]); ok && !smallBusinessConstant(value) {
-						r.goConstants = append(r.goConstants, goNumericConstant{name: name.Name, value: value})
-					}
+			if private[pkg] == nil {
+				private[pkg] = make(map[*ast.Ident]float64)
+			}
+			private[pkg][c.ident] = c.value
+		}
+	}
+	for pkg, decls := range private {
+		steps := readStepsOnly(packages[pkg], decls)
+		for decl, value := range decls {
+			if !steps[decl.Name] {
+				r.goConstants = append(r.goConstants, goNumericConstant{name: decl.Name, value: value})
+			}
+		}
+	}
+}
+
+type declaredConstant struct {
+	ident *ast.Ident
+	value float64
+}
+
+// goNumericConstants lists the top-level constants of file with a numeric
+// value other than a small business one.
+func goNumericConstants(file *ast.File) []declaredConstant {
+	var out []declaredConstant
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok || len(valueSpec.Values) != len(valueSpec.Names) {
+				continue
+			}
+			for i, name := range valueSpec.Names {
+				if value, ok := goNumericValue(valueSpec.Values[i]); ok && !smallBusinessConstant(value) {
+					out = append(out, declaredConstant{ident: name, value: value})
 				}
 			}
 		}
 	}
+	return out
+}
+
+// readStepsOnly names the constants declared at decls that the package uses
+// only as the step of its own reads: it moves a cursor by it (offset +=
+// page), and every other use passes it to a call or ends the reads on a short
+// page (len(rows) < page). Any other use of the name — a comparison with a
+// request value, an assignment, a return, a declaration that shadows it —
+// keeps it a contract.
+func readStepsOnly(files []*ast.File, decls map[*ast.Ident]float64) map[string]bool {
+	names := make(map[string]bool, len(decls))
+	for decl := range decls {
+		names[decl.Name] = true
+	}
+	step, other := make(map[string]bool), make(map[string]bool)
+	for _, file := range files {
+		var stack []ast.Node
+		ast.Inspect(file, func(n ast.Node) bool {
+			if n == nil {
+				stack = stack[:len(stack)-1]
+				return true
+			}
+			if ident, ok := n.(*ast.Ident); ok && names[ident.Name] {
+				if _, declared := decls[ident]; !declared {
+					switch readStepUse(stack[len(stack)-1]) {
+					case stepUse:
+						step[ident.Name] = true
+					case otherUse:
+						other[ident.Name] = true
+					}
+				}
+			}
+			stack = append(stack, n)
+			return true
+		})
+	}
+	only := make(map[string]bool, len(step))
+	for name := range step {
+		only[name] = !other[name]
+	}
+	return only
+}
+
+type constantUse int
+
+const (
+	otherUse constantUse = iota
+	stepUse
+	readUse
+)
+
+// readStepUse classifies a use of a constant by its parent. A
+// constant can only be the value of +=, an argument of a call, or an operand:
+// a variable of its name is caught as another use where it is declared.
+func readStepUse(parent ast.Node) constantUse {
+	switch p := parent.(type) {
+	case *ast.AssignStmt:
+		if p.Tok == token.ADD_ASSIGN {
+			return stepUse
+		}
+	case *ast.CallExpr:
+		return readUse
+	case *ast.BinaryExpr:
+		// A page shorter than the step ends the reads: len(rows) < page, page > len(rows).
+		if p.Op == token.LSS && lenCall(p.X) || p.Op == token.GTR && lenCall(p.Y) {
+			return readUse
+		}
+	}
+	return otherUse
+}
+
+func lenCall(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	fun, ok := call.Fun.(*ast.Ident)
+	return ok && fun.Name == "len"
 }
 
 func goNumericValue(expr ast.Expr) (float64, bool) {

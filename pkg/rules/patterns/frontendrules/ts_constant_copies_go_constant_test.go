@@ -57,3 +57,190 @@ function build() {
 	}
 	assert.Empty(t, rulestest.ProjectFilesRulePlaces(t, NewTSConstantCopiesGoConstantRule(), files))
 }
+
+// A page size a service steps through its own reads with is not a contract of
+// the API: a frontend page size of the same value and name copies nothing. A
+// limit or default a handler applies to a request parameter, a constant
+// exported to clients, and a step constant a handler also clamps a request with
+// remain contracts.
+func TestTSConstantCopiesGoConstantContract(t *testing.T) {
+	files := map[string]string{
+		"services/payoutjournal/consts.go": `package payoutjournal
+
+const payoutsPage = 100
+`,
+		"services/payoutjournal/service.go": `package payoutjournal
+
+type Reader interface{ List(limit, offset int) ([]int, error) }
+
+func Collect(r Reader) ([]int, error) {
+	var all []int
+	for offset := 0; ; offset += payoutsPage {
+		rows, err := r.List(payoutsPage, offset)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, rows...)
+		if len(rows) < payoutsPage {
+			return all, nil
+		}
+	}
+}
+
+func Count(r Reader) int {
+	total := 0
+	for offset := 0; ; offset += payoutsPage {
+		rows, _ := r.List(payoutsPage, offset)
+		total += len(rows)
+		if payoutsPage > len(rows) {
+			return total
+		}
+	}
+}
+`,
+		"services/archive/archive.go": `package archive
+
+const exportsPage = 700
+
+func Walk(read func(limit, offset int) int) {
+	for offset := 0; read(exportsPage, offset) > 0; offset += exportsPage {
+	}
+}
+`,
+		"handlers/invoices.go": `package handlers
+
+import (
+	"net/http"
+	"strconv"
+)
+
+const maxInvoicesPage = 500
+
+func invoiceLimit(r *http.Request) int {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit > maxInvoicesPage {
+		limit = maxInvoicesPage
+	}
+	return limit
+}
+
+func pageOver(payoutsPage int) bool { return payoutsPage > 5 }
+`,
+		"handlers/refunds.go": `package handlers
+
+import (
+	"net/http"
+	"strconv"
+)
+
+const defaultRefundsPage = 50
+
+func refundLimit(r *http.Request) int {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = defaultRefundsPage
+	}
+	return limit
+}
+`,
+		"handlers/charges.go": `package handlers
+
+import (
+	"net/http"
+	"strconv"
+)
+
+const chargesPage = 400
+
+func limitOrDefault(r *http.Request, fallback int) int {
+	if limit, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil {
+		return limit
+	}
+	return fallback
+}
+
+func chargeLimit(r *http.Request) int { return limitOrDefault(r, chargesPage) }
+`,
+		"handlers/exports.go": `package handlers
+
+const exportsPage = 700
+
+func exportLimit(limit int) int {
+	if limit > exportsPage {
+		return exportsPage
+	}
+	return limit
+}
+`,
+		"handlers/ledger.go": `package handlers
+
+const ledgerPage = 300
+
+func ledgerRows(read func(limit, offset int) []int, limit int) []int {
+	if limit > ledgerPage {
+		limit = ledgerPage
+	}
+	var all []int
+	for offset := 0; offset < limit; offset += ledgerPage {
+		all = append(all, read(ledgerPage, offset)...)
+	}
+	return all
+}
+`,
+		"services/statements/statements.go": `package statements
+
+const statementsPage = 800
+
+func Walk(read func(limit, offset int) int) int {
+	for offset := 0; read(statementsPage, offset) > 0; offset += statementsPage {
+	}
+	statementsPage := 3
+	return statementsPage
+}
+`,
+		"services/imports/imports.go": `package imports
+
+import "errors"
+
+const (
+	importsPage = 900
+	uploadsPage = 1000
+	syncsPage   = 1100
+)
+
+func Check(ids []int, uploads []int, fetched func() int) error {
+	for offset := 0; offset < len(ids); offset += importsPage {
+	}
+	for offset := 0; offset < len(uploads); offset += uploadsPage {
+	}
+	for offset := 0; fetched() > 0; offset += syncsPage {
+	}
+	if len(ids) > importsPage || uploadsPage < len(uploads) || fetched() < syncsPage {
+		return errors.New("too many")
+	}
+	return nil
+}
+`,
+		"api/limits.go": `package api
+
+const TransfersPage = 200
+`,
+		"web/pages.ts": `const PAYOUTS_PAGE = 100
+const INVOICES_PAGE_MAX = 500
+const REFUNDS_PAGE = 50
+const CHARGES_PAGE = 400
+const EXPORTS_PAGE = 700
+const LEDGER_PAGE = 300
+const TRANSFERS_PAGE = 200
+const STATEMENTS_PAGE = 800
+const IMPORTS_PAGE = 900
+const UPLOADS_PAGE = 1000
+const SYNCS_PAGE = 1100
+export const payoutsURL = (page: number) => ` + "`/api/payouts?limit=${PAYOUTS_PAGE}&page=${page}`" + `
+`,
+	}
+	assert.Equal(t, []string{
+		"web/pages.ts:10", "web/pages.ts:11", "web/pages.ts:2", "web/pages.ts:3", "web/pages.ts:4",
+		"web/pages.ts:5", "web/pages.ts:6", "web/pages.ts:7", "web/pages.ts:8", "web/pages.ts:9",
+	}, rulestest.ProjectFilesRulePlaces(t, NewTSConstantCopiesGoConstantRule(), files))
+}
