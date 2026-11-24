@@ -18,8 +18,10 @@ import (
 // about 0.3-0.5 s a launch, and the tests here launch tsc hundreds of times.
 // The compiler, its version, its libraries and the @types are the installed
 // ones; without an npm-installed tsc 7 with its native executable the tests
-// run the tsc on PATH, as before.
+// run the tsc on PATH, as before. The tests of tsc_launcher_test.go run the
+// launcher itself, as consumers do.
 func TestMain(m *testing.M) {
+	launcherPATH = os.Getenv("PATH")
 	dir, err := directGlobalTsc()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "frontendrules tests: the tsc on PATH stays:", err)
@@ -32,6 +34,10 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(code)
 }
+
+// launcherPATH is PATH as the tests started, before TestMain put its tsc
+// first: its tsc is the one a consumer runs, npm's node launcher.
+var launcherPATH string
 
 // directGlobalTsc builds the global tsc of TestMain and prepends its bin to
 // PATH; it returns the directory to remove, "" when PATH stays.
