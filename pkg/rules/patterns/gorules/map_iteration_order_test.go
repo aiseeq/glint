@@ -3241,6 +3241,7 @@ func dedupCalleeSource(body string) string {
 
 import (
 	"errors"
+	"math"
 	"sort"
 )
 
@@ -3250,14 +3251,25 @@ var errRepeat = errors.New("repeat")
 
 func withLock(f func()) { f() }
 
-func keep(map[int]bool, int) {}
+func advance(p *int) { *p++ }
+
+type cursor struct {
+	n  int
+	at *cursor
+}
+
+func (c *cursor) bump() { c.n++ }
+
+const base = 1
 
 func Firsts(src map[string]int) []string {
 	seen := map[int]bool{}
 	count := map[int]int{}
 	idx := map[int]int{}
+	owners := map[*int]bool{}
+	shift := len(src)
 	var out []string
-	_, _, _ = seen, count, idx
+	_, _, _, _, _ = seen, count, idx, owners, shift
 	add := func(slot int, who string) {
 ` + body + `
 	}
@@ -3267,13 +3279,15 @@ func Firsts(src map[string]int) []string {
 	sort.Strings(out)
 	return out
 }
+
+var late = math.MaxInt8
 `
 }
 
-// dedupCallLine returns the line of the call add(slot, who) in the source.
+// dedupCallLine returns the line of the call add(..., who) in the source.
 func dedupCallLine(source string) int {
 	for i, line := range strings.Split(source, "\n") {
-		if strings.TrimSpace(line) == "add(slot, who)" {
+		if call := strings.TrimSpace(line); strings.HasPrefix(call, "add(") && strings.HasSuffix(call, ", who)") {
 			return i + 1
 		}
 	}
@@ -3352,6 +3366,66 @@ func TestMapIterationOrderAcceptsDedupWhereThePathsDoNotTell(t *testing.T) {
 		}
 		seen[slot] = true
 		delete(seen, slot)`,
+		"probe stepped in for post": `		for ; ; slot++ {
+			if !seen[slot] {
+				break
+			}
+		}
+		seen[slot] = true
+		out = append(out, who)`,
+		"probe stepped before test": `		slot--
+		for {
+			slot++
+			if !seen[slot] {
+				break
+			}
+		}
+		seen[slot] = true
+		out = append(out, who)`,
+		"probe stepped through pointer": `		for {
+			if !seen[slot] {
+				break
+			}
+			advance(&slot)
+		}
+		seen[slot] = true
+		out = append(out, who)`,
+		"probe by offset": `		i := 0
+		for ; ; i++ {
+			if !seen[slot+i] {
+				break
+			}
+		}
+		seen[slot+i] = true
+		out = append(out, who)`,
+		"count taken down by subtraction": `		if count[slot] == 0 {
+			out = append(out, who)
+		}
+		count[slot]++
+		count[slot] = count[slot] - 1`,
+		"map cleared": `		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+		clear(seen)`,
+		"map replaced": `		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+		seen = map[int]bool{}`,
+		"flag cleared from variable": `		off := false
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+		seen[slot] = off`,
+		"flag flipped after else that leaves": `		if !seen[slot] {
+			seen[slot] = true
+		} else {
+			return
+		}
+		out = append(out, who)
+		seen[slot] = !seen[slot]`,
 		"count never below zero": `		if count[slot] >= 0 {
 			out = append(out, who)
 		}
@@ -3471,16 +3545,16 @@ func TestMapIterationOrderReportsDedupWinnerWhereThePathsDoNotTell(t *testing.T)
 	}
 }
 
-// A slot variable set before the test is the slot tested and filled; a write
+// A local set once before the test is the slot tested and filled; a write
 // every entry makes between the free branch and the mark leaves the write of
 // the branch the first entry's alone.
 func TestMapIterationOrderReportsDedupWinnerAroundPathsThatTell(t *testing.T) {
 	bodies := map[string]string{
-		"slot set before test": `		slot = slot % 8
-		if !seen[slot] {
+		"slot set before test": `		at := slot % 8
+		if !seen[at] {
 			out = append(out, who)
 		}
-		seen[slot] = true`,
+		seen[at] = true`,
 		"write of every entry before mark": `		if !seen[slot] {
 			out = append(out, who)
 		}
@@ -3494,13 +3568,18 @@ func TestMapIterationOrderReportsDedupWinnerAroundPathsThatTell(t *testing.T) {
 			out = append(out, who)
 		}
 		seen[slot], idx[slot] = true, 0`,
-		"other slots deleted": `		if !seen[slot] {
+		"other map deleted": `		if !seen[slot] {
 			out = append(out, who)
 		}
 		seen[slot] = true
-		delete(count, slot)
-		delete(seen, slot+1)
-		keep(seen, slot)`,
+		delete(count, slot)`,
+		"seen map read": `		if !seen[slot] && seen != nil {
+			out = append(out, who)
+		}
+		for range seen {
+		}
+		idx[slot] = len(seen)
+		seen[slot] = true`,
 	}
 	for name, body := range bodies {
 		t.Run(name, func(t *testing.T) {
@@ -3509,6 +3588,190 @@ func TestMapIterationOrderReportsDedupWinnerAroundPathsThatTell(t *testing.T) {
 
 			require.Len(t, violations, 1)
 			assert.Equal(t, dedupCallLine(source), violations[0].Line)
+		})
+	}
+}
+
+// A probe for a free slot through a field of a cursor keeps every entry.
+func TestMapIterationOrderAcceptsProbeThroughFieldOfCursor(t *testing.T) {
+	violations := analyzeMapOrder(t, `package order
+
+import "sort"
+
+type cursor struct{ n int }
+
+func All(src map[string]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(c cursor, who string) {
+		for {
+			if !seen[c.n] {
+				break
+			}
+			c.n++
+		}
+		seen[c.n] = true
+		out = append(out, who)
+	}
+	for who, slot := range src {
+		add(cursor{slot}, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`)
+
+	assert.Empty(t, violations)
+}
+
+// A goto back to the label of the loop over a queue works as a continue: the
+// first owner of a slot wins, as the free span of the guard says.
+func TestMapIterationOrderReportsDedupWinnerBehindGotoBack(t *testing.T) {
+	source := `package order
+
+import "sort"
+
+func Firsts(src map[string][]int) []string {
+	seen := map[int]bool{}
+	var out []string
+	add := func(slots []int, who string) {
+		queue := append([]int(nil), slots...)
+	next:
+		for len(queue) > 0 {
+			s := queue[0]
+			queue = queue[1:]
+			if seen[s] {
+				goto next
+			}
+			seen[s] = true
+			out = append(out, who)
+		}
+	}
+	for who, slots := range src {
+		add(slots, who)
+	}
+	sort.Strings(out)
+	return out
+}
+`
+	violations := analyzeMapOrder(t, source)
+
+	require.Len(t, violations, 1)
+	assert.Equal(t, dedupCallLine(source), violations[0].Line)
+}
+
+// The paths decide a free branch that only fills the slot afterwards when
+// the slot is spelled with constants and with values of the callee nothing
+// writes, the seen map is only filled with a mark of that slot, and labels
+// are left only forward or by break and continue.
+func TestMapIterationOrderReportsDedupWinnerWhereThePathsAreSure(t *testing.T) {
+	bodies := map[string]string{
+		"slot with literal": `		if !seen[slot+1] {
+			out = append(out, who)
+		}
+		seen[slot+1] = true`,
+		"slot with constant": `		if !seen[slot+base] {
+			out = append(out, who)
+		}
+		seen[slot+base] = true`,
+		"slot in field of local": `		c := cursor{n: slot}
+		if !seen[c.n] {
+			out = append(out, who)
+		}
+		seen[c.n] = true`,
+		"repeat continues labeled loop": `	outer:
+		for i := 0; i < 1; i++ {
+			if !seen[slot] {
+				seen[slot] = true
+			} else {
+				continue outer
+			}
+			out = append(out, who)
+		}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			source := dedupCalleeSource(body)
+			violations := analyzeMapOrder(t, source)
+
+			require.Len(t, violations, 1)
+			assert.Equal(t, dedupCallLine(source), violations[0].Line)
+		})
+	}
+}
+
+// Anything else leaves the guard to its free span, which says nothing of a
+// free branch that only fills the slot afterwards: a slot spelled with a call,
+// with a variable or a constant from outside the callee, a pointer, a field
+// behind a pointer, a variable ranged into or bumped by a method; a seen map
+// counted or filled at another slot, or added to.
+func TestMapIterationOrderAcceptsDedupWhereThePathsAreNotSure(t *testing.T) {
+	bodies := map[string]string{
+		"slot through conversion": `		if !seen[int(slot)] {
+			out = append(out, who)
+		}
+		seen[int(slot)] = true`,
+		"slot shifted from outside": `		if !seen[slot+shift] {
+			out = append(out, who)
+		}
+		seen[slot+shift] = true`,
+		"slot by pointer": `		p := &slot
+		if !owners[p] {
+			out = append(out, who)
+		}
+		owners[p] = true`,
+		"slot behind pointer field": `		c := cursor{at: &cursor{n: slot}}
+		if !seen[c.at.n] {
+			out = append(out, who)
+		}
+		seen[c.at.n] = true`,
+		"slot bumped by method": `		c := cursor{n: slot}
+		for {
+			if !seen[c.n] {
+				break
+			}
+			c.bump()
+		}
+		seen[c.n] = true
+		out = append(out, who)`,
+		"slot ranged into": `		for _, slot = range []int{slot + 1} {
+		}
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true`,
+		"slot keyed by range": `		for slot = range []int{slot} {
+		}
+		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true`,
+		"slot shifted by package variable": `		if !seen[slot+late] {
+			out = append(out, who)
+		}
+		seen[slot+late] = true`,
+		"slot shifted by imported constant": `		if !seen[slot+math.MaxInt8] {
+			out = append(out, who)
+		}
+		seen[slot+math.MaxInt8] = true`,
+		"neighbour counted": `		if count[slot] == 0 {
+			out = append(out, who)
+		}
+		count[slot]++
+		count[slot+1]++`,
+		"neighbour filled": `		if !seen[slot] {
+			out = append(out, who)
+		}
+		seen[slot] = true
+		seen[slot+1] = true`,
+		"count added to": `		if count[slot] == 0 {
+			out = append(out, who)
+		}
+		count[slot] += 1`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			assert.Empty(t, analyzeMapOrder(t, dedupCalleeSource(body)))
 		})
 	}
 }
