@@ -642,9 +642,18 @@ func (h *helperBodies) withBodies() []helperDecl {
 	h.code = strings.Join(h.lines, "\n")
 	h.parens = pairBrackets(h.code, "([", ")]")
 	h.braces = pairBrackets(h.code, "{", "}")
-	blockEnd := h.blockEnds()
+	// Where the mask may have hidden a brace no body end is trusted: every
+	// body runs to the end of the code.
+	masked := h.braces.paired != len(h.braces.opens) || h.braces.unpaired > 0 || slices.ContainsFunc(h.lines, leavesStringOpen)
+	blockEnd := func(int) int { return len(h.code) }
+	if !masked {
+		blockEnd = h.blockEnds()
+	}
 	for _, decl := range h.decls {
 		if decl.end = h.end(decl.start, decl.arrow, blockEnd); decl.end >= 0 {
+			if masked {
+				decl.end = len(h.code)
+			}
 			bodies = append(bodies, decl)
 		}
 	}
@@ -695,16 +704,29 @@ func (h *helperBodies) end(paren int, arrow bool, blockEnd func(int) int) int {
 	return blockEnd(paren)
 }
 
+// leavesStringOpen reports whether a line of the mask leaves a '…' or "…"
+// string open at its end. A string of JS ends on its line, so the mask took a
+// quote for one that is none: an apostrophe in the text of JSX opens a string
+// the mask runs to the end of the line, and a brace there is masked with it.
+// The mask keeps the quotes of a string and blanks what is between them.
+func leavesStringOpen(line string) bool {
+	var open byte
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case open == 0 && (c == '\'' || c == '"'):
+			open = c
+		case c == open:
+			open = 0
+		}
+	}
+	return open != 0
+}
+
 // blockEnds returns blockEnd, which takes offsets in increasing order and
 // returns the end of the block around each: the '}' that closes the innermost
-// '{' open there, the end of the code at the top level. Where the braces of
-// the code do not pair every block ends at the end of the code: an
-// apostrophe in the text of JSX masks the rest of its line as a string, a
-// '{' there too, and the '}' that closes it would end the block around it.
+// '{' open there, the end of the code at the top level. The braces of the
+// code must pair.
 func (h *helperBodies) blockEnds() func(int) int {
-	if h.braces.paired != len(h.braces.opens) || h.braces.unpaired > 0 {
-		return func(int) int { return len(h.code) }
-	}
 	var open []int // the closers of the braces open, innermost last
 	at, next := 0, 0
 	return func(pos int) int {
