@@ -12,6 +12,9 @@ type httpBodyReachRule struct {
 	info  *types.Info
 	file  *ast.File
 	visit func(ast.Node)
+	// branch, when set, says which arms of an if statement a path can take
+	// from its condition; an arm it rules out is not walked.
+	branch func(cond ast.Expr) (then, els bool)
 }
 
 // walkReachableStatements hands visit every statement a path reaches; a call
@@ -19,6 +22,14 @@ type httpBodyReachRule struct {
 // may be nil.
 func walkReachableStatements(statements []ast.Stmt, info *types.Info, file *ast.File, visit func(ast.Node)) {
 	walker := &FlowWalker[bool, struct{}]{Rule: &httpBodyReachRule{info: info, file: file, visit: visit}}
+	walker.stmtList(statements, true, struct{}{})
+}
+
+// WalkReachableStatementsWhere is walkReachableStatements where branch says
+// which arms of an if statement a path can take from its condition: the
+// statements of an arm it rules out are not handed to visit.
+func WalkReachableStatementsWhere(statements []ast.Stmt, info *types.Info, file *ast.File, branch func(cond ast.Expr) (then, els bool), visit func(ast.Node)) {
+	walker := &FlowWalker[bool, struct{}]{Rule: &httpBodyReachRule{info: info, file: file, visit: visit, branch: branch}}
 	walker.stmtList(statements, true, struct{}{})
 }
 
@@ -46,7 +57,11 @@ func (r *httpBodyReachRule) SimpleStmt(stmt ast.Stmt, state bool, _ struct{}) (b
 
 func (r *httpBodyReachRule) IfCondition(stmt *ast.IfStmt, state bool, _ struct{}) (bool, bool) {
 	r.visit(stmt.Cond)
-	return state, state
+	if r.branch == nil {
+		return state, state
+	}
+	then, els := r.branch(stmt.Cond)
+	return state && then, state && els
 }
 
 func (r *httpBodyReachRule) FlowExpr(expr ast.Expr, state bool, _ struct{}) bool {
