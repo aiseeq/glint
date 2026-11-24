@@ -14,9 +14,9 @@ import (
 // writes run only past a free slot. They may only where every way the slot
 // could be another than the one tested, or be emptied again, is ruled out by
 // the shape of the code: the variables the slot is spelled with are never
-// written, the seen map is a local of the function that runs the loop and is
-// only ever filled there with a mark of that same slot,
-// no goto jumps back, and the guard, the marks and the writes sit in one
+// written, the seen map is a local the function that runs the loop makes
+// afresh and only ever fills there with a mark of that same slot, no goto
+// jumps back, and the guard, the marks and the writes sit in one
 // function. Anywhere else the free span of the guard decides, as it did
 // before the paths were followed.
 func (c *dedupCallee) pathsSure(fn *ast.FuncDecl, guard dedupGuard, body *ast.BlockStmt, writes []ast.Stmt, info *types.Info) bool {
@@ -126,7 +126,7 @@ func onlyRead(ident *ast.Ident, parents map[ast.Node]ast.Node, info *types.Info)
 // otherwise only reads it: indexes it, ranges over it, takes its len,
 // compares it, discards it. A map of the package or a field of a holder may
 // be emptied anywhere - a helper, a method of the holder, the caller - and is
-// not.
+// not; nor is a local that only names such a map or one a call returns.
 func onlyMarked(fn *ast.FuncDecl, guard dedupGuard, info *types.Info) bool {
 	ident, _ := ast.Unparen(guard.slot.X).(*ast.Ident)
 	seen, isVar := info.Uses[ident].(*types.Var)
@@ -136,12 +136,49 @@ func onlyMarked(fn *ast.FuncDecl, guard dedupGuard, info *types.Info) bool {
 	parents := helpers.ParentMap(fn.Body)
 	marked := true
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if def, ok := n.(*ast.Ident); ok && info.Defs[def] == seen {
+			marked = madeFresh(def, parents[def], info)
+		}
 		if use, ok := n.(*ast.Ident); ok && info.Uses[use] == seen {
 			marked = guard.onlyMarks(use, parents, info)
 		}
 		return marked
 	})
 	return marked
+}
+
+// madeFresh reports whether the declaration of the seen map creates a new map
+// - with make, a composite literal or no value at all - rather than naming a
+// map another name may reach.
+func madeFresh(def *ast.Ident, decl ast.Node, info *types.Info) bool {
+	var names []*ast.Ident
+	var values []ast.Expr
+	switch decl := decl.(type) {
+	case *ast.AssignStmt:
+		for _, name := range decl.Lhs {
+			ident, _ := name.(*ast.Ident)
+			names = append(names, ident)
+		}
+		values = decl.Rhs
+	case *ast.ValueSpec:
+		if len(decl.Values) == 0 {
+			return true
+		}
+		names, values = decl.Names, decl.Values
+	}
+	at := slices.Index(names, def)
+	if at < 0 || len(values) != len(names) {
+		return false
+	}
+	switch value := ast.Unparen(values[at]).(type) {
+	case *ast.CompositeLit:
+		return true
+	case *ast.CallExpr:
+		// Of the builtins only make yields a map.
+		_, isBuiltin := info.Uses[calleeIdent(value.Fun)].(*types.Builtin)
+		return isBuiltin
+	}
+	return false
 }
 
 // onlyMarks reports whether a use of the seen map is a read or a mark of the
