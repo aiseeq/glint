@@ -91,7 +91,7 @@ func TestBinScriptExecBit(t *testing.T) {
 	for _, v := range violations {
 		if v.File == "bin/run" {
 			assert.Contains(t, v.Message, "100644")
-			assert.Contains(t, v.Suggestion, "git update-index --chmod=+x bin/run")
+			assert.Contains(t, v.Suggestion, "git update-index --chmod=+x -- bin/run")
 			assert.Equal(t, "#!/bin/sh", v.Code)
 		}
 	}
@@ -117,7 +117,7 @@ func TestBinScriptExecBitInSubdirectory(t *testing.T) {
 	places, violations := binExecBitFindings(t, filepath.Join(root, "backend"))
 	assert.Equal(t, []string{"bin/run:1"}, places)
 	require.Len(t, violations, 1)
-	assert.Contains(t, violations[0].Suggestion, "git update-index --chmod=+x bin/run")
+	assert.Contains(t, violations[0].Suggestion, "git update-index --chmod=+x -- bin/run")
 }
 
 // suggestedCommand is the shell command a finding's suggestion names.
@@ -170,6 +170,7 @@ func TestBinScriptExecBitRunOnBinDirectory(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
 		"bin/run":         "#!/bin/sh\necho run\n",
+		"bin/-x":          "#!/bin/sh\necho x\n",
 		"bin/ok":          "#!/bin/sh\necho ok\n",
 		"svc/bin/start":   "#!/bin/sh\necho start\n",
 		"svc/.glint.yaml": "settings: {}\n",
@@ -182,13 +183,16 @@ func TestBinScriptExecBitRunOnBinDirectory(t *testing.T) {
 
 	bin := filepath.Join(root, "bin")
 	places, violations := binExecBitFindings(t, bin)
-	assert.Equal(t, []string{"run:1"}, places)
-	require.Len(t, violations, 1)
-	cmd := exec.Command("bash", "-c", suggestedCommand(t, violations[0]))
-	cmd.Dir = bin
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "%s: %s", violations[0].Suggestion, out)
+	// From bin a name starting with - would read as an option of git.
+	assert.Equal(t, []string{"-x:1", "run:1"}, places)
+	for _, v := range violations {
+		cmd := exec.Command("bash", "-c", suggestedCommand(t, v))
+		cmd.Dir = bin
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s: %s", v.Suggestion, out)
+	}
 	assert.Equal(t, "100755", indexMode(t, root, "bin/run"))
+	assert.Equal(t, "100755", indexMode(t, root, "bin/-x"))
 
 	places, _ = binExecBitFindings(t, filepath.Join(root, "svc", "bin"))
 	assert.Equal(t, []string{"start:1"}, places)
