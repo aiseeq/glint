@@ -503,6 +503,14 @@ func TestFrontendErrorMessageMatchHelperBody(t *testing.T) {
 		"{ { const f = (text) => a } b":                                              "(text) => a } b",
 		"const f = (text): { k: string } => ({ k: text }); b":                        "(text): { k: string } => ({ k: text }); b",
 		"const f = async (text) => text; b":                                          "(text) => text; b",
+		"function f(text) { a } b }":                                                 "(text) { a } b }",
+		"function f(text) { a } ' b":                                                 "(text) { a } ' b",
+		"function f(text) { a } \" b":                                                "(text) { a } \" b",
+		"function f(text) { a } 'x\"y' \"z'w\" b":                                    "(text) { a }",
+		"function f(text): string;\nb '":                                             "",
+		"const f = (text) => a\nb '":                                                 "(text) => a\nb '",
+		"{ const f = (text) => a":                                                    "(text) => a",
+		"} const f = (text) => a":                                                    "(text) => a",
 		"const wrap = (function inner(text) { a }) + b":                              "(text) { a }",
 	} {
 		lines := strings.Split(code, "\n")
@@ -749,6 +757,28 @@ func TestFrontendErrorMessageMatch_ArrowBodyRunsToBlockEnd(t *testing.T) {
 		// The apostrophe opens a string to the end of its line, which hides the
 		// '{' after it; its '}' on the next line is left unpaired.
 		"apostrophe hides a brace": {"export function View() {\n  const Tip = (text: string) => <p>Don't {ok &&\n    'x'} {text.includes('quota') && '!'}</p>\n  try { go() } catch (err) { return Tip(err.message) }\n}\n", []int{3}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, c.want, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.tsx", c.source))
+		})
+	}
+}
+
+// An apostrophe in the text of JSX opens a string the mask runs to the end of
+// its line, a brace there with it. Where a line of the mask leaves a string
+// open, or the braces of the file do not pair, a body of any helper runs to
+// the end of the file.
+func TestFrontendErrorMessageMatch_MaskedBraceEndsNoBody(t *testing.T) {
+	const view = "  const view = (\n    <p>\n      We couldn't load it. {canRetry && (\n        <button>Retry</button>\n      )}\n    </p>\n  )\n  if (text.includes('quota')) return null\n  return view\n}\nexport function View() { try { go() } catch (err) { return ErrorView(err.message) } }\n"
+	for name, c := range map[string]struct {
+		source string
+		want   []int
+	}{
+		"function":           {"function ErrorView(text: string) {\n" + view, []int{9}},
+		"arrow with braces":  {"const ErrorView = (text: string) => {\n" + view, []int{9}},
+		"braces that pair":   {"function ErrorView(text: string) {\n  const view = <p>\n    We couldn't load it. {canRetry && (\n      <button>Retry</button>\n    )}\n  </p>\n  if (text.includes('quota')) return null\n  return <p>{retry && <b>Don't</b>}</p>\n}\nexport function View() { try { go() } catch (err) { return ErrorView(err.message) } }\n", []int{7}},
+		"no apostrophe":      {"function record(text: string) { seen.push(text) }\nfunction isCritical(text: string) { return text.includes('x') }\nexport function c() { try { go() } catch (err) { record(err.message) } }\n", nil},
+		"a string that ends": {"function record(text: string) { seen.push('it' + \"'s\") }\nfunction isCritical(text: string) { return text.includes('x') }\nexport function c() { try { go() } catch (err) { record(err.message) } }\n", nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, c.want, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "web/src/a.tsx", c.source))
