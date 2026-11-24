@@ -1,6 +1,7 @@
 package frontendrules
 
 import (
+	"bytes"
 	"maps"
 	"regexp"
 	"slices"
@@ -108,22 +109,25 @@ func (r *FrontendErrorMessageMatchRule) AnalyzeFile(ctx *core.FileContext) []*co
 
 var typeofOperand = regexp.MustCompile(`\btypeof\s+[A-Za-z_$][\w$.]*`)
 
-// browserHarnessSign is a listener to a browser page's console or uncaught
-// errors, or an import of a browser test library.
-var browserHarnessSign = regexp.MustCompile(`\.\s*on\s*\(\s*['"` + "`" + `](?:console|pageerror)['"` + "`" + `]` +
-	`|(?:\bfrom\s+|\brequire\s*\(\s*|\bimport\s*\(\s*)['"](?:@playwright/test|playwright(?:-core)?|puppeteer(?:-core)?)['"]`)
+// browserHarnessSign is a browser page's uncaught errors listened to or
+// awaited, its console listened to, or the browser test runner imported. A
+// browser library alone is no sign: it drives a page in production code too.
+var browserHarnessSign = func() *regexp.Regexp {
+	quote := `['"` + "`" + `]`
+	listen := `\.\s*(?:on|once|addListener|waitForEvent)\s*\(\s*`
+	return regexp.MustCompile(listen + quote + `(?:pageerror|weberror)` + quote +
+		`|(?:^|[^\w$.])(?:this\s*\.\s*)?[A-Za-z_]*(?:page|Page)\s*` + listen + quote + `console` + quote +
+		`|(?:\bfrom\s+|\brequire\s*\(\s*|\bimport\s*\(\s*)['"](?:@playwright/test|playwright/test)['"]`)
+}()
 
 // browserHarness reports a file that drives a browser for a test, as a file
 // under e2e/ does: the errors it reads are the page's, and a console message
 // carries only its type and text, so the text is the one sign of an error.
 func browserHarness(ctx *core.FileContext) bool {
-	for _, line := range helpers.FileJSText(ctx) {
-		if (strings.Contains(line, "console") || strings.Contains(line, "pageerror") ||
-			strings.Contains(line, "playwright") || strings.Contains(line, "puppeteer")) && browserHarnessSign.MatchString(line) {
-			return true
-		}
+	if !bytes.Contains(ctx.Content, []byte("error")) && !bytes.Contains(ctx.Content, []byte("console")) && !bytes.Contains(ctx.Content, []byte("playwright")) {
+		return false
 	}
-	return false
+	return browserHarnessSign.MatchString(strings.Join(helpers.FileJSText(ctx), "\n"))
 }
 
 // textTests are the words every form the rule matches contains: a string

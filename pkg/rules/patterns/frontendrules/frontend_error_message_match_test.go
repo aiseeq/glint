@@ -388,15 +388,38 @@ export function failOnCrash(err: Error) {
 `
 	assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "shared/ts/crash.ts", imported))
 
-	// Each sign alone: the console listener, the pageerror listener, a
-	// required puppeteer.
+	// Each sign alone: a page's console, its uncaught errors in any form of
+	// listening, the test runner imported in any form.
 	for name, sign := range map[string]string{
-		"console":   "page.on(\"console\", (message) => record(message.text()))",
-		"pageerror": "page.on('pageerror', (error) => record(error.message))",
-		"require":   "const puppeteer = require('puppeteer')",
+		"console":          "page.on(\"console\", (message) => record(message.text()))",
+		"console of this":  "this.page.on('console', (message) => record(message.text()))",
+		"console of named": "adminPage.once('console', (message) => record(message.text()))",
+		"pageerror":        "page.on('pageerror', (error) => record(error.message))",
+		"once":             "page.once('pageerror', (error) => record(error.message))",
+		"addListener":      "p.addListener('pageerror', (error) => record(error.message))",
+		"waitForEvent":     "const crash = await page.waitForEvent('pageerror')",
+		"weberror":         "context.on('weberror', (webError) => record(webError.error().message))",
+		"split line":       "page.on(\n  'pageerror',\n  (error) => record(error.message),\n)",
+		"require":          "const { test } = require('@playwright/test')",
+		"dynamic import":   "const { test } = await import('@playwright/test')",
+		"runner subpath":   "import { test } from 'playwright/test'",
 	} {
 		source := sign + "\nexport function isCritical(err: Error) {\n  return /TypeError/.test(err.message)\n}\n"
-		assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "shared/ts/"+name+".ts", source), name)
+		assert.Empty(t, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "shared/ts/sign.ts", source), name)
+	}
+
+	// A browser library drives a page in production too, a PDF render; a
+	// console that is no page's is the application's own.
+	for name, sign := range map[string]string{
+		"puppeteer":        "import puppeteer from 'puppeteer'",
+		"playwright":       "const { chromium } = require('playwright')",
+		"playwright-core":  "import { chromium } from 'playwright-core'",
+		"socket console":   "socket.on('console', (line) => print(line))",
+		"named not a page": "pager.on('console', (line) => print(line))",
+		"other event":      "page.on('load', () => ready())",
+	} {
+		source := sign + "\nexport function render(err: Error) {\n  return err.message.includes('Navigation timeout')\n}\n"
+		assert.Equal(t, []int{3}, rulestest.TextFileRuleLines(t, NewFrontendErrorMessageMatchRule(), "server/render.ts", source), name)
 	}
 
 	// The application's own code still branches on the wording of its errors,
