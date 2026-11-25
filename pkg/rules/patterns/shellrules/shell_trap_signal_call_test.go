@@ -435,10 +435,11 @@ while poll-once; do sleep 5; done
 	}
 }
 
-// A function named as a builtin replaces it: true, false, exit and their
-// kin then neither give a known status nor end the path, unless command or
-// builtin skips the function.
-func TestShellTrapSignalWithoutExitShadowedBuiltin(t *testing.T) {
+// A function named as a builtin the rule reads makes the script opaque:
+// the builtin stays the builtin, the function is not followed and the
+// status of true, false and : is not known, as in main. command before a
+// function of the script skips it.
+func TestShellTrapSignalWithoutExitBuiltinNamedFunction(t *testing.T) {
 	for name, source := range map[string]string{
 		"d06_true_overridden.sh": `#!/bin/bash
 true() { return 1; }
@@ -461,7 +462,7 @@ while poll-once; do sleep 5; done
 `,
 		"exit_overridden_direct.sh": `#!/bin/bash
 exit() { echo "exit $*"; }
-trap 'echo bye' TERM # want
+trap 'echo bye' TERM
 case "$1" in
   watch) trap - TERM ;;
   *) exit 1 ;;
@@ -469,7 +470,7 @@ esac
 while poll-once; do sleep 5; done
 `,
 		"trap_overridden.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
+trap 'echo bye' TERM
 trap() { echo "trap $*"; }
 trap - TERM
 while poll-once; do sleep 5; done
@@ -480,32 +481,101 @@ trap 'echo bye' TERM # want
 command true && trap - TERM
 while poll-once; do sleep 5; done
 `,
-		"command_fn_status.sh": `#!/bin/bash
-f() { true; }
-trap 'echo bye' TERM # want
-command f && trap - TERM
-while poll-once; do sleep 5; done
-`,
-		"shadowed_builtin_not_followed_is_work.sh": `#!/bin/bash
-true() { sleep 1; }
-true() { sync-all; }
-trap 'rm -f "$tmp"' TERM # want
-true
-`,
 		"command_true_skips_fn.sh": `#!/bin/bash
 true() { return 1; }
-trap 'echo bye' TERM
+trap 'echo bye' TERM # want
 command true && trap - TERM
 while poll-once; do sleep 5; done
 `,
 		"builtin_exit_skips_fn.sh": `#!/bin/bash
 exit() { :; }
 die() { builtin exit 1; }
-trap 'echo bye' TERM
+trap 'echo bye' TERM # want
 case "$1" in
-  watch) trap 'exit 143' TERM ;; # want
+  watch) trap 'exit 143' TERM ;;
   *) die ;;
 esac
+while poll-once; do sleep 5; done
+`,
+		"shadowed_builtin_not_followed_is_work.sh": `#!/bin/bash
+true() { sleep 1; }
+true() { sync-all; }
+trap 'rm -f "$tmp"' TERM
+true
+`,
+		"s05_trap_wrapper.sh": `#!/bin/bash
+trap 'echo bye' TERM
+trap() { builtin trap "$@"; }
+trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"s07_exit_fn_noop.sh": `#!/bin/bash
+trap 'echo bye' TERM
+exit() { :; }
+exit 0
+while poll-once; do sleep 5; done
+`,
+		"s10_fn_true_defined_later.sh": `#!/bin/bash
+trap 'echo bye' TERM # want
+true && trap - TERM
+true() { return 1; }
+while poll-once; do sleep 5; done
+`,
+		"s11_exit_fn_defined_later.sh": `#!/bin/bash
+trap 'echo bye' TERM
+exit 0
+exit() { :; }
+while poll-once; do sleep 5; done
+`,
+		"s15_trap_fn_after_reset.sh": `#!/bin/bash
+trap 'echo bye' TERM
+trap - TERM
+trap() { :; }
+while poll-once; do sleep 5; done
+`,
+		"nested_exit_after_setup.sh": `#!/bin/bash
+trap 'echo bye' TERM # want
+setup() { exit() { :; }; }
+setup
+exit 0
+while poll-once; do sleep 5; done
+`,
+		"nested_true_status_after_setup.sh": `#!/bin/bash
+trap 'echo bye' TERM # want
+setup() { true() { return 1; }; }
+setup
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"true_fn_calls_builtin_then_false.sh": `#!/bin/bash
+trap 'echo bye' TERM # want
+true() { builtin true "$@"; false; }
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"true_fn_defined_below_caller_body.sh": `#!/bin/bash
+trap 'echo bye' TERM # want
+g() { true && trap - TERM; }
+true() { return 1; }
+g
+while poll-once; do sleep 5; done
+`,
+		"trap_command_wrapper.sh": `#!/bin/bash
+trap 'echo bye' TERM
+trap() { command trap "$@"; }
+trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"wrapper_of_other_builtin.sh": `#!/bin/bash
+trap 'echo bye' TERM
+trap() { builtin echo "$@"; }
+trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"command_fn_status.sh": `#!/bin/bash
+f() { true; }
+trap 'echo bye' TERM # want
+command f && trap - TERM
 while poll-once; do sleep 5; done
 `,
 	} {
@@ -515,8 +585,8 @@ while poll-once; do sleep 5; done
 
 // A redirection that may not open, as one to a file, keeps the command
 // from running: its status is then 1, and a function called with it, or
-// defined with it, replaces no trap. /dev/null and a duplicated descriptor
-// always open.
+// defined with it, replaces no trap. /dev/null and a duplicate of a
+// standard stream always open.
 func TestShellTrapSignalWithoutExitRedirectMayFail(t *testing.T) {
 	for name, source := range map[string]string{
 		"d07_true_redir_fail.sh": `#!/bin/bash
@@ -673,112 +743,6 @@ while poll-once; do sleep 5; done
 	}
 }
 
-// A function named as a builtin hides it only where its definition is
-// seen, by the table calls use; a function that only passes its arguments
-// on to the builtin of its name is that builtin.
-func TestShellTrapSignalWithoutExitShadowSeen(t *testing.T) {
-	for name, source := range map[string]string{
-		"s05_trap_wrapper.sh": `#!/bin/bash
-trap 'echo bye' TERM
-trap() { builtin trap "$@"; }
-trap - TERM
-while poll-once; do sleep 5; done
-`,
-		"trap_command_wrapper.sh": `#!/bin/bash
-trap 'echo bye' TERM
-trap() { command trap "$@"; }
-trap - TERM
-while poll-once; do sleep 5; done
-`,
-		"s10_fn_true_defined_later.sh": `#!/bin/bash
-trap 'echo bye' TERM
-true && trap - TERM
-true() { return 1; }
-while poll-once; do sleep 5; done
-`,
-		"s11_exit_fn_defined_later.sh": `#!/bin/bash
-trap 'echo bye' TERM
-exit 0
-exit() { :; }
-while poll-once; do sleep 5; done
-`,
-		"s15_trap_fn_after_reset.sh": `#!/bin/bash
-trap 'echo bye' TERM
-trap - TERM
-trap() { :; }
-while poll-once; do sleep 5; done
-`,
-	} {
-		shellWanted(t, "shell-trap-signal-without-exit", name, source)
-	}
-	for name, source := range map[string]string{
-		"s07_exit_fn_noop.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
-exit() { :; }
-exit 0
-while poll-once; do sleep 5; done
-`,
-		"s06_exit_wrapper_with_work.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
-exit() { rm -f "$tmp"; builtin exit "$@"; }
-exit 0
-`,
-		"wrapper_of_other_builtin.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
-trap() { builtin echo "$@"; }
-trap - TERM
-while poll-once; do sleep 5; done
-`,
-		"nested_exit_after_setup.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
-setup() { exit() { :; }; }
-setup
-exit 0
-while poll-once; do sleep 5; done
-`,
-		"nested_true_status_after_setup.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
-setup() { true() { return 1; }; }
-setup
-true && trap - TERM
-while poll-once; do sleep 5; done
-`,
-		"true_fn_defined_below_caller_body.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
-g() { true && trap - TERM; }
-true() { return 1; }
-g
-while poll-once; do sleep 5; done
-`,
-		"true_fn_calls_builtin_then_false.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
-true() { builtin true "$@"; false; }
-true && trap - TERM
-while poll-once; do sleep 5; done
-`,
-		"wrapper_in_background.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
-trap() { builtin trap "$@" & }
-trap - TERM
-while poll-once; do sleep 5; done
-`,
-		"wrapper_redirect_may_fail.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
-trap() { builtin trap "$@"; } 2>>"$log"
-trap - TERM
-while poll-once; do sleep 5; done
-`,
-		"wrapper_fixed_args.sh": `#!/bin/bash
-trap 'echo bye' TERM # want
-trap() { builtin trap "$1"; }
-trap - TERM
-while poll-once; do sleep 5; done
-`,
-	} {
-		shellWanted(t, "shell-trap-signal-without-exit", name, source)
-	}
-}
-
 // eval, a sourced file and a command named by a variable or a
 // substitution may run or define a function anywhere: no call is followed
 // into a function then, as in main.
@@ -879,7 +843,8 @@ func TestShellTrapSignalWithoutExitInterleavedDefinitions(t *testing.T) {
 
 // The effect kept for a call holds only for the definitions its body saw:
 // a call made before and after a function it calls is defined, or from a
-// place whose call at the top level is not known, is followed again.
+// function whose earliest call at the top level comes before it, is
+// followed again.
 func TestShellTrapSignalWithoutExitCallKeptPerDefinitions(t *testing.T) {
 	for name, source := range map[string]string{
 		"callee_defined_between_calls.sh": `#!/bin/bash
@@ -898,6 +863,13 @@ h
 f() { trap - TERM; }
 k
 `,
+		"same_call_other_signals.sh": `#!/bin/bash
+g() { trap - TERM; }
+h() { trap 'echo a' TERM INT; g; while poll-once; do sleep 5; done; } # want
+k() { trap 'echo b' TERM; g; while poll-once; do sleep 5; done; }
+h
+k
+`,
 		"seen_through_nested_call.sh": `#!/bin/bash
 m() { f; }
 g() { m; }
@@ -907,16 +879,129 @@ h
 f() { trap - TERM; }
 k
 `,
-		"exit_hidden_for_later_caller.sh": `#!/bin/bash
-g() { exit 0; }
-h() { trap 'echo b' TERM; g; while poll-once; do sleep 5; done; } # want
-trap 'echo a' TERM
-if [ "$1" = stop ]; then g; fi
-if [ "$1" = early ]; then h; fi
-exit() { :; }
-h
+	} {
+		shellWanted(t, "shell-trap-signal-without-exit", name, source)
+	}
+}
+
+// A script that may run or define a function out of sight, or that
+// defines a function named as a builtin the rule reads, is taken as main
+// takes it: no function is followed, true, false and : give no known
+// status to && and ||, and a builtin is the builtin.
+func TestShellTrapSignalWithoutExitOpaqueAsMain(t *testing.T) {
+	for name, source := range map[string]string{
+		"o02_eval_defines_true.sh": `#!/bin/bash
+eval 'true() { return 1; }'
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"o04_var_cmd_defines_false.sh": `#!/bin/bash
+cmd=eval
+$cmd 'false() { :; }'
+trap 'echo bye' TERM # want
+false || trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"z01_trap_fn_body.sh": `#!/bin/bash
+trap() { :; }
+main() { trap 'echo bye' TERM; trap - TERM; while poll-once; do sleep 5; done; }
+main
+`,
+		"z02_trap_fn_top.sh": `#!/bin/bash
+trap() { :; }
+trap 'echo bye' TERM
+trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"v01_trap_fn_after_main_body.sh": `#!/bin/bash
+main() { trap 'echo bye' TERM; trap - TERM; while poll-once; do sleep 5; done; }
+main
+trap() { :; }
+`,
+		"w01_trap_wrapper_logging.sh": `#!/bin/bash
+trap() { echo "trap $*" >&2; builtin trap "$@"; }
+trap 'echo bye' TERM
+trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"w05_exit_wrapper_rc.sh": `#!/bin/bash
+exit() { local rc=${1:-0}; rm -f "$tmp"; builtin exit "$rc"; }
+trap 'echo bye' TERM
+exit 0
+while poll-once; do sleep 5; done
+`,
+		"w06_trap_wrapper_star.sh": `#!/bin/bash
+trap() { builtin trap "$*"; }
+trap 'echo bye' TERM
+trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"s06_exit_wrapper.sh": `#!/bin/bash
+trap 'echo bye' TERM
+exit() { rm -f "$tmp"; builtin exit "$@"; }
+exit 0
+while poll-once; do sleep 5; done
+`,
+		"o01_eval_true_and.sh": `#!/bin/bash
+eval 'x=1'
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"unset_fn_named_echo.sh": `#!/bin/bash
+echo() { :; }
+f() { trap - TERM; }
+trap 'echo bye' TERM # want
+f
+while poll-once; do sleep 5; done
 `,
 	} {
 		shellWanted(t, "shell-trap-signal-without-exit", name, source)
+	}
+}
+
+// Only the devices of the standard streams and descriptors 0 to 2 surely
+// open; a higher descriptor may be closed.
+func TestShellTrapSignalWithoutExitHighDescriptor(t *testing.T) {
+	for name, source := range map[string]string{
+		"y01_true_dup3_closed_and.sh": `#!/bin/bash
+trap 'echo bye' TERM # want
+true >&3 && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"y02_true_devfd3_closed_and.sh": `#!/bin/bash
+trap 'echo bye' TERM # want
+true >/dev/fd/3 && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"y04_fn_devfd3_closed.sh": `#!/bin/bash
+trap 'echo bye' TERM # want
+f() { trap - TERM; }
+f >/dev/fd/3
+while poll-once; do sleep 5; done
+`,
+		"y06_fn_devfd2.sh": `#!/bin/bash
+trap 'echo bye' TERM
+f() { trap - TERM; }
+f 2>/dev/fd/2 <&0 >&1
+while poll-once; do sleep 5; done
+`,
+	} {
+		shellWanted(t, "shell-trap-signal-without-exit", name, source)
+	}
+}
+
+// Every builtin the rule reads makes a script that defines a function of
+// its name opaque: the function called after the trap is not followed.
+func TestShellTrapSignalWithoutExitEachReadBuiltin(t *testing.T) {
+	for _, name := range []string{"trap", "exit", "return", "exec", "true", "false", ":", "command", "builtin", "unset", "alias", "source", ".", "eval", "wait", "echo", "printf", "test", "["} {
+		shellWanted(t, "shell-trap-signal-without-exit", "builtin_named.sh", `#!/bin/bash
+`+name+`() { :; }
+f() { trap - TERM; }
+trap 'echo bye' TERM # want
+f
+while poll-once; do sleep 5; done
+`)
 	}
 }

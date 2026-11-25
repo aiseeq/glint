@@ -22,13 +22,12 @@ type stmtPlace struct {
 // script does to a trap: funcs tells which function a call runs, blocked
 // holds those whose body is not followed, status finds the status a
 // command goes on with and exits whether a handler exits. memo keeps the
-// effect of a call by the signals that keep the handler before it, each
-// for the span of definitions run that it holds for, visiting the calls
-// being followed; time is a place in the script that has surely run before
-// the command being followed, the call at the top level that runs it as
-// the latest known, exact marks that it is that call itself, and span the
-// definitions run for which what has been followed so far holds; runs
-// keeps the time for the body of each function.
+// effects of the calls of each function, visiting the calls being
+// followed; time is a place in the script that has surely run before the
+// command being followed, the call at the top level that runs it as the
+// latest known, and span the definitions run for which what has been
+// followed so far holds; runs keeps the time for the body of each
+// function.
 type trapFlow struct {
 	order    []*syntax.Stmt
 	where    map[*syntax.Stmt]stmtPlace
@@ -37,27 +36,20 @@ type trapFlow struct {
 	blocked  map[string]bool
 	status   *exitScan
 	exits    *exitScan
-	memo     map[trapCall][]trapEntry
+	memo     map[string][]trapEntry
 	visiting map[string]bool
 	time     uint
-	exact    bool
 	span     epochSpan
 	runs     map[string]uint
 }
 
-// trapCall is a call of a function with the signals that keep the handler
-// before it, and whether the call at the top level that runs it is known.
-type trapCall struct {
-	name    string
-	signals uint8
-	exact   bool
-}
-
-// trapEntry is the effect of a call while the number of definitions at the
-// top level run is in span.
+// trapEntry is the effect of a call with the signals that keep the
+// handler before it, while the number of definitions at the top level run
+// is in span.
 type trapEntry struct {
-	span   epochSpan
-	effect trapEffect
+	signals uint8
+	span    epochSpan
+	effect  trapEffect
 }
 
 // epochSpan is a range [from, to) of numbers of definitions at the top
@@ -81,7 +73,7 @@ func (s *scriptFuncs) flow(file *syntax.File) *trapFlow {
 		blocked:  make(map[string]bool),
 		status:   s.statusScan(),
 		exits:    s.handlerExits(),
-		memo:     make(map[trapCall][]trapEntry),
+		memo:     make(map[string][]trapEntry),
 		visiting: make(map[string]bool),
 		span:     anyEpoch,
 		runs:     make(map[string]uint),
@@ -280,7 +272,7 @@ func (f *trapFlow) trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool 
 	if waitThenCleanup(stmts) {
 		return false
 	}
-	defer func() { f.time, f.exact = 0, false }()
+	defer func() { f.time = 0 }()
 	out := trapEffect{left: signals}
 	for _, stmt := range stmts {
 		if stmt.Background {
@@ -289,8 +281,7 @@ func (f *trapFlow) trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool 
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && callName(call) == "return" {
 			return out.work
 		}
-		fn := f.where[stmt].fn
-		f.time, f.exact = f.bodyRuns(fn, make(map[string]bool)), fn == ""
+		f.time = f.bodyRuns(f.where[stmt].fn, make(map[string]bool))
 		out = out.seq(f.afterTrap(stmt, out.left))
 		if out.left == 0 {
 			return out.found
@@ -382,27 +373,16 @@ type trapEffect struct {
 // && and || and a branch replace nothing for what follows, since they may
 // not run, unless the status of the left is known to run them. exit and
 // exec of a command end their path. A call of a function of the script
-// does what its body does; a call of a function named as a builtin is
-// work, not the builtin. A subshell, a pipeline and a background command
-// neither replace nor end anything in the script. A return in a branch is
-// taken to go on, as the caller does.
+// does what its body does, unless the script is opaque. Nothing in a
+// subshell, a pipeline or a background command replaces a trap or ends the
+// script. A return in a branch goes on, as the caller does.
 func (f *trapFlow) afterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
 	if stmt.Background {
 		return trapEffect{left: signals}
 	}
-	shadowed := false
 	switch x := stmt.Cmd.(type) {
 	case *syntax.CallExpr:
-		shadowed = f.shadowed(x)
-		if !shadowed {
-			if later, ok := signalTrapCall(x); ok {
-				return trapEffect{left: signals &^ later.signals}
-			}
-			if exitsShell(x) {
-				return trapEffect{exits: true}
-			}
-		}
-		if effect, ok := f.callAfterTrap(stmt, x, signals); ok {
+		if effect, ok := f.callEffect(stmt, x, signals); ok {
 			return effect
 		}
 	case *syntax.WhileClause, *syntax.ForClause:
@@ -418,29 +398,30 @@ func (f *trapFlow) afterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
 			return f.binaryAfterTrap(x, signals)
 		}
 	}
-	if runsLoop(stmt) {
-		return trapEffect{found: true}
-	}
-	return trapEffect{work: doesWork(stmt) || shadowed, left: signals}
+	return otherAfterTrap(stmt, signals)
 }
 
-// shadowed holds for a call whose first word names a function of the
-// script that may be defined when the call runs: a builtin of that name,
-// unless command or builtin goes before it, runs the function instead. A
-// definition at the top level is seen from where the call at the top level
-// that runs it is known, any other one at any time; a function that only
-// passes its arguments on to the builtin of its name is the builtin.
-func (f *trapFlow) shadowed(call *syntax.CallExpr) bool {
-	if len(call.Args) == 0 {
-		return false
+// otherAfterTrap is the effect of a command the walk does not look into:
+// a loop in it runs with the handler on, other work counts.
+func otherAfterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
+	effect := trapEffect{found: runsLoop(stmt)}
+	if !effect.found {
+		effect.work, effect.left = doesWork(stmt), signals
 	}
-	name := wordLit(call.Args[0])
-	for _, fn := range f.funcs.defs[name] {
-		if hides(name, fn.decl.Body) && (!fn.top || !f.exact || f.sees(fn, call.Pos().Offset())) {
-			return true
-		}
+	return effect
+}
+
+// callEffect: a trap replaces the handler for its signals, exit and exec
+// of a command end the path, and a call of a function of the script is
+// followed.
+func (f *trapFlow) callEffect(stmt *syntax.Stmt, call *syntax.CallExpr, signals uint8) (trapEffect, bool) {
+	if later, ok := signalTrapCall(call); ok {
+		return trapEffect{left: signals &^ later.signals}, true
 	}
-	return false
+	if exitsShell(call) {
+		return trapEffect{exits: true}, true
+	}
+	return f.callAfterTrap(stmt, call, signals)
 }
 
 // sees holds where a call at a place sees a definition, and narrows span
@@ -486,8 +467,7 @@ func (e trapEffect) orPath(o trapEffect) trapEffect {
 // the commands after the call. A call through command or builtin skips
 // the function; a call or a definition with a redirection that may not
 // open may not run it; a function already being followed is not followed
-// again; in a script that may run or define a function out of sight, by
-// eval, a sourced file or a command named at run time, none is. Inside a
+// again; in an opaque script none is, as in main. Inside a
 // function followed, the functions defined are those run before the call
 // at the top level that runs it. The effect of a call holds for the span
 // of definitions run in which its body sees the same functions, and is
@@ -503,26 +483,26 @@ func (f *trapFlow) callAfterTrap(stmt *syntax.Stmt, call *syntax.CallExpr, signa
 		return trapEffect{}, false
 	}
 	time := max(f.time, at)
-	key := trapCall{name: name, signals: signals, exact: f.exact}
-	entry, ok := f.entry(key, f.funcs.epoch(time))
+	entry, ok := f.entry(name, signals, f.funcs.epoch(time))
 	if !ok {
 		outer, outerTime := f.span, f.time
 		f.span, f.time = anyEpoch, time
 		f.visiting[name] = true
 		effect := f.afterTrap(fn.decl.Body, signals)
 		delete(f.visiting, name)
-		entry = trapEntry{span: f.span, effect: effect}
-		f.memo[key] = append(f.memo[key], entry)
+		entry = trapEntry{signals: signals, span: f.span, effect: effect}
+		f.memo[name] = append(f.memo[name], entry)
 		f.span, f.time = outer, outerTime
 	}
 	f.span = f.span.meet(entry.span)
 	return entry.effect, true
 }
 
-// entry is the effect kept for a call while epoch definitions have run.
-func (f *trapFlow) entry(key trapCall, epoch int) (trapEntry, bool) {
-	for _, entry := range f.memo[key] {
-		if entry.span.holds(epoch) {
+// entry is the effect kept for a call of name with signals while epoch
+// definitions have run.
+func (f *trapFlow) entry(name string, signals uint8, epoch int) (trapEntry, bool) {
+	for _, entry := range f.memo[name] {
+		if entry.signals == signals && entry.span.holds(epoch) {
 			return entry, true
 		}
 	}
@@ -543,7 +523,8 @@ func (f *trapFlow) listAfterTrap(stmts []*syntax.Stmt, signals uint8) trapEffect
 // binaryAfterTrap: the right side runs on every path that goes on from
 // the left where the status of the left always chooses it, as in
 // true && trap - TERM, and on none where it never does; a left that may
-// return or that the status walk cannot follow leaves both.
+// return or that the status walk cannot follow leaves both, and so does
+// any left in an opaque script, as in main.
 func (f *trapFlow) binaryAfterTrap(x *syntax.BinaryCmd, signals uint8) trapEffect {
 	left := f.afterTrap(x.X, signals)
 	if left.left == 0 {
@@ -556,7 +537,7 @@ func (f *trapFlow) binaryAfterTrap(x *syntax.BinaryCmd, signals uint8) trapEffec
 		runs, skips = skips, runs
 	}
 	switch {
-	case status.unknown || status.ret:
+	case f.funcs.opaque, status.unknown || status.ret:
 	case !skips:
 		return right
 	case !runs:

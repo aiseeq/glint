@@ -57,14 +57,12 @@ func (s *exitScan) handler(action *syntax.File) handlerPaths {
 
 // exitScan follows the paths of a trap handler, or of a command of the
 // script, through the functions defined in the script: body gives the
-// body a call at a place runs, hides whether a function hides the builtin
-// of its name there, memo the paths of each function followed and stmts
-// those of each command. redirects marks the scan of a status that
-// chooses a path, where a redirection that may not open fails the
+// body a call at a place runs, memo the paths of each function followed
+// and stmts those of each command. redirects marks the scan of a status
+// that chooses a path, where a redirection that may not open fails the
 // command; a handler that exits through such a command is taken to exit.
 type exitScan struct {
 	body      func(name string, at syntax.Pos) *syntax.Stmt
-	hides     func(name string, at syntax.Pos) bool
 	redirects bool
 	memo      map[string]handlerPaths
 	visiting  map[string]bool
@@ -76,7 +74,6 @@ type exitScan struct {
 func (s *scriptFuncs) handlerExits() *exitScan {
 	return &exitScan{
 		body:     func(name string, _ syntax.Pos) *syntax.Stmt { return s.last[name] },
-		hides:    func(name string, _ syntax.Pos) bool { return hides(name, s.last[name]) },
 		memo:     make(map[string]handlerPaths),
 		visiting: make(map[string]bool),
 		stmts:    make(map[*syntax.Stmt]handlerPaths),
@@ -88,7 +85,6 @@ func (s *scriptFuncs) handlerExits() *exitScan {
 func (s *scriptFuncs) statusScan() *exitScan {
 	return &exitScan{
 		body:      s.at,
-		hides:     s.hidesAt,
 		redirects: true,
 		memo:      make(map[string]handlerPaths),
 		visiting:  make(map[string]bool),
@@ -160,32 +156,28 @@ func (s *exitScan) command(stmt *syntax.Stmt) handlerPaths {
 	return pathsFall
 }
 
-// call: a function named as a builtin hides it where hides says so,
-// unless command or builtin goes before the name, and these skip functions.
+// builtinPaths are the paths of the builtins the scan reads; a script
+// that defines a function of such a name is not walked for its status.
+var builtinPaths = map[string]handlerPaths{
+	"exit":   {exit: true},
+	"return": {ret: true},
+	"true":   {ok: true},
+	":":      {ok: true},
+	"false":  {failed: true},
+	"eval":   pathsUnknown,
+	".":      pathsUnknown,
+	"source": pathsUnknown,
+}
+
+// call: command and builtin before the name skip functions.
 func (s *exitScan) call(call *syntax.CallExpr) handlerPaths {
-	args := call.Args
-	prefixed := false
-	for len(args) > 0 && (wordLit(args[0]) == "builtin" || wordLit(args[0]) == "command") && !s.hides(wordLit(args[0]), call.Pos()) {
-		args = args[1:]
-		prefixed = true
-	}
+	args, prefixed := unprefixed(call.Args)
 	if len(args) == 0 {
 		return pathsFall
 	}
 	name := wordLit(args[0])
-	if prefixed || !s.hides(name, call.Pos()) {
-		switch name {
-		case "exit":
-			return handlerPaths{exit: true}
-		case "return":
-			return handlerPaths{ret: true}
-		case "true", ":":
-			return handlerPaths{ok: true}
-		case "false":
-			return handlerPaths{failed: true}
-		case "eval", ".", "source":
-			return pathsUnknown
-		}
+	if paths, ok := builtinPaths[name]; ok {
+		return paths
 	}
 	if body := s.body(name, call.Pos()); body != nil && !prefixed {
 		return s.function(name, body)
@@ -292,4 +284,14 @@ func loopPaths(body handlerPaths) handlerPaths {
 		return pathsUnknown
 	}
 	return handlerPaths{ok: true, failed: true, ret: body.ret}
+}
+
+// unprefixed drops command and builtin before the name of a command, and
+// tells whether any stood there.
+func unprefixed(args []*syntax.Word) ([]*syntax.Word, bool) {
+	n := 0
+	for n < len(args) && (wordLit(args[n]) == "builtin" || wordLit(args[n]) == "command") {
+		n++
+	}
+	return args[n:], n > 0
 }
