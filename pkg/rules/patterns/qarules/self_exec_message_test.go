@@ -164,7 +164,7 @@ import (
 
 func TestRelayVia(t *testing.T) {
 	if os.Getenv("RELAY_VIA") == "1" {
-		t.Log("child")
+		println("child")
 	}
 	launchRelay()
 }
@@ -323,11 +323,11 @@ func launchRelay() {
 
 func TestRelayAfter(t *testing.T) {
 	if testing.Testing() {
-		t.Log("under go test")
+		println("under go test")
 	}
 	launchRelay()
 	if os.Getenv("RELAY_AFTER") == "1" {
-		t.Log("child")
+		println("child")
 	}
 }
 `)
@@ -549,7 +549,7 @@ func TestUse(t *testing.T) {
 
 func TestChild(t *testing.T) {
 	if os.Getenv("RELAY_HELPER") == "1" {
-		t.Log("child")
+		println("child")
 	}
 	exitIfChild()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
@@ -660,10 +660,10 @@ func TestNothing(t *testing.T) {}
 func TestSelfExecInTestRule_MessageBranchEveryRunTakes(t *testing.T) {
 	message, _ := selfExecMessage(t, selfExecRelayTest(`func TestRelayChild(t *testing.T) {
 	if testing.Testing() {
-		t.Log("under go test")
+		println("under go test")
 	}
 	if os.Getenv("RELAY_HELPER") == "1" {
-		t.Log("child")
+		println("child")
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestRelayChild$")
 	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
@@ -709,35 +709,35 @@ func TestSelfExecInTestRule_MessageNamesTheOneReadThatCannotEnd(t *testing.T) {
 		"a branch that may exit": {files: map[string]string{
 			"relay/relay_test.go": selfExecRelayChild("\t\tif testing.Short() {\n\t\t\tos.Exit(0)\n\t\t}", "")}, reason: neutral},
 		"a read in a package the tests call": {files: map[string]string{
-			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", ""),
+			"relay/relay_test.go": selfExecRelayChild("\t\tprintln(\"child\")", ""),
 			"relay/use_test.go":   "package relay\n\nimport \"example.com/rulestest/mode\"\n\nfunc useMode() bool { return mode.Child() }\n",
 			"mode/mode.go":        "package mode\n\nimport \"os\"\n\nfunc Child() bool { return os.Getenv(\"RELAY_HELPER\") == \"1\" }\n",
 		}, reason: neutral},
 		"a read in the package under test": {files: map[string]string{
-			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", ""),
+			"relay/relay_test.go": selfExecRelayChild("\t\tprintln(\"child\")", ""),
 			"relay/relay.go":      "package relay\n\nimport \"os\"\n\nfunc Child() bool { return os.Getenv(\"RELAY_HELPER\") == \"1\" }\n",
 		}, reason: neutral},
 		"a package variable of a test file": {files: map[string]string{
-			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nvar child = os.Getenv(\"RELAY_HELPER\")\n"),
+			"relay/relay_test.go": selfExecRelayChild("\t\tprintln(\"child\")", "\nvar child = os.Getenv(\"RELAY_HELPER\")\n"),
 		}, reason: neutral},
 		"a read through LookupEnv": {files: map[string]string{
-			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc child() bool {\n\t_, set := os.LookupEnv(\"RELAY_HELPER\")\n\treturn set\n}\n"),
+			"relay/relay_test.go": selfExecRelayChild("\t\tprintln(\"child\")", "\nfunc child() bool {\n\t_, set := os.LookupEnv(\"RELAY_HELPER\")\n\treturn set\n}\n"),
 		}, reason: neutral},
 		"a read of a name it cannot tell": {files: map[string]string{
-			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc envOf(name string) string { return os.Getenv(name) }\n"),
+			"relay/relay_test.go": selfExecRelayChild("\t\tprintln(\"child\")", "\nfunc envOf(name string) string { return os.Getenv(name) }\n"),
 		}, reason: neutral},
 		"a read of a name built at run time": {files: map[string]string{
-			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc envOf(name string) string { return os.Getenv(\"RELAY_\" + name) }\n"),
+			"relay/relay_test.go": selfExecRelayChild("\t\tprintln(\"child\")", "\nfunc envOf(name string) string { return os.Getenv(\"RELAY_\" + name) }\n"),
 		}, reason: neutral},
 		"a read of the arguments": {files: map[string]string{
-			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc argc() int { return len(os.Args) }\n"),
+			"relay/relay_test.go": selfExecRelayChild("\t\tprintln(\"child\")", "\nfunc argc() int { return len(os.Args) }\n"),
 		}, reason: neutral},
 		"a read of the flags": {files: map[string]string{
-			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", ""),
+			"relay/relay_test.go": selfExecRelayChild("\t\tprintln(\"child\")", ""),
 			"relay/main_test.go":  "package relay\n\nimport (\n\t\"flag\"\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) {\n\tflag.Parse()\n\tos.Exit(m.Run())\n}\n",
 		}, reason: neutral},
 		"a read of a variable the launch does not pass": {files: map[string]string{
-			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc home() string { return os.Getenv(\"RELAY_HOME\") }\n"),
+			"relay/relay_test.go": selfExecRelayChild("\t\tprintln(\"child\")", "\nfunc home() string { return os.Getenv(\"RELAY_HOME\") }\n"),
 		}, reason: named},
 	}
 	for name, c := range cases {
@@ -812,15 +812,19 @@ func (*Server) Run() { os.Exit(0) }
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
+	"runtime"
+	"syscall"
 	"testing"
+	"time"
 
 	"example.com/ext"
 	"example.com/rulestest/mode"
 )
 
-var _, _, _ = ext.MaybeExit, mode.Serve, fmt.Sprint
+var _, _, _, _, _, _, _ = ext.MaybeExit, mode.Serve, fmt.Sprint, log.Print, runtime.GC, syscall.Getpid, time.Now
 
 var srv = ext.New()
 
@@ -856,12 +860,13 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 
 	"example.com/ext"
 	"example.com/rulestest/mode"
 )
 
-var _, _, _, _, _ = ext.MaybeExit, fmt.Sprint, io.EOF, strings.ToLower, mode.Serve
+var _, _, _, _, _, _ = ext.MaybeExit, fmt.Sprint, io.EOF, strings.ToLower, mode.Serve, syscall.Getpid
 
 func Launch() {
 	` + pre + `
@@ -887,15 +892,28 @@ func Launch() {
 		"test file: a method of a type of the module":                    {files: inTest("", "mode.M{}.Run()"), named: true},
 		"test file: a method of a type of the test file":                 {files: inTest("", "relayLocal{}.Run()"), named: true},
 		"test file: a recursive function of the module":                  {files: inTest("", "countdown(3)"), named: true},
-		"test file: a function literal":                                  {files: inTest("", "func() { t.Log(\"child\") }()"), named: true},
+		"test file: a function literal":                                  {files: inTest("", "func() { println(\"child\") }()"), named: true},
 		"test file: the standard library, builtins and conversions":      {files: inTest("", "fmt.Println(len(os.Args), []byte(\"x\"), string(rune(65)))"), named: true},
-		"test file: a method of a testing value":                         {files: inTest("", "t.Log(\"child\")"), named: true},
+		"test file: a method of a testing value":                         {files: inTest("", "t.Log(\"child\")")},
+		"test file: syscall.Exit":                                        {files: inTest("", "syscall.Exit(0)")},
+		"test file: a signal to the own process":                         {files: inTest("", "_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)")},
+		"test file: a method of a log.Logger":                            {files: inTest("", "log.Default().Fatal(\"child\")")},
+		"test file: a function of runtime":                               {files: inTest("", "runtime.GC()")},
+		"test file: a function of log":                                   {files: inTest("", "log.Println(\"child\")")},
+		"test file: a function of testing":                               {files: inTest("", "_ = testing.Verbose()")},
+		"test file: a panic under a condition":                           {files: inTest("", "if len(os.Args) > 5 {\n\t\t\tpanic(\"child\")\n\t\t}")},
+		"test file: a function of os that is not known to return":        {files: inTest("", "_ = os.Chdir(\"/\")")},
+		"test file: the answer of a helper process":                      {files: inTest("", "_ = syscall.Setpgid(0, 0)\n\t\t_ = os.WriteFile(os.Getenv(\"RELAY_OUT\"), []byte(\"ready\"), 0o600)\n\t\ttime.Sleep(time.Millisecond)"), named: true},
 		"package code: a function of another module":                     {files: inPackage("", "ext.MaybeExit()")},
 		"package code: a method of a value of another module":            {files: inPackage("srv := ext.New()", "srv.Run()")},
 		"package code: a method of an interface of the standard library": {files: inPackage("var w io.Writer = os.Stdout", "_, _ = w.Write(nil)")},
 		"package code: a function value":                                 {files: inPackage("f := fmt.Println", "f()")},
 		"package code: a method of a type of the module":                 {files: inPackage("", "mode.M{}.Run()"), named: true},
 		"package code: a method of a type of the standard library":       {files: inPackage("var sb strings.Builder", "sb.WriteString(\"child\")"), named: true},
+		"package code: a method of a type of os":                         {files: inPackage("p, _ := os.FindProcess(os.Getpid())", "_ = p.Kill()")},
+		"package code: a function of syscall":                            {files: inPackage("", "syscall.Exit(0)")},
+		"package code: a panic under a condition":                        {files: inPackage("", "if len(os.Args) > 5 {\n\t\t\tpanic(\"child\")\n\t\t}")},
+		"package code: a function of os known to return":                 {files: inPackage("", "_ = os.Getpid()"), named: true},
 		"package code: a builtin":                                        {files: inPackage("", "_ = len(os.Args)"), named: true},
 		"package code: the standard library, builtins and conversions":   {files: inPackage("", "fmt.Println(len(os.Args), []byte(\"x\"), string(rune(65)))"), named: true},
 	}

@@ -175,12 +175,9 @@ func (a *selfExecAnalysis) mayStop(b *selfExecBody, node ast.Node, depth int, se
 
 // callReturns reports a call proven to return: of a function of the module
 // whose body returns, of a function literal, whose body is walked with the
-// node, or of a builtin, a conversion, or a function or method of the
-// standard library that does not end the process or the test.
+// node, or of a builtin but panic, a conversion, or a function or method of
+// a package of the standard library that cannot end the process or the test.
 func (a *selfExecAnalysis) callReturns(b *selfExecBody, call *ast.CallExpr, depth int, seen map[*selfExecBody]bool) bool {
-	if patternkit.StmtNoReturn(&ast.ExprStmt{X: call}, b.info, b.file) != patternkit.CallReturns || selfExecEndsTest(b, call) {
-		return false
-	}
 	if _, ok := ast.Unparen(call.Fun).(*ast.FuncLit); ok {
 		return true
 	}
@@ -222,11 +219,11 @@ func (a *selfExecAnalysis) provenCallees(b *selfExecBody, call *ast.CallExpr) ([
 	return callees, kind == recvModule || kind == recvTestLocal
 }
 
-// stdCall reports a call of a builtin, a conversion, or a function
-// or a method of the standard library: by the object of the callee with type
-// information, a method of an interface aside; in a test file, a builtin
-// name, a type literal, a member of an imported package of the standard
-// library, or a method of a testing value.
+// stdCall reports a call of a builtin but panic, a conversion, or a function
+// or a method of the standard library outside the packages that may end the
+// process or the test (see selfExecStopsPkg): by the object of the callee
+// with type information, a method of an interface aside; in a test file, a
+// builtin name, a type literal, or a member of an imported package.
 func (a *selfExecAnalysis) stdCall(b *selfExecBody, call *ast.CallExpr) bool {
 	fun := ast.Unparen(call.Fun)
 	if b.info != nil {
@@ -234,31 +231,63 @@ func (a *selfExecAnalysis) stdCall(b *selfExecBody, call *ast.CallExpr) bool {
 			return true
 		}
 		if id, ok := fun.(*ast.Ident); ok {
-			if _, builtin := b.info.Uses[id].(*types.Builtin); builtin {
-				return true
+			if builtin, ok := b.info.Uses[id].(*types.Builtin); ok {
+				return builtin.Name() != "panic"
 			}
 		}
 		fn := patternkit.StaticFunc(b.info, call)
-		if fn == nil || fn.Pkg() == nil || !patternkit.StdlibPath(fn.Pkg().Path()) {
+		if fn == nil || fn.Pkg() == nil {
 			return false
 		}
 		recv := fn.Signature().Recv()
-		return recv == nil || !types.IsInterface(recv.Type())
+		if recv != nil && types.IsInterface(recv.Type()) {
+			return false
+		}
+		return selfExecStdReturns(fn.Pkg().Path(), fn.Name())
 	}
 	switch fun := fun.(type) {
 	case *ast.Ident:
-		return !b.declaresAt(fun.Name, fun.Pos()) && types.Universe.Lookup(fun.Name) != nil
+		return fun.Name != "panic" && !b.declaresAt(fun.Name, fun.Pos()) && types.Universe.Lookup(fun.Name) != nil
 	case *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType:
 		return true
 	case *ast.SelectorExpr:
 		if q, ok := fun.X.(*ast.Ident); ok && !b.declaresAt(q.Name, q.Pos()) {
 			if path, ok := a.index.importPath(b.file, q.Name); ok {
-				return patternkit.StdlibPath(path)
+				return selfExecStdReturns(path, fun.Sel.Name)
 			}
 		}
-		return selfExecTestingValue(b, fun.X)
 	}
 	return false
+}
+
+// selfExecStdReturns reports a function or a method of a package that
+// returns: of the standard library outside the packages that may end the
+// process or the test, or a function of them the answer to a child calls
+// that does not.
+func selfExecStdReturns(path, name string) bool {
+	if !patternkit.StdlibPath(path) {
+		return false
+	}
+	if !selfExecStopsPkg(path) {
+		return true
+	}
+	return selfExecReturningFuncs[path+"."+name]
+}
+
+// selfExecStopsPkg reports a package of the standard library whose functions
+// or methods may end the process or the test: os and its subpackages,
+// syscall, runtime, log, testing and theirs.
+func selfExecStopsPkg(path string) bool {
+	first, _, _ := strings.Cut(path, "/")
+	return first == "os" || first == "syscall" || first == "runtime" || first == "log" || first == "testing"
+}
+
+// selfExecReturningFuncs are the functions of those packages an answer to a
+// child calls that return.
+var selfExecReturningFuncs = map[string]bool{
+	"os.Getenv": true, "os.LookupEnv": true, "os.Setenv": true,
+	"os.ReadFile": true, "os.WriteFile": true, "os.Getpid": true,
+	"syscall.Setpgid": true,
 }
 
 // readsBeside reports whether the test binary of a directory reads, outside
