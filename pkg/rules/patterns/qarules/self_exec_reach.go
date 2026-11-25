@@ -658,7 +658,14 @@ func (idx *selfExecIndex) typeExprType(b *selfExecBody, expr ast.Expr) selfExecR
 func (a *selfExecAnalysis) reached() []*selfExecFinding {
 	a.relevantBodies()
 	for _, dir := range slices.Sorted(maps.Keys(a.index.rootsOf)) {
-		a.explore(dir, a.index.rootsOf[dir], "", a.labelSet(a.mainSets(dir)))
+		// What TestMain sets before m.Run is set for the tests, not for
+		// TestMain itself, which may start a child before it sets it.
+		main := a.index.mains[dir]
+		tests := slices.DeleteFunc(slices.Clone(a.index.rootsOf[dir]), func(root *selfExecBody) bool { return root == main })
+		a.explore(dir, tests, "", a.labelSet(a.mainSets(dir)))
+		if main != nil {
+			a.explore(dir, []*selfExecBody{main}, "", "")
+		}
 	}
 	return a.findings
 }
@@ -668,11 +675,13 @@ const (
 	selfExecDone
 )
 
-// selfExecHelperKey is a helper start checked in a run of a test binary.
+// selfExecHelperKey is a start whose child is followed in a run of a test
+// binary: a helper, or a child the TestMain or an init answers.
 type selfExecHelperKey struct {
-	call ast.Node
-	dir  string
-	run  string
+	call     ast.Node
+	dir      string
+	run      string
+	answered bool
 }
 
 // explore follows the calls from roots in a run of the test binary of a
@@ -686,6 +695,11 @@ func (a *selfExecAnalysis) explore(dir string, roots []*selfExecBody, mode, cove
 		mode string
 	}
 	contexts := map[context]int{}
+	// modes holds the runs each body is followed in: past
+	// selfExecMaxContexts a body is followed in the run the walk starts
+	// in, without what the guards on the way tell, as the guards of a
+	// chain of functions would double the runs at each step.
+	modes := map[*selfExecBody]map[string]bool{}
 	var queue []selfExecNode
 	for _, root := range roots {
 		node := selfExecNode{body: root, mode: mode, covered: covered}
@@ -712,6 +726,13 @@ func (a *selfExecAnalysis) explore(dir string, roots []*selfExecBody, mode, cove
 					continue
 				}
 				next := selfExecNode{body: callee, names: a.calleeNames(node, call, callee), mode: a.guardedRun(node.body, node.mode, call.Pos()), covered: a.coveredAt(node, call.Pos())}
+				if modes[callee] == nil {
+					modes[callee] = map[string]bool{}
+				}
+				if !modes[callee][next.mode] && len(modes[callee]) >= selfExecMaxContexts {
+					next.mode = mode
+				}
+				modes[callee][next.mode] = true
 				at := context{callee, next.mode}
 				if !seen[next] && contexts[at] >= selfExecMaxContexts {
 					next.names = ""
@@ -746,25 +767,44 @@ func (a *selfExecAnalysis) check(dir string, node selfExecNode, point *selfExecP
 	run := a.childRun(a.run(node.mode), point)
 	pattern, known, helper := a.helperPattern(point)
 	unbind()
+	// The child the TestMain or an init answers runs them up to the answer:
+	// a start on the way is followed like any other.
 	if a.answered(dir, run) {
-		return
-	}
-	if helper {
-		key := selfExecHelperKey{point.call, dir, run.key()}
-		switch a.helpers[key] {
-		case selfExecDone:
-			return
-		case 0:
-			a.helpers[key] = selfExecRunning
-			covered := a.labelSet(selfExecUnion(a.mainSets(dir), selfExecRunSets(run)))
-			a.explore(dir, a.childRoots(dir, pattern, known), run.key(), covered)
-			a.helpers[key] = selfExecDone
+		roots := a.inits(dir)
+		if main := a.index.mains[dir]; main != nil {
+			roots = append(roots, main)
+		}
+		if a.followChild(selfExecHelperKey{point.call, dir, run.key(), true}, roots, run) {
 			return
 		}
-		// Reached again in its own child: each child starts the next.
+	} else if helper && a.followChild(selfExecHelperKey{point.call, dir, run.key(), false}, a.childRoots(dir, pattern, known), run) {
+		return
 	}
 	a.reported[point.call] = true
 	a.findings = append(a.findings, &selfExecFinding{point: point, chain: selfExecChain(node, parent)})
+}
+
+// followChild follows the child of a start from the roots it runs, once
+// per start and run; it reports false for a start reached again in its own
+// child, where each child starts the next.
+func (a *selfExecAnalysis) followChild(key selfExecHelperKey, roots []*selfExecBody, run *selfExecRun) bool {
+	switch a.helpers[key] {
+	case selfExecDone:
+		return true
+	case selfExecRunning:
+		return false
+	}
+	a.helpers[key] = selfExecRunning
+	// What TestMain sets before m.Run is set for the tests of a helper, not
+	// on the way to an answer, which may leave before it.
+	sets := selfExecRunSets(run)
+	if !key.answered {
+		sets = selfExecUnion(a.mainSets(key.dir), sets)
+	}
+	covered := a.labelSet(sets)
+	a.explore(key.dir, roots, key.run, covered)
+	a.helpers[key] = selfExecDone
+	return true
 }
 
 func selfExecChain(node selfExecNode, parent map[selfExecNode]selfExecNode) []string {

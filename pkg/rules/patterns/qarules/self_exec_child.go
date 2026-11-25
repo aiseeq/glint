@@ -69,93 +69,15 @@ func (r *selfExecRun) key() string {
 }
 
 // run returns the run a node of the reach is in; "" is the run go test
-// starts: the variables only the starts of the module set are empty there.
+// starts, whose environment the analysis does not know: CI or a shell may
+// set any variable, a name only the starts of the module set included.
 func (a *selfExecAnalysis) run(mode string) *selfExecRun {
 	if run, ok := a.runs[mode]; ok {
 		return run
 	}
 	run := &selfExecRun{env: map[string]selfExecStr{}}
-	for name := range a.childMarkers() {
-		run.env[name] = selfExecStr{complete: true}
-	}
 	a.runs[mode] = run
 	return run
-}
-
-// childMarkers returns the environment variables a start of the own
-// executable sets that no test or function sets with Setenv: go test does
-// not set them, so a branch that needs one is the child's.
-func (a *selfExecAnalysis) childMarkers() map[string]bool {
-	if a.markers != nil {
-		return a.markers
-	}
-	a.markers = map[string]bool{}
-	set := map[string]bool{}
-	for _, b := range a.bodies {
-		for _, call := range a.facts(b).calls {
-			if name, ok := a.setenvName(b, call); ok {
-				set[name] = true
-			}
-		}
-		for _, point := range a.points(b) {
-			for name := range a.launchEnv(point).env {
-				a.markers[name] = true
-			}
-		}
-		a.envNames(b, a.markers)
-	}
-	for name := range set {
-		delete(a.markers, name)
-	}
-	for name := range a.markers {
-		if selfExecStandardVariable(name) {
-			delete(a.markers, name)
-		}
-	}
-	return a.markers
-}
-
-// envNames adds the variables a body sets in the Env of any command: one
-// started through a shell is the own executable as often. Where a name is a
-// parameter, each call of the body names its own.
-func (a *selfExecAnalysis) envNames(b *selfExecBody, names map[string]bool) {
-	add := func() bool {
-		open := false
-		for _, fa := range a.facts(b).fields {
-			if fa.field != "Env" {
-				continue
-			}
-			for _, elem := range a.sliceElems(b, fa.rhs, 0, true).elems {
-				name, _, ok := strings.Cut(elem.s, "=")
-				if !ok || name == "" {
-					open = true
-					continue
-				}
-				names[name] = true
-			}
-		}
-		return open
-	}
-	if !add() || b.decl == nil {
-		return
-	}
-	for _, site := range a.callSitesOf(b) {
-		unbind := a.bindCall(site.body, site.call, b)
-		add()
-		unbind()
-	}
-}
-
-// selfExecStandardVariable reports a variable the environment of a user or
-// of a build has, which a start may set for its child only to isolate it.
-func selfExecStandardVariable(name string) bool {
-	switch name {
-	case "HOME", "PATH", "USER", "LOGNAME", "SHELL", "PWD", "TERM", "LANG", "TZ",
-		"TMPDIR", "TMP", "TEMP", "LOCALAPPDATA", "APPDATA", "USERPROFILE", "SYSTEMROOT",
-		"GOPATH", "GOROOT", "GOCACHE", "GOFLAGS", "GOMODCACHE", "GOTMPDIR", "CI":
-		return true
-	}
-	return strings.HasPrefix(name, "XDG_") || strings.HasPrefix(name, "LC_")
 }
 
 // childRun returns the run a start makes from the run of its parent.
@@ -332,6 +254,11 @@ func (a *selfExecAnalysis) sliceElems(b *selfExecBody, expr ast.Expr, depth int,
 	case *ast.Ident:
 		key := b.key(node)
 		if key != nil && a.isParam(b, node, key) {
+			// A parameter the body assigns again holds what the call gave
+			// it no more.
+			if a.reassigned(b, key) {
+				return open
+			}
 			if args, ok := a.boundSlice(b, key, depth, unordered); ok {
 				return args
 			}
@@ -425,27 +352,59 @@ func (a *selfExecAnalysis) str(b *selfExecBody, expr ast.Expr, depth int) selfEx
 }
 
 // helperPattern returns the -test.run pattern a start passes: helper is set
-// when it passes the flag, known when the pattern is a constant.
+// when the child is sure to get the flag, known when the pattern is a
+// constant no later argument may replace. The flags of the test binary end
+// at the first argument that is not a flag, so a -test.run after a
+// subcommand selects nothing; a flag whose value the analysis cannot tell
+// apart from the next argument, or an argument it does not know, ends what
+// it can prove; the last -test.run wins.
 func (a *selfExecAnalysis) helperPattern(point *selfExecPoint) (pattern string, known, helper bool) {
 	args, ok := a.launchArgs(point)
 	if !ok {
 		return "", false, false
 	}
-	for i, arg := range args.elems {
-		for _, flag := range []string{"-test.run", "--test.run"} {
-			if rest, found := strings.CutPrefix(arg.s, flag+"="); found {
-				return rest, arg.complete, true
-			}
-			if arg.complete && arg.s == flag {
-				if i+1 < len(args.elems) {
-					next := args.elems[i+1]
-					return next.s, next.complete, true
-				}
-				return "", false, true
-			}
+	elems := args.elems
+	for i := 0; i < len(elems); i++ {
+		arg := elems[i]
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(arg.s, "-"), "-"), "=")
+		flag := strings.HasPrefix(arg.s, "-") && arg.s != "-" && arg.s != "--"
+		switch {
+		case flag && name == "test.run" && hasValue:
+			pattern, known, helper = value, arg.complete, true
+		case !arg.complete:
+			// A flag that may set the pattern again, or the argument that
+			// ends the flags: what follows proves nothing.
+			return pattern, false, helper
+		case !flag:
+			return pattern, known, helper
+		case hasValue || selfExecBoolTestFlags[name]:
+		case name == "test.run" && i+1 < len(elems):
+			i++
+			pattern, known, helper = elems[i].s, elems[i].complete, true
+		case selfExecValueTestFlags[name] && i+1 < len(elems):
+			i++
+		default:
+			// A flag that may take the next argument as its value, or one
+			// the binary does not define and stops at.
+			return pattern, false, helper
 		}
 	}
-	return "", false, false
+	return pattern, known && !args.open, helper
+}
+
+// selfExecBoolTestFlags are the flags of a test binary that take no value.
+var selfExecBoolTestFlags = map[string]bool{
+	"test.v": true, "test.short": true, "test.failfast": true, "test.benchmem": true,
+	"test.paniconexit0": true, "test.fullpath": true,
+}
+
+// selfExecValueTestFlags are the flags of a test binary that take the next
+// argument as their value when it is not joined by "=".
+var selfExecValueTestFlags = map[string]bool{
+	"test.skip": true, "test.count": true, "test.cpu": true, "test.parallel": true,
+	"test.timeout": true, "test.bench": true, "test.benchtime": true, "test.list": true,
+	"test.shuffle": true, "test.outputdir": true, "test.coverprofile": true,
+	"test.cpuprofile": true, "test.memprofile": true, "test.trace": true,
 }
 
 // childRoots returns the functions of the test binary a helper child runs:
@@ -500,7 +459,9 @@ func (a *selfExecAnalysis) answered(dir string, run *selfExecRun) bool {
 }
 
 // answers walks statements of TestMain in the child: it reports an answer
-// when a taken branch exits or returns, and stops at m.Run.
+// when every path the run may take exits or returns, and stops at m.Run.
+// Each branch the run may take is walked once, and what follows the
+// statement once, so the walk is linear in the statements.
 func (e *selfExecEval) answers(b *selfExecBody, list []ast.Stmt, m string) (answered, stop bool) {
 	for _, stmt := range list {
 		if selfExecRunsSuite(stmt, m) {
@@ -512,25 +473,53 @@ func (e *selfExecEval) answers(b *selfExecBody, list []ast.Stmt, m string) (answ
 		if patternkit.StmtNoReturn(stmt, b.info, b.file) != patternkit.CallReturns || e.a.neverReturns(b, stmt) {
 			return true, true
 		}
-		var taken []ast.Stmt
-		switch node := stmt.(type) {
-		case *ast.RangeStmt:
-			taken = e.firstIteration(b, node)
-		default:
-			branch, decided := e.branch(b, stmt)
-			if e.ended {
-				return true, true
+		if rng, ok := stmt.(*ast.RangeStmt); ok {
+			if answered, stop := e.answers(b, e.firstIteration(b, rng), m); answered || stop {
+				return answered, stop
 			}
-			if !decided || branch == nil {
-				continue
+			// The iterations the walk does not follow may return.
+			if e.init && selfExecReturnsIn(stmt) {
+				return false, true
 			}
-			taken = selfExecStmts(branch)
+			continue
 		}
-		if answered, stop := e.answers(b, taken, m); answered || stop {
-			return answered, stop
+		branches, none, ok := e.branches(b, stmt)
+		if e.ended {
+			return true, true
+		}
+		if !ok {
+			// A return in a statement the walk cannot tell ends an init
+			// without an answer on some path.
+			if e.init && selfExecReturnsIn(stmt) {
+				return false, true
+			}
+			continue
+		}
+		all := !none
+		for _, branch := range branches {
+			answered, stop := e.inBranch(func() (bool, bool) { return e.answers(b, selfExecStmts(branch), m) })
+			if stop && !answered {
+				return false, true
+			}
+			all = all && answered
+		}
+		if all {
+			return true, true
 		}
 	}
 	return false, false
+}
+
+// inBranch walks one of the branches a run may take with the end of the
+// walk as it is before it: a branch that ends the run has answered when the
+// walk of it returns, and leaves the other branches to go on. A binding the
+// branch makes stays: it binds the variable of a range, which nothing out of
+// the range reads, to the one value the run gives it.
+func (e *selfExecEval) inBranch(walk func() (bool, bool)) (bool, bool) {
+	ended := e.ended
+	answered, stop := walk()
+	e.ended = ended
+	return answered, stop
 }
 
 // firstIteration binds the value of a range over os.Args[1:] to the first
@@ -800,6 +789,80 @@ func (e *selfExecEval) switchBranch(b *selfExecBody, stmt *ast.SwitchStmt) (ast.
 	return selfExecNoFallthrough(clause)
 }
 
+// branches returns the branches of an if or a switch a run may take and
+// whether it may take none; ok is false for any other statement and for a
+// switch with a case that falls through.
+func (e *selfExecEval) branches(b *selfExecBody, stmt ast.Stmt) (taken []ast.Node, none, ok bool) {
+	switch node := stmt.(type) {
+	case *ast.IfStmt:
+		cond := e.eval(b, node.Cond, 0)
+		known := cond.kind == selfExecBool
+		if !known || cond.b {
+			taken = append(taken, node.Body)
+		}
+		if !known || !cond.b {
+			if node.Else != nil {
+				taken = append(taken, node.Else)
+			} else {
+				none = true
+			}
+		}
+		return taken, none, true
+	case *ast.SwitchStmt:
+		return e.switchBranches(b, node)
+	}
+	return nil, false, false
+}
+
+// switchBranches returns the clauses of a switch a run may take: each case
+// up to the first that surely matches, the default when none does.
+func (e *selfExecEval) switchBranches(b *selfExecBody, stmt *ast.SwitchStmt) ([]ast.Node, bool, bool) {
+	var tag selfExecVal
+	if stmt.Tag != nil {
+		tag = e.eval(b, stmt.Tag, 0)
+	}
+	var taken []ast.Node
+	var fallback *ast.CaseClause
+	for _, item := range stmt.Body.List {
+		clause, ok := item.(*ast.CaseClause)
+		if !ok || selfExecFallsThrough(clause) {
+			return nil, false, false
+		}
+		if clause.List == nil {
+			fallback = clause
+			continue
+		}
+		maybe := false
+		for _, expr := range clause.List {
+			match := e.eval(b, expr, 0)
+			if stmt.Tag != nil {
+				match = selfExecMatches(tag, match)
+			}
+			if match.kind != selfExecBool {
+				maybe = true
+			} else if match.b {
+				return append(taken, clause), false, true
+			}
+		}
+		if maybe {
+			taken = append(taken, clause)
+		}
+	}
+	if fallback != nil {
+		return append(taken, fallback), false, true
+	}
+	return taken, true, true
+}
+
+// selfExecMatches tells whether a case value matches the tag of a switch on
+// strings.
+func selfExecMatches(tag, value selfExecVal) selfExecVal {
+	if tag.kind != selfExecString_ || !tag.s.complete || value.kind != selfExecString_ || !value.s.complete {
+		return selfExecVal{}
+	}
+	return selfExecVal{kind: selfExecBool, b: tag.s.s == value.s.s}
+}
+
 // selfExecNoFallthrough decides a clause only when it does not fall through.
 func selfExecNoFallthrough(clause *ast.CaseClause) (ast.Node, bool) {
 	if n := len(clause.Body); n > 0 {
@@ -839,6 +902,10 @@ type selfExecEval struct {
 	ended bool
 	// init marks the walk of an init, where a return does not answer.
 	init bool
+	// calls holds the summaries of the calls evaluated. A binding does not
+	// make one stale: only the body of the range it binds the variable of
+	// reads it, and only after it is bound, to the one value the run gives.
+	calls map[selfExecCallKey]selfExecCallValue
 }
 
 func (e *selfExecEval) eval(b *selfExecBody, expr ast.Expr, depth int) selfExecVal {
@@ -962,17 +1029,90 @@ func (e *selfExecEval) call(b *selfExecBody, call *ast.CallExpr, i, depth int) s
 		return selfExecVal{kind: selfExecInt, n: 1 + len(e.run.args.elems), atLeast: e.run.args.open}
 	}
 	callees := e.a.resolve(b, call)
-	if len(callees) != 1 || e.visiting[callees[0]] || depth > 6 {
+	if len(callees) != 1 {
 		return selfExecVal{}
 	}
-	callee := callees[0]
-	e.visiting[callee] = true
-	defer delete(e.visiting, callee)
-	ret, ok := e.returnOf(callee, callee.decl.Body.List, depth+1)
-	if !ok || i >= len(ret.Results) || (len(ret.Results) == 1 && i > 0) {
-		return selfExecVal{}
+	// The value of a call is the summary of the callee in the run, found
+	// once per evaluation: a callee met again while its summary is being
+	// found (a cycle of calls) gives nothing the evaluator knows.
+	key := selfExecCallKey{callees[0], i}
+	memo, ok := e.calls[key]
+	if !ok {
+		if e.visiting[callees[0]] {
+			return selfExecVal{}
+		}
+		e.visiting[callees[0]] = true
+		memo = e.callValue(callees[0], i)
+		delete(e.visiting, callees[0])
+		if e.calls == nil {
+			e.calls = map[selfExecCallKey]selfExecCallValue{}
+		}
+		e.calls[key] = memo
 	}
-	return e.eval(callee, ret.Results[i], depth+1)
+	if memo.ends {
+		e.ended = true
+	}
+	return memo.value
+}
+
+// selfExecCallKey is a result of a function the evaluator asks for.
+type selfExecCallKey struct {
+	callee *selfExecBody
+	i      int
+}
+
+// selfExecCallValue is the summary of a call in a run: its value, or that
+// every path of it panics or exits.
+type selfExecCallValue struct {
+	value selfExecVal
+	ends  bool
+}
+
+// callValue finds the i-th result of a callee in the run: known where
+// every return the run may reach gives it; a path that panics or exits
+// gives none.
+func (e *selfExecEval) callValue(callee *selfExecBody, i int) selfExecCallValue {
+	var unknown selfExecCallValue
+	rets, falls, ok := e.returns(callee, callee.decl.Body.List)
+	if !ok || falls {
+		return unknown
+	}
+	var merged selfExecVal
+	given := false
+	for _, ret := range rets {
+		if i >= len(ret.Results) || (len(ret.Results) == 1 && i > 0) {
+			return unknown
+		}
+		ended := e.ended
+		e.ended = false
+		value := e.eval(callee, ret.Results[i], 0)
+		ends := e.ended
+		e.ended = ended
+		switch {
+		case ends:
+		case !given:
+			merged, given = value, true
+		case !selfExecSame(merged, value):
+			return unknown
+		}
+	}
+	return selfExecCallValue{value: merged, ends: !given}
+}
+
+// selfExecSame reports two values the evaluator knows to be the same.
+func selfExecSame(x, y selfExecVal) bool {
+	if x.kind != y.kind {
+		return false
+	}
+	switch x.kind {
+	case selfExecBool:
+		return x.b == y.b
+	case selfExecString_:
+		return x.s.complete && y.s.complete && x.s.s == y.s.s
+	case selfExecInt:
+		return x.n == y.n && x.atLeast == y.atLeast
+	}
+	return false
 }
 
 // std evaluates a call of the standard library the run tells.
@@ -1029,43 +1169,59 @@ func (e *selfExecEval) std(b *selfExecBody, call *ast.CallExpr, name string, i, 
 	return selfExecVal{}
 }
 
-// returnOf walks statements to the return the run takes; ok is false where
-// a branch is not known or the path does not end in a return.
-func (e *selfExecEval) returnOf(b *selfExecBody, list []ast.Stmt, depth int) (*ast.ReturnStmt, bool) {
+// returns walks statements to the returns the run may reach: every branch
+// it may take, each once. falls is set where a path runs off the end; ok is
+// false where a loop, a jump or a statement it cannot tell holds a return.
+// A path that reaches a call that does not return ends there.
+func (e *selfExecEval) returns(b *selfExecBody, list []ast.Stmt) (rets []*ast.ReturnStmt, falls, ok bool) {
 	for _, stmt := range list {
 		switch node := stmt.(type) {
 		case *ast.ReturnStmt:
-			return node, true
+			return append(rets, node), false, true
 		case *ast.BlockStmt:
-			if ret, ok := e.returnOf(b, node.List, depth); ok || selfExecReturnsIn(node) {
-				return ret, ok
-			}
-		case *ast.IfStmt, *ast.SwitchStmt:
-			branch, decided := e.branch(b, node)
-			if !decided {
-				if selfExecReturnsIn(node) {
-					return nil, false
-				}
-				continue
-			}
-			if branch == nil {
-				continue
-			}
-			if ret, ok := e.returnOf(b, selfExecStmts(branch), depth); ok || selfExecReturnsIn(branch) {
-				return ret, ok
+			more, falls, ok := e.returns(b, node.List)
+			rets = append(rets, more...)
+			if !ok || !falls {
+				return rets, false, ok
 			}
 		case *ast.ExprStmt:
 			if patternkit.StmtNoReturn(node, b.info, b.file) != patternkit.CallReturns {
-				e.ended = true
-				return nil, false
+				return rets, false, true
 			}
-		case *ast.ForStmt, *ast.RangeStmt, *ast.SelectStmt, *ast.TypeSwitchStmt, *ast.LabeledStmt, *ast.BranchStmt:
+		case *ast.IfStmt, *ast.SwitchStmt:
+			ended := e.ended
+			e.ended = false
+			branches, none, known := e.branches(b, node)
+			ends := e.ended
+			e.ended = ended
+			if ends {
+				return rets, false, true
+			}
+			if !known {
+				if selfExecReturnsIn(node) {
+					return nil, false, false
+				}
+				continue
+			}
+			goesOn := none
+			for _, branch := range branches {
+				more, falls, ok := e.returns(b, selfExecStmts(branch))
+				if !ok {
+					return nil, false, false
+				}
+				rets = append(rets, more...)
+				goesOn = goesOn || falls
+			}
+			if !goesOn {
+				return rets, false, true
+			}
+		default:
 			if selfExecReturnsIn(node) {
-				return nil, false
+				return nil, false, false
 			}
 		}
 	}
-	return nil, false
+	return rets, true, true
 }
 
 // selfExecReturnsIn reports a node that holds a return or a jump outside a

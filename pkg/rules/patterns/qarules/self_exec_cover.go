@@ -157,11 +157,12 @@ func (a *selfExecAnalysis) mainSets(dir string) []string {
 	return labels
 }
 
-// selfExecRunSets returns the environment variables a run has set to a value.
+// selfExecRunSets returns the environment variables a run has set to a
+// value that is never empty.
 func selfExecRunSets(run *selfExecRun) []string {
 	var labels []string
 	for name, value := range run.env {
-		if !value.complete || value.s != "" {
+		if value.s != "" || value.more {
 			labels = append(labels, name)
 		}
 	}
@@ -169,14 +170,17 @@ func selfExecRunSets(run *selfExecRun) []string {
 	return labels
 }
 
-// setenvName returns the variable a Setenv call sets to a value other than
-// "".
+// setenvName returns the variable a Setenv call sets to a value the
+// analysis proves is not empty: a constant, a value with a part that is
+// never empty, the result of a call checked for its error that is never
+// empty then. A value that may be empty (an unchecked exec.LookPath,
+// another variable of the environment) sets nothing.
 func (a *selfExecAnalysis) setenvName(b *selfExecBody, call *ast.CallExpr) (string, bool) {
 	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != "Setenv" || len(call.Args) != 2 {
 		return "", false
 	}
-	if value, ok := selfExecString(b, call.Args[1]); ok && value == "" {
+	if value := a.str(b, call.Args[1], 0); value.s == "" && !value.more {
 		return "", false
 	}
 	return selfExecString(b, call.Args[0])

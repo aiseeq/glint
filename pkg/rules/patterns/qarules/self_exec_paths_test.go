@@ -949,9 +949,11 @@ func TestMainArgs(t *testing.T) {
 }
 
 // The child of a helper start sees the environment the start gives it: a
-// fallback start in the child is safe where the start sets the variable;
-// a start that names its whole environment leaves out what the parent has;
-// in the child the branch of the parent is not taken.
+// start that names its whole environment leaves out what the parent has;
+// in the child the branch of the parent is not taken. The helper branch
+// itself proves nothing for go test, which may have its variable set: the
+// fallback start in it is reported whether the start of the child sets
+// the variable or not.
 func TestSelfExecInTestRule_ChildEnvironment(t *testing.T) {
 	tool := `package app
 
@@ -1057,7 +1059,7 @@ func TestMain(m *testing.M) {
 func TestStart(t *testing.T) { _ = Start(t.Name()) }
 `
 	selfExecCases(t, map[string]map[string]string{
-		"set by the start":      {"app/app.go": tool, "app/app_test.go": helper(`append(os.Environ(), "APP_CHILD=1", "APP_TOOL=/bin/true")`)},
+		"set by the start":      {"app/app.go": strings.Replace(tool, `"apply").Run()`, `"apply").Run() // boom`, 1), "app/app_test.go": helper(`append(os.Environ(), "APP_CHILD=1", "APP_TOOL=/bin/true")`)},
 		"not set by the start":  {"app/app.go": strings.Replace(tool, `"apply").Run()`, `"apply").Run() // boom`, 1), "app/app_test.go": helper(`append(os.Environ(), "APP_CHILD=1")`)},
 		"whole environment":     {"app/app.go": sync, "app/app_test.go": homeMain},
 		"inherited environment": {"app/app.go": openSync, "app/app_test.go": homeMain},
@@ -1665,7 +1667,9 @@ func run(args []string) error {
 
 // A start reached only on the branch of TestMain that a variable takes
 // passes that variable on to its child when it passes the environment on:
-// the child takes the same branch and does not run the tests.
+// the child takes the same branch and does not run the tests, but starts
+// the next child on it, which starts the next in turn. go test may have
+// the variable set, so the branch is reached.
 func TestSelfExecInTestRule_BranchVariableInherited(t *testing.T) {
 	main := `package main
 
@@ -1733,7 +1737,7 @@ func TestServe(t *testing.T) {
 }
 `
 	selfExecCases(t, map[string]map[string]string{
-		"passed on": {"cmd/app/main.go": app("withoutSocket(os.Environ())", ""), "cmd/app/main_test.go": main, "cmd/app/serve_test.go": test},
+		"passed on": {"cmd/app/main.go": app("withoutSocket(os.Environ())", " // boom"), "cmd/app/main_test.go": main, "cmd/app/serve_test.go": test},
 		"dropped":   {"cmd/app/main.go": app(`[]string{"APP_SOCKET=x"}`, " // boom"), "cmd/app/main_test.go": main, "cmd/app/serve_test.go": test},
 		"unset on the way": {"cmd/app/main.go": app("withoutSocket(os.Environ())", " // boom"), "cmd/app/serve_test.go": test,
 			"cmd/app/main_test.go": strings.Replace(main, "\t\tmain()", "\t\t_ = os.Unsetenv(\"APP_AS_MAIN\")\n\t\tmain()", 1)},

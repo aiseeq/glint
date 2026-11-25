@@ -357,7 +357,7 @@ func (a *selfExecAnalysis) identStr(b *selfExecBody, id *ast.Ident, depth int) s
 	if a.isParam(b, id, key) {
 		values, ok := a.paramValues(b, key)
 		if !ok {
-			return a.paramStr(b, key, depth)
+			return a.paramStr(b, key)
 		}
 		return selfExecMergeValues(values)
 	}
@@ -522,7 +522,9 @@ func (a *selfExecAnalysis) bind(b *selfExecBody, known map[string][]string) func
 	}
 	old, had := a.bound[b]
 	a.bound[b] = known
+	a.epoch++
 	return func() {
+		a.epoch++
 		if had {
 			a.bound[b] = old
 		} else {
@@ -771,11 +773,18 @@ func (a *selfExecAnalysis) guardedRun(b *selfExecBody, mode string, pos token.Po
 }
 
 // paramStr says what a parameter may hold from what every call of its
-// function passes it, where the function is used only in calls.
-func (a *selfExecAnalysis) paramStr(b *selfExecBody, key any, depth int) selfExecStr {
+// function passes it, where the function is used only in calls. It is the
+// summary of the parameter: found once while the bindings stay as they
+// are, each argument read afresh in its own body; a parameter met again
+// while it is being found (a cycle of calls) holds what the analysis does
+// not know.
+func (a *selfExecAnalysis) paramStr(b *selfExecBody, key any) selfExecStr {
 	param := selfExecParam{body: b, key: key}
+	if memo, ok := a.paramStrs[param]; ok && memo.epoch == a.epoch {
+		return memo.s
+	}
 	i := slices.Index(b.params, key)
-	if i < 0 || b.decl == nil || b.decl.Recv != nil || (b.variadic && i == len(b.params)-1) || a.following[param] || depth > 6 {
+	if i < 0 || b.decl == nil || b.decl.Recv != nil || (b.variadic && i == len(b.params)-1) || a.following[param] {
 		return selfExecStr{}
 	}
 	sites := a.callSitesOf(b)
@@ -786,25 +795,35 @@ func (a *selfExecAnalysis) paramStr(b *selfExecBody, key any, depth int) selfExe
 		a.following = map[selfExecParam]bool{}
 	}
 	a.following[param] = true
-	defer delete(a.following, param)
 	var merged selfExecStr
 	for n, site := range sites {
 		if site.call.Ellipsis.IsValid() || i >= len(site.call.Args) {
-			return selfExecStr{}
+			merged = selfExecStr{}
+			break
 		}
-		s := a.str(site.body, site.call.Args[i], depth+1)
+		s := a.str(site.body, site.call.Args[i], 0)
 		if n == 0 {
 			merged = s
 		} else {
 			merged = selfExecMerge(merged, s)
 		}
 	}
+	delete(a.following, param)
+	a.paramStrs[param] = selfExecParamStr{epoch: a.epoch, s: merged}
 	return merged
 }
 
+// selfExecParamStr is the summary paramStr keeps, valid while the bindings
+// it was found with stay.
+type selfExecParamStr struct {
+	epoch int
+	s     selfExecStr
+}
+
 // checkedSuccess reports the first variable of an assignment from a call
-// of a function whose string result is never empty where its error is nil,
-// when the statement after it leaves on the error the second one holds.
+// whose string result is never empty where its error is nil (os.MkdirTemp,
+// exec.LookPath, a module function that proves it), when the statement
+// after it leaves on the error the second one holds.
 func (a *selfExecAnalysis) checkedSuccess(b *selfExecBody, at selfExecAssignAt) bool {
 	stmt, ok := at.assign.decl.(*ast.AssignStmt)
 	if !ok || at.index != 0 || len(stmt.Lhs) != 2 || len(stmt.Rhs) != 1 {
@@ -820,6 +839,9 @@ func (a *selfExecAnalysis) checkedSuccess(b *selfExecBody, at selfExecAssignAt) 
 		return false
 	}
 	if name, ok := patternkit.PackageFuncName(b.file, b.info, call, "os"); ok && name == "MkdirTemp" {
+		return true
+	}
+	if name, ok := patternkit.PackageFuncName(b.file, b.info, call, "os/exec"); ok && name == "LookPath" {
 		return true
 	}
 	callees := a.resolve(b, call)

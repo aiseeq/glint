@@ -289,8 +289,8 @@ type selfExecAnalysis struct {
 
 	pointsOf map[*selfExecBody][]*selfExecPoint
 	forwards map[selfExecForward]int
+	inner    map[selfExecForward]*selfExecInner
 	runs     map[string]*selfExecRun
-	markers  map[string]bool
 	spans    map[selfExecModeKey][][2]token.Pos
 	setterOf map[*selfExecBody][]selfExecSetter
 	setsOf   map[*selfExecBody][]string
@@ -299,6 +299,10 @@ type selfExecAnalysis struct {
 	callSites  map[*selfExecBody][]selfExecCallSite
 	escaped    map[*selfExecBody]bool
 	paramConst map[selfExecParam]selfExecParamValue
+	// paramStrs holds the summaries of the string parameters, valid in the
+	// epoch of the bindings they were found in; epoch moves on each bind.
+	paramStrs map[selfExecParam]selfExecParamStr
+	epoch     int
 	// following holds the parameters whose calls are being read.
 	following map[selfExecParam]bool
 	// succeeds holds whether the string result of a function is never empty
@@ -337,6 +341,8 @@ func newSelfExecAnalysis(ctx *core.GoProjectContext, decls map[*types.Func]patte
 		sinks:      map[*selfExecBody]map[int]bool{},
 		pointsOf:   map[*selfExecBody][]*selfExecPoint{},
 		forwards:   map[selfExecForward]int{},
+		inner:      map[selfExecForward]*selfExecInner{},
+		paramStrs:  map[selfExecParam]selfExecParamStr{},
 		runs:       map[string]*selfExecRun{},
 		spans:      map[selfExecModeKey][][2]token.Pos{},
 		setterOf:   map[*selfExecBody][]selfExecSetter{},
@@ -1019,18 +1025,45 @@ func (a *selfExecAnalysis) forwarded(call *ast.CallExpr, callee *selfExecBody, i
 	}
 	// The one launch of the launcher that starts the path parameter, read
 	// with the parameters the call gives it.
-	var found []selfExecLaunch
-	a.eachLaunchArg(callee, func(arg ast.Expr, _ string, _ ast.Node, launch func() selfExecLaunch) {
-		if slices.Contains(a.origin(callee, arg).params, i) {
-			found = append(found, launch())
-		}
-	})
-	if len(found) != 1 || !found[0].known || found[0].in != nil {
+	launch, ok := a.innerLaunch(callee, i)
+	if !ok {
 		return selfExecLaunch{}
 	}
-	launch := found[0]
 	launch.in, launch.via = callee, call
 	return launch
+}
+
+// innerLaunch is the summary of a launcher: the one launch of its own that
+// starts the i-th parameter, found once per launcher and parameter. A
+// launcher met again while its summary is being found (a call cycle: a
+// retry that calls itself, two launchers that call each other) has none.
+func (a *selfExecAnalysis) innerLaunch(callee *selfExecBody, i int) (selfExecLaunch, bool) {
+	key := selfExecForward{callee, i}
+	if summary, ok := a.inner[key]; ok {
+		return summary.launch, summary.known
+	}
+	a.inner[key] = &selfExecInner{}
+	var found []func() selfExecLaunch
+	a.eachLaunchArg(callee, func(arg ast.Expr, _ string, _ ast.Node, launch func() selfExecLaunch) {
+		if slices.Contains(a.origin(callee, arg).params, i) {
+			found = append(found, launch)
+		}
+	})
+	summary := &selfExecInner{}
+	if len(found) == 1 {
+		summary.launch = found[0]()
+		summary.known = summary.launch.known && summary.launch.in == nil
+	}
+	a.inner[key] = summary
+	return summary.launch, summary.known
+}
+
+// selfExecInner is the summary innerLaunch keeps: known when the launcher
+// has exactly one launch of the parameter, of its own; while it is being
+// found, it is not known.
+type selfExecInner struct {
+	launch selfExecLaunch
+	known  bool
 }
 
 type selfExecForward struct {
@@ -1048,7 +1081,9 @@ func (a *selfExecAnalysis) forwardsAt(b *selfExecBody, i int) bool {
 	}
 	a.forwards[key] = 1
 	forwards := false
-	if b.variadic && i == len(b.params)-2 && b.params[i+1] != nil {
+	// The rest it forwards is the one the call gives only where the body
+	// neither assigns nor appends to it.
+	if b.variadic && i == len(b.params)-2 && b.params[i+1] != nil && !a.reassigned(b, b.params[i+1]) {
 		a.eachLaunchArg(b, func(arg ast.Expr, _ string, at ast.Node, launch func() selfExecLaunch) {
 			l := launch()
 			if !slices.Contains(a.origin(b, arg).params, i) || !l.known || l.argv || !l.ellipsis || len(l.args) != 1 || l.envList != nil {
@@ -1063,6 +1098,12 @@ func (a *selfExecAnalysis) forwardsAt(b *selfExecBody, i int) bool {
 		a.forwards[key] = 2
 	}
 	return forwards
+}
+
+// reassigned reports a variable a body assigns or appends to.
+func (a *selfExecAnalysis) reassigned(b *selfExecBody, key any) bool {
+	_, _, count := a.assignedAt(b, key)
+	return count > 0 || a.appended(b, key)
 }
 
 // setsEnv reports a launch whose command gets an Env.
