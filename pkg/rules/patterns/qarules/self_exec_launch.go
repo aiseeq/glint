@@ -109,11 +109,12 @@ func (r *SelfExecInTestRule) violation(ctx *core.GoProjectContext, found *selfEx
 
 func (r *SelfExecInTestRule) violationIn(fileCtx *core.FileContext, found *selfExecFinding) *core.Violation {
 	line := fileCtx.LineFor(found.point.call)
+	reason, suggestion := found.reason(fileCtx)
 	v := r.CreateViolation(fileCtx.RelPath, line, fmt.Sprintf(
-		"%s starts its own test binary: %s passes the process's own executable to %s, reached through %s — under go test that binary runs every test again, and each copy starts the next",
-		found.chain[0], found.chain[len(found.chain)-1], found.point.via, strings.Join(found.chain, " → ")))
+		"%s starts its own test binary: %s passes the process's own executable to %s, reached through %s — %s",
+		found.chain[0], found.chain[len(found.chain)-1], found.point.via, strings.Join(found.chain, " → "), reason))
 	v.WithCode(fileCtx.GetLine(line))
-	v.WithSuggestion("Refuse the launch when testing.Testing() is true, let the tests replace the launcher, or start a helper process: -test.run=TestHelperProcess in its arguments, or a TestMain that answers the child by its argument or environment before m.Run")
+	v.WithSuggestion(suggestion)
 	v.WithContext("test", found.chain[0])
 	return v
 }
@@ -266,6 +267,14 @@ type selfExecLaunch struct {
 type selfExecFinding struct {
 	point *selfExecPoint
 	chain []string
+	// answer is the branch that answers the child without ending it;
+	// pinned the tests -test.run=pattern runs in the child.
+	answer  *selfExecAnswer
+	pattern string
+	pinned  []string
+	// beforeAnswer marks a child the TestMain or an init answers after it
+	// reaches the launch.
+	beforeAnswer bool
 }
 
 type selfExecAnalysis struct {
