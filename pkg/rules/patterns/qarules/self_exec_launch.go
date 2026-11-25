@@ -271,8 +271,6 @@ type selfExecFinding struct {
 	// pattern the -test.run the launch pins the child with.
 	answer  *selfExecAnswer
 	pattern string
-	// reads marks a test binary that reads what the launch passes.
-	reads bool
 	// beforeAnswer marks a child the TestMain or an init answers after it
 	// reaches the launch.
 	beforeAnswer bool
@@ -286,6 +284,9 @@ type selfExecAnalysis struct {
 	pkgLevel []*selfExecBody
 	index    *selfExecIndex
 	resolved map[*ast.CallExpr][]*selfExecBody
+	// readsOf holds the reads of the test binary of a directory, found on
+	// first use: see readsBeside.
+	readsOf map[string]map[string][]token.Pos
 
 	// selfVars are the package variables that hold the own executable: a
 	// *types.Var, or a selfExecTestVar of a test file.
@@ -346,6 +347,7 @@ func newSelfExecAnalysis(ctx *core.GoProjectContext, decls map[*types.Func]patte
 		ctx: ctx, decls: decls,
 		typed:      map[*types.Func]*selfExecBody{},
 		resolved:   map[*ast.CallExpr][]*selfExecBody{},
+		readsOf:    map[string]map[string][]token.Pos{},
 		selfVars:   map[any]bool{},
 		selfResult: map[*selfExecBody][]string{},
 		sinks:      map[*selfExecBody]map[int]bool{},

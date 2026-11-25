@@ -2,6 +2,8 @@ package qarules
 
 import (
 	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -95,8 +97,8 @@ func TestRelayLoop(t *testing.T) {
 }
 `)
 	assert.Equal(t, "TestRelayLoop starts its own test binary: TestRelayLoop passes the process's own executable to exec.Command, reached through TestRelayLoop"+
-		" — -test.run=^TestRelayLoop$ runs TestRelayLoop in the child, and nothing in the test binary reads what the launch passes: TestRelayLoop reaches this launch again, and each copy starts the next", message)
-	assert.Equal(t, "Answer the child before the launch: set a variable in the command's Env and end the test with os.Exit or a return when it is set, or start a TestHelperProcess that does not launch", suggestion)
+		" — -test.run=^TestRelayLoop$ runs TestRelayLoop in the child, and it reaches this launch again, and each copy starts the next", message)
+	assert.Equal(t, "Answer the child and end the test before the launch: a branch on what the launch passes that returns or calls os.Exit, or a TestHelperProcess that does not launch", suggestion)
 }
 
 // A launch with no -test.run and no answer keeps the message of a run of
@@ -244,8 +246,8 @@ func TestRelayOnce(t *testing.T) {
 	assert.Contains(t, message, " — under go test that binary runs every test again, and each copy starts the next")
 }
 
-// A pattern that names more than one test, in a binary that reads nothing
-// the launch passes: the message names the test that starts the child.
+// A pattern that names more than one test: the message names the test that
+// starts the child.
 func TestSelfExecInTestRule_MessagePinnedRunOfTwoTests(t *testing.T) {
 	message, suggestion := selfExecMessage(t, `package relay
 
@@ -263,8 +265,8 @@ func TestRelayPair(t *testing.T) {
 
 func TestRelayPairSlow(t *testing.T) {}
 `)
-	assert.Contains(t, message, " — -test.run=^TestRelayPair runs TestRelayPair in the child, and nothing in the test binary reads what the launch passes")
-	assert.Contains(t, suggestion, "set a variable in the command's Env")
+	assert.Contains(t, message, " — -test.run=^TestRelayPair runs TestRelayPair in the child, and it reaches this launch again")
+	assert.Contains(t, suggestion, "Answer the child and end the test before the launch")
 }
 
 // TestMain starts the child before the branch that answers it: the child
@@ -587,6 +589,34 @@ func TestChild(t *testing.T) {
 			reason:     "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next",
 			suggestion: neutral,
 		},
+		"an answer by what os.Environ holds, which the rule does not read": {
+			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func TestChild(t *testing.T) {
+	for _, kv := range os.Environ() {
+		if kv == "RELAY_HELPER=1" {
+			println("serve")
+		}
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`)},
+			reason:     "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
+		"an answer in an init of a package the tests import": {
+			files: map[string]string{
+				"cfg/cfg.go":     "package cfg\n\nimport \"os\"\n\nvar Child bool\n\nfunc init() {\n\tif os.Getenv(\"RELAY_HELPER\") == \"1\" {\n\t\tChild = true\n\t}\n}\n\nfunc Name() string { return \"cfg\" }\n",
+				"relay/relay.go": "package relay\n\nimport \"example.com/rulestest/cfg\"\n\nfunc Serve() string { return cfg.Name() }\n",
+				"relay/relay_test.go": selfExecRelayTest(`func TestChild(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`)},
+			reason:     "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
 		"an init branch that only sets up, and a TestMain that starts the child before its answer": {
 			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func init() {
 	if os.Getenv("RELAY_CHILD") != "" {
@@ -696,6 +726,9 @@ func TestSelfExecInTestRule_MessageNamesTheOneReadThatCannotEnd(t *testing.T) {
 		"a read of a name it cannot tell": {files: map[string]string{
 			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc envOf(name string) string { return os.Getenv(name) }\n"),
 		}, reason: neutral},
+		"a read of a name built at run time": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc envOf(name string) string { return os.Getenv(\"RELAY_\" + name) }\n"),
+		}, reason: neutral},
 		"a read of the arguments": {files: map[string]string{
 			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc argc() int { return len(os.Args) }\n"),
 		}, reason: neutral},
@@ -745,4 +778,139 @@ func Launch(stop func()) {
 	})
 	require.Len(t, violations, 1)
 	assert.Contains(t, violations[0].Message, " — -test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again")
+}
+
+// A call in a branch may end the child unless it is proven to return: a
+// function of the module whose body returns, a builtin, a conversion, or a
+// function or method of the standard library that does not end the process.
+// A function of another module, a method on a value whose type the rule does
+// not tell, a method of an interface, a function value may: the branch is
+// not named, in a test file and in the package code.
+func TestSelfExecInTestRule_MessageBranchCallsOnlyWhatReturns(t *testing.T) {
+	ext := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(ext, "go.mod"), []byte("module example.com/ext\n\ngo 1.24\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ext, "ext.go"), []byte(`package ext
+
+import "os"
+
+func MaybeExit() {
+	if os.Getenv("RELAY_STAY") == "" {
+		os.Exit(0)
+	}
+}
+
+type Server struct{}
+
+func New() *Server { return &Server{} }
+
+func (*Server) Run() { os.Exit(0) }
+`), 0o644))
+	goMod := "module example.com/rulestest\n\ngo 1.24\n\nrequire example.com/ext v0.0.0\n\nreplace example.com/ext => " + ext + "\n"
+	const neutral = "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next"
+	inTest := func(pre, call string) map[string]string {
+		return map[string]string{"relay/relay.go": "package relay\n", "relay/relay_test.go": `package relay
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"testing"
+
+	"example.com/ext"
+	"example.com/rulestest/mode"
+)
+
+var _, _, _ = ext.MaybeExit, mode.Serve, fmt.Sprint
+
+var srv = ext.New()
+
+type relayLocal struct{}
+
+func (relayLocal) Run() {}
+
+var stopRelay = func() { os.Exit(0) }
+
+func countdown(n int) {
+	if n > 0 {
+		countdown(n - 1)
+	}
+}
+
+func TestChild(t *testing.T) {
+	` + pre + `
+	if os.Getenv("RELAY_HELPER") == "1" {
+		` + call + `
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`}
+	}
+	inPackage := func(pre, call string) map[string]string {
+		return map[string]string{"relay/relay_test.go": "package relay\n\nimport \"testing\"\n\nfunc TestChild(t *testing.T) { Launch() }\n", "relay/relay.go": `package relay
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+
+	"example.com/ext"
+	"example.com/rulestest/mode"
+)
+
+var _, _, _, _, _ = ext.MaybeExit, fmt.Sprint, io.EOF, strings.ToLower, mode.Serve
+
+func Launch() {
+	` + pre + `
+	if os.Getenv("RELAY_HELPER") == "1" {
+		` + call + `
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`}
+	}
+	cases := map[string]struct {
+		files map[string]string
+		named bool
+	}{
+		"test file: a function of another module":                        {files: inTest("", "ext.MaybeExit()")},
+		"test file: a method of a package variable of another module":    {files: inTest("", "srv.Run()")},
+		"test file: a method of a local named like a standard import":    {files: inTest("fmt := ext.New()", "fmt.Run()")},
+		"test file: a local function named like a builtin":               {files: inTest("len := func() { os.Exit(0) }", "len()")},
+		"test file: a package variable of a function type":               {files: inTest("", "stopRelay()")},
+		"test file: a function of a package of the module":               {files: inTest("", "mode.Serve()"), named: true},
+		"test file: a method of a type of the module":                    {files: inTest("", "mode.M{}.Run()"), named: true},
+		"test file: a method of a type of the test file":                 {files: inTest("", "relayLocal{}.Run()"), named: true},
+		"test file: a recursive function of the module":                  {files: inTest("", "countdown(3)"), named: true},
+		"test file: a function literal":                                  {files: inTest("", "func() { t.Log(\"child\") }()"), named: true},
+		"test file: the standard library, builtins and conversions":      {files: inTest("", "fmt.Println(len(os.Args), []byte(\"x\"), string(rune(65)))"), named: true},
+		"test file: a method of a testing value":                         {files: inTest("", "t.Log(\"child\")"), named: true},
+		"package code: a function of another module":                     {files: inPackage("", "ext.MaybeExit()")},
+		"package code: a method of a value of another module":            {files: inPackage("srv := ext.New()", "srv.Run()")},
+		"package code: a method of an interface of the standard library": {files: inPackage("var w io.Writer = os.Stdout", "_, _ = w.Write(nil)")},
+		"package code: a function value":                                 {files: inPackage("f := fmt.Println", "f()")},
+		"package code: a method of a type of the module":                 {files: inPackage("", "mode.M{}.Run()"), named: true},
+		"package code: a method of a type of the standard library":       {files: inPackage("var sb strings.Builder", "sb.WriteString(\"child\")"), named: true},
+		"package code: a builtin":                                        {files: inPackage("", "_ = len(os.Args)"), named: true},
+		"package code: the standard library, builtins and conversions":   {files: inPackage("", "fmt.Println(len(os.Args), []byte(\"x\"), string(rune(65)))"), named: true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			files := map[string]string{"go.mod": goMod, "mode/mode.go": "package mode\n\nfunc Serve() {}\n\ntype M struct{}\n\nfunc (M) Run() {}\n"}
+			maps.Copy(files, c.files)
+			violations := rulestest.RunRuleOnFiles(t, NewSelfExecInTestRule(), files)
+			require.Len(t, violations, 1)
+			_, reason, _ := strings.Cut(violations[0].Message, " — ")
+			if c.named {
+				assert.True(t, strings.HasPrefix(reason, "the branch on RELAY_HELPER at line "), reason)
+			} else {
+				assert.Equal(t, neutral, reason)
+			}
+		})
+	}
 }

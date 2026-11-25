@@ -26,10 +26,8 @@ import (
 //     nothing in it may end the child; and only where it is the one place
 //     of the test binary that reads what the launch passes, so no other
 //     answer is missed;
-//   - a launch pinned by -test.run says which test the child runs, and that
-//     nothing answers the child only where nothing in the test binary reads
-//     the variables the launch knows or the arguments;
-//   - otherwise the message of a run of every test stays.
+//   - otherwise a launch pinned by -test.run says which test the child runs,
+//     and one that is not keeps the message of a run of every test.
 //
 // What the rule reports does not depend on this: it is told only for the
 // finding.
@@ -66,10 +64,7 @@ func (a *selfExecAnalysis) describe(found *selfExecFinding, dir string, run *sel
 	if helper && known {
 		found.pattern = pattern
 	}
-	reads := a.launchReads(dir, run)
-	found.reads = len(reads) > 0
-	answer := a.answerBranch(dir, run, bodies, found.point)
-	if answer != nil && !slices.ContainsFunc(reads, func(pos token.Pos) bool { return pos < answer.stmt.Pos() || pos >= answer.stmt.End() }) {
+	if answer := a.answerBranch(dir, run, bodies, found.point); answer != nil && !a.readsBeside(dir, run, answer.stmt) {
 		found.answer = answer
 	}
 }
@@ -164,8 +159,7 @@ func (a *selfExecAnalysis) answerIn(child, top *selfExecEval, b *selfExecBody, m
 }
 
 // mayStop reports a node with a call that may end the process or the test:
-// os.Exit, log.Fatal, panic, t.Fatal and their kin, a call of a function
-// value, or a call of a module function that may.
+// any call but one proven to return.
 func (a *selfExecAnalysis) mayStop(b *selfExecBody, node ast.Node, depth int, seen map[*selfExecBody]bool) bool {
 	stops := false
 	ast.Inspect(node, func(n ast.Node) bool {
@@ -173,45 +167,127 @@ func (a *selfExecAnalysis) mayStop(b *selfExecBody, node ast.Node, depth int, se
 		if stops || !ok {
 			return !stops
 		}
-		if patternkit.StmtNoReturn(&ast.ExprStmt{X: call}, b.info, b.file) != patternkit.CallReturns || selfExecEndsTest(b, call) || selfExecFuncValue(b, call) {
-			stops = true
-			return false
-		}
-		for _, callee := range a.resolve(b, call) {
-			if seen[callee] || callee.decl == nil || callee.decl.Body == nil {
-				continue
-			}
-			seen[callee] = true
-			if depth >= 4 || a.mayStop(callee, callee.decl.Body, depth+1, seen) {
-				stops = true
-				return false
-			}
-		}
-		return true
+		stops = !a.callReturns(b, call, depth, seen)
+		return !stops
 	})
 	return stops
 }
 
-// selfExecFuncValue reports a call of a function value: a variable or a
-// parameter, whose function the analysis does not follow.
-func selfExecFuncValue(b *selfExecBody, call *ast.CallExpr) bool {
-	id, ok := ast.Unparen(call.Fun).(*ast.Ident)
-	if !ok {
+// callReturns reports a call proven to return: of a function of the module
+// whose body returns, of a function literal, whose body is walked with the
+// node, or of a builtin, a conversion, or a function or method of the
+// standard library that does not end the process or the test.
+func (a *selfExecAnalysis) callReturns(b *selfExecBody, call *ast.CallExpr, depth int, seen map[*selfExecBody]bool) bool {
+	if patternkit.StmtNoReturn(&ast.ExprStmt{X: call}, b.info, b.file) != patternkit.CallReturns || selfExecEndsTest(b, call) {
 		return false
 	}
-	if b.info != nil {
-		_, isVar := b.info.Uses[id].(*types.Var)
-		return isVar
+	if _, ok := ast.Unparen(call.Fun).(*ast.FuncLit); ok {
+		return true
 	}
-	return b.decl != nil && b.declaresAt(id.Name, id.Pos())
+	callees, proven := a.provenCallees(b, call)
+	if !proven {
+		return a.stdCall(b, call)
+	}
+	for _, callee := range callees {
+		if seen[callee] {
+			continue
+		}
+		seen[callee] = true
+		if depth >= 4 || callee.decl == nil || callee.decl.Body == nil || a.mayStop(callee, callee.decl.Body, depth+1, seen) {
+			return false
+		}
+	}
+	return true
 }
 
-// launchReads returns where the test binary of a directory reads what a
-// child may be answered by: a variable of the run of the child, an
-// environment variable it cannot name, an argument (os.Args past the program
-// name, the flag package). The binary is the package, its test files and the
-// functions of the module they call.
-func (a *selfExecAnalysis) launchReads(dir string, run *selfExecRun) []token.Pos {
+// provenCallees returns the module functions a call runs, where they are
+// proven: by the object of the callee with type information; in a test
+// file, a function by its name, and a method by the type of its receiver
+// the test file tells, not by its name alone.
+func (a *selfExecAnalysis) provenCallees(b *selfExecBody, call *ast.CallExpr) ([]*selfExecBody, bool) {
+	callees := a.resolve(b, call)
+	if len(callees) == 0 {
+		return nil, false
+	}
+	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if b.info != nil || !ok {
+		return callees, true
+	}
+	if q, ok := sel.X.(*ast.Ident); ok && !b.declaresAt(q.Name, q.Pos()) {
+		if _, ok := a.index.importPath(b.file, q.Name); ok {
+			return callees, true
+		}
+	}
+	kind := a.index.receiverType(b, sel.X).kind
+	return callees, kind == recvModule || kind == recvTestLocal
+}
+
+// stdCall reports a call of a builtin, a conversion, or a function
+// or a method of the standard library: by the object of the callee with type
+// information, a method of an interface aside; in a test file, a builtin
+// name, a type literal, a member of an imported package of the standard
+// library, or a method of a testing value.
+func (a *selfExecAnalysis) stdCall(b *selfExecBody, call *ast.CallExpr) bool {
+	fun := ast.Unparen(call.Fun)
+	if b.info != nil {
+		if tv, ok := b.info.Types[fun]; ok && tv.IsType() {
+			return true
+		}
+		if id, ok := fun.(*ast.Ident); ok {
+			if _, builtin := b.info.Uses[id].(*types.Builtin); builtin {
+				return true
+			}
+		}
+		fn := patternkit.StaticFunc(b.info, call)
+		if fn == nil || fn.Pkg() == nil || !patternkit.StdlibPath(fn.Pkg().Path()) {
+			return false
+		}
+		recv := fn.Signature().Recv()
+		return recv == nil || !types.IsInterface(recv.Type())
+	}
+	switch fun := fun.(type) {
+	case *ast.Ident:
+		return !b.declaresAt(fun.Name, fun.Pos()) && types.Universe.Lookup(fun.Name) != nil
+	case *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType:
+		return true
+	case *ast.SelectorExpr:
+		if q, ok := fun.X.(*ast.Ident); ok && !b.declaresAt(q.Name, q.Pos()) {
+			if path, ok := a.index.importPath(b.file, q.Name); ok {
+				return patternkit.StdlibPath(path)
+			}
+		}
+		return selfExecTestingValue(b, fun.X)
+	}
+	return false
+}
+
+// readsBeside reports whether the test binary of a directory reads, outside
+// the statement, what a child of the run may be answered by: a variable of
+// the run, an environment variable it cannot name, an argument (os.Args past
+// the program name, the flag package).
+func (a *selfExecAnalysis) readsBeside(dir string, run *selfExecRun, stmt ast.Stmt) bool {
+	reads, ok := a.readsOf[dir]
+	if !ok {
+		reads = a.binaryReads(dir)
+		a.readsOf[dir] = reads
+	}
+	outside := func(pos token.Pos) bool { return pos < stmt.Pos() || pos >= stmt.End() }
+	if slices.ContainsFunc(reads[""], outside) {
+		return true
+	}
+	for env := range run.env {
+		if slices.ContainsFunc(reads[env], outside) {
+			return true
+		}
+	}
+	return false
+}
+
+// binaryReads returns where the test binary of a directory - the package,
+// its test files and the functions of the module they call - reads what a
+// child may be answered by, by the environment variable it names, under ""
+// where it reads any: an argument, or a variable it cannot name.
+func (a *selfExecAnalysis) binaryReads(dir string) map[string][]token.Pos {
 	pkg := a.index.pkgOfDir[dir]
 	var queue []*selfExecBody
 	seen := map[*selfExecBody]bool{}
@@ -221,7 +297,7 @@ func (a *selfExecAnalysis) launchReads(dir string, run *selfExecRun) []token.Pos
 			queue = append(queue, b)
 		}
 	}
-	var reads []token.Pos
+	reads := map[string][]token.Pos{}
 	for len(queue) > 0 {
 		b := queue[0]
 		queue = queue[1:]
@@ -237,10 +313,26 @@ func (a *selfExecAnalysis) launchReads(dir string, run *selfExecRun) []token.Pos
 			}
 		}
 		for _, node := range nodes {
-			reads = append(reads, a.readsIn(b, node, run)...)
 			ast.Inspect(node, func(n ast.Node) bool {
-				if call, ok := n.(*ast.CallExpr); ok {
-					for _, callee := range a.resolve(b, call) {
+				switch x := n.(type) {
+				case *ast.IndexExpr:
+					// os.Args[0] is the program name the launch itself passes on.
+					if selfExecOSArgs(b, x.X) && selfExecIntIs(x.Index, 0) {
+						return false
+					}
+				case *ast.SelectorExpr:
+					if selfExecOSArgs(b, x) || selfExecPackageMember(b, x, "flag") {
+						reads[""] = append(reads[""], x.Pos())
+					}
+				case *ast.CallExpr:
+					if name, ok := patternkit.PackageFuncName(b.file, b.info, x, "os"); ok && (name == "Getenv" || name == "LookupEnv") {
+						env, named := selfExecEnvRead(b, x)
+						if !named {
+							env = ""
+						}
+						reads[env] = append(reads[env], x.Pos())
+					}
+					for _, callee := range a.resolve(b, x) {
 						if !seen[callee] {
 							seen[callee] = true
 							queue = append(queue, callee)
@@ -251,35 +343,6 @@ func (a *selfExecAnalysis) launchReads(dir string, run *selfExecRun) []token.Pos
 			})
 		}
 	}
-	return reads
-}
-
-// readsIn returns the reads of a node: see launchReads.
-func (a *selfExecAnalysis) readsIn(b *selfExecBody, node ast.Node, run *selfExecRun) []token.Pos {
-	var reads []token.Pos
-	ast.Inspect(node, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.IndexExpr:
-			// os.Args[0] is the program name the launch itself passes on.
-			if selfExecOSArgs(b, x.X) && selfExecIntIs(x.Index, 0) {
-				return false
-			}
-		case *ast.SelectorExpr:
-			if selfExecOSArgs(b, x) || selfExecPackageMember(b, x, "flag") {
-				reads = append(reads, x.Pos())
-			}
-		case *ast.CallExpr:
-			name, ok := patternkit.PackageFuncName(b.file, b.info, x, "os")
-			if !ok || (name != "Getenv" && name != "LookupEnv") {
-				return true
-			}
-			env, named := selfExecEnvRead(b, x)
-			if _, known := run.env[env]; !named || known {
-				reads = append(reads, x.Pos())
-			}
-		}
-		return true
-	})
 	return reads
 }
 
@@ -326,12 +389,7 @@ func (found *selfExecFinding) reason(fileCtx *core.FileContext) (reason, suggest
 		return found.answerReason(fileCtx, answer)
 	}
 	if found.pattern != "" {
-		test := found.chain[0]
-		if !found.reads {
-			return fmt.Sprintf("-test.run=%s runs %s in the child, and nothing in the test binary reads what the launch passes: %s reaches this launch again, and each copy starts the next", found.pattern, test, test),
-				"Answer the child before the launch: set a variable in the command's Env and end the test with os.Exit or a return when it is set, or start a TestHelperProcess that does not launch"
-		}
-		return fmt.Sprintf("-test.run=%s runs %s in the child, and it reaches this launch again, and each copy starts the next", found.pattern, test),
+		return fmt.Sprintf("-test.run=%s runs %s in the child, and it reaches this launch again, and each copy starts the next", found.pattern, found.chain[0]),
 			"Answer the child and end the test before the launch: a branch on what the launch passes that returns or calls os.Exit, or a TestHelperProcess that does not launch"
 	}
 	return "under go test that binary runs every test again, and each copy starts the next",
