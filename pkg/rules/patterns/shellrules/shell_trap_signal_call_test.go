@@ -1211,6 +1211,14 @@ inner
 stop_term() { trap - TERM; }
 '' 2>/dev/null
 `,
+		"cycle_entered_only_in_background.sh": `#!/bin/bash
+a() { trap 'echo bye' TERM; stop_term; while poll-once; do sleep 5; done; b; } # want
+b() { c; }
+c() { a; }
+a &
+stop_term() { trap - TERM; }
+wait
+`,
 		"cycle_call_before_definition.sh": `#!/bin/bash
 outer() { trap 'echo int' INT; trap - INT; inner; }
 inner() { trap 'echo bye' TERM; stop_term; while poll-once; do sleep 5; done; mid; } # want
