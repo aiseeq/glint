@@ -715,7 +715,8 @@ func TestKeepsOwnValues(t *testing.T) {
 // what the other reads, both write one value, or one keeps its place, on
 // either side; a field is read and written with its variable, two fields of
 // one variable are apart, two updates of one value of one kind may trade
-// places, and two statements that stand for one statement of the library
+// places, also when a statement holds one and does nothing else to the
+// value, and two statements that stand for one statement of the library
 // function keep no order; a statement keeps its place against a jump that
 // leaves a loop holding it on either side, though the other side holds it
 // outside the loop.
@@ -748,7 +749,6 @@ func TestKeepsDependentOrder(t *testing.T) {
 		"two sums into one value":             {[]nearRole{update("+", []int{2}, 1), update("+", []int{3}, 1)}, plain, []int{1, 0}, true},
 		"a sum and a product":                 {[]nearRole{update("+", []int{2}, 1), update("*", []int{3}, 1)}, plain, []int{1, 0}, false},
 		"a sum and a rewrite":                 {[]nearRole{update("+", []int{2}, 1), role([]int{3}, []int{1})}, plain, []int{1, 0}, false},
-		"a sum of the value itself":           {[]nearRole{update("+", []int{2}, 1), update("+", []int{1}, 1)}, plain, []int{1, 0}, false},
 		"a sum into two values":               {[]nearRole{update("+", []int{2}, 1), {Locals: []int{1, 4}, Writes: []int{1, 4}, Update: "+", Parent: -1}}, plain, []int{1, 0}, false},
 		"sums in place":                       {[]nearRole{update("+", []int{2}, 1), update("*", []int{3}, 1)}, plain, []int{0, 1}, true},
 		"variable and field rewritten":        {[]nearRole{role(nil, []int{1}), role(nil, []int{10})}, plain, []int{1, 0}, false},
@@ -756,7 +756,10 @@ func TestKeepsDependentOrder(t *testing.T) {
 		"two fields rewritten":                {[]nearRole{role(nil, []int{10}), role(nil, []int{11})}, plain, []int{1, 0}, true},
 		"one statement split in two":          {[]nearRole{role(nil, []int{1}), role([]int{1}, nil), role([]int{2}, nil), role([]int{3}, nil)}, plain, []int{0, 0, 2, 1}, true},
 		"held rewrite":                        {[]nearRole{role(nil, nil), {Locals: []int{1}, Writes: []int{1}, Parent: 0}, role(nil, []int{1})}, plain, []int{1, 2, 0}, false},
-		"held sum":                            {[]nearRole{role(nil, nil), {Locals: []int{1}, Writes: []int{1}, Update: "+", Parent: 0}, update("+", nil, 1)}, plain, []int{1, 2, 0}, false},
+		"held sum":                            {[]nearRole{role(nil, nil), {Locals: []int{1}, Writes: []int{1}, Update: "+", Parent: 0}, update("+", nil, 1)}, plain, []int{1, 2, 0}, true},
+		"held sum under a check of the value": {[]nearRole{role([]int{1}, nil), {Locals: []int{1}, Writes: []int{1}, Update: "+", Parent: 0}, update("+", nil, 1)}, plain, []int{1, 2, 0}, false},
+		"held sum and product":                {[]nearRole{role(nil, nil), {Locals: []int{1}, Writes: []int{1}, Update: "+", Parent: 0}, {Locals: []int{1}, Writes: []int{1}, Update: "*", Parent: 0}, update("+", nil, 1)}, plain, []int{1, 2, 3, 0}, false},
+		"held sum that reads another sum":     {[]nearRole{role(nil, nil), {Locals: []int{1, 2}, Writes: []int{1}, Update: "+", Parent: 0}, {Locals: []int{2}, Writes: []int{2}, Update: "+", Parent: 0}, update("+", nil, 2)}, plain, []int{1, 2, 3, 0}, false},
 		"held rewrite of another value":       {[]nearRole{role(nil, nil), {Locals: []int{1}, Writes: []int{1}, Parent: 0}, role(nil, []int{2})}, plain, []int{1, 2, 0}, true},
 		"sum that holds a sum of another":     {[]nearRole{update("+", []int{2}, 1), {Locals: []int{2}, Writes: []int{2}, Update: "+", Parent: 0}, update("+", nil, 2)}, plain, []int{1, 2, 0}, false},
 		"rewrites standing for one statement": {[]nearRole{role(nil, []int{1}), role(nil, []int{1}), role(nil, nil)}, plain, []int{1, 1, 0}, true},

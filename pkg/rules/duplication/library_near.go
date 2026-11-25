@@ -360,6 +360,7 @@ func goNearBody(info *types.Info, fd *ast.FuncDecl, detailed bool) nearBody {
 	w.body = fd.Body
 	if detailed {
 		w.writes = goWrites(fd.Body)
+		w.recovers = goNamedResults(fd) && goRecovers(info, fd.Body)
 	}
 	w.walk(fd.Body)
 	return w.b.finish()
@@ -492,9 +493,124 @@ func goReference(t types.Type) bool {
 // holds, has an effect (goEffect) or reaches what is not the function's own
 // (goReaches).
 func (w *goNearWalker) note(node ast.Node) {
-	if w.b.detailed && (goEffect(w.n.info, node) || goReaches(w.n.info, node)) {
+	if w.b.detailed && (goEffect(w.n.info, node) || goReaches(w.n.info, node) || w.recovers && goMayPanic(w.n.info, node)) {
 		w.b.fix()
 	}
+}
+
+// goNamedResults reports whether fd names its results, which a deferred
+// function may read and set.
+func goNamedResults(fd *ast.FuncDecl) bool {
+	results := fd.Type.Results
+	return results != nil && len(results.List) > 0 && len(results.List[0].Names) > 0
+}
+
+// goRecovers reports whether body defers a function that may recover from a
+// panic and so return what the named results hold when it struck: a
+// function literal that calls recover, or a function the body does not
+// show.
+func goRecovers(info *types.Info, body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		deferred, ok := node.(*ast.DeferStmt)
+		if !ok {
+			return !found
+		}
+		lit, ok := ast.Unparen(deferred.Call.Fun).(*ast.FuncLit)
+		found = found || !ok || goCallsRecover(info, lit.Body)
+		return !found
+	})
+	return found
+}
+
+// goCallsRecover reports whether body calls recover itself, not in a
+// function literal, where recover returns nil.
+func goCallsRecover(info *types.Info, body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch x := node.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.CallExpr:
+			if id, ok := ast.Unparen(x.Fun).(*ast.Ident); ok {
+				if builtin, ok := info.Uses[id].(*types.Builtin); ok && builtin.Name() == "recover" {
+					found = true
+				}
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// goMayPanic reports whether node, apart from what it holds, may panic
+// without a call: an index of an array or a text, a division or a
+// remainder of integers, a shift by a signed count and a type assertion,
+// as x / k or m /= k is when k is zero; an assertion with ok does not
+// panic, but is taken as one that may. A constant index of an array and a
+// constant divisor do not. What a slice, a map or a pointer reaches keeps
+// its place anyway (goReaches).
+func goMayPanic(info *types.Info, node ast.Node) bool {
+	switch x := node.(type) {
+	case *ast.IndexExpr:
+		t := info.TypeOf(x.X)
+		if t == nil {
+			return false
+		}
+		switch u := t.Underlying().(type) {
+		case *types.Array:
+			return info.Types[x.Index].Value == nil
+		case *types.Basic:
+			return u.Info()&types.IsString != 0
+		}
+	case *ast.BinaryExpr:
+		return goMayPanicOp(info, x.Op, x.X, x.Y)
+	case *ast.AssignStmt:
+		if len(x.Lhs) == 1 && len(x.Rhs) == 1 {
+			return goMayPanicOp(info, goAssignOps[x.Tok], x.Lhs[0], x.Rhs[0])
+		}
+	case *ast.TypeAssertExpr:
+		return x.Type != nil
+	}
+	return false
+}
+
+// goAssignOps are the operators of the assignments that may panic.
+var goAssignOps = map[token.Token]token.Token{
+	token.QUO_ASSIGN: token.QUO, token.REM_ASSIGN: token.REM, token.SHL_ASSIGN: token.SHL, token.SHR_ASSIGN: token.SHR,
+}
+
+// goMayPanicOp reports whether left op right may panic: a division or a
+// remainder of integers by what is not a constant, a shift by a signed
+// count that is not one.
+func goMayPanicOp(info *types.Info, op token.Token, left, right ast.Expr) bool {
+	if info.Types[right].Value != nil {
+		return false
+	}
+	switch op {
+	case token.QUO, token.REM:
+		return goIsInteger(info.TypeOf(left))
+	case token.SHL, token.SHR:
+		return !goIsUnsigned(info.TypeOf(right))
+	}
+	return false
+}
+
+func goIsInteger(t types.Type) bool {
+	return goBasicIs(t, types.IsInteger)
+}
+
+func goIsUnsigned(t types.Type) bool {
+	return goBasicIs(t, types.IsUnsigned)
+}
+
+// goBasicIs reports whether t is a basic type with the property info.
+func goBasicIs(t types.Type, info types.BasicInfo) bool {
+	if t == nil {
+		return false
+	}
+	basic, ok := t.Underlying().(*types.Basic)
+	return ok && basic.Info()&info != 0
 }
 
 // goEffectFree reports whether node holds nothing goEffect sees.
@@ -536,6 +652,11 @@ type goNearWalker struct {
 	// bodyWrites is what the body writes (goWrites), once a second name of
 	// a value another name may reach needs it.
 	bodyWrites map[ast.Node]bool
+	// recovers marks a body with named results that defers a function that
+	// may recover (goRecovers): a statement that may panic keeps its place
+	// there, since the deferred function sees the results as the panic left
+	// them.
+	recovers bool
 }
 
 // goScope is a loop or a switch open: the statement opened and whether a
@@ -688,11 +809,15 @@ func (w *goNearWalker) control(node ast.Node) {
 	case *ast.BranchStmt:
 		w.b.jump(w.jumpScope(x))
 	case *ast.AssignStmt:
-		if len(x.Lhs) == 1 {
-			w.b.update(w.updateKind(goUpdateOps[x.Tok], x.Lhs[0]))
+		if len(x.Lhs) == 1 && len(x.Rhs) == 1 {
+			kind, names := goUpdateOps[x.Tok], 1
+			if x.Tok == token.ASSIGN {
+				kind, names = plainUpdate(x), 2
+			}
+			w.b.update(w.updateKind(kind, x.Lhs[0], x, names))
 		}
 	case *ast.IncDecStmt:
-		w.b.update(w.updateKind("+", x.X))
+		w.b.update(w.updateKind("+", x.X, x, 1))
 	}
 }
 
@@ -703,10 +828,35 @@ var goUpdateOps = map[token.Token]string{
 	token.OR_ASSIGN: "|", token.AND_ASSIGN: "&", token.XOR_ASSIGN: "^",
 }
 
+// goPlainUpdateOps are the kinds of the operators of an assignment that
+// updates the variable it assigns, m = m + k, as the assignment with the
+// operator does.
+var goPlainUpdateOps = map[token.Token]string{
+	token.ADD: "+", token.SUB: "+", token.MUL: "*", token.OR: "|", token.AND: "&", token.XOR: "^",
+}
+
+// plainUpdate is the kind of update a plain assignment makes, m = m + k or
+// m = k + m, as m += k does; "" for another, as m = k - m.
+func plainUpdate(x *ast.AssignStmt) string {
+	op, ok := ast.Unparen(x.Rhs[0]).(*ast.BinaryExpr)
+	if !ok {
+		return ""
+	}
+	target := types.ExprString(x.Lhs[0])
+	if types.ExprString(ast.Unparen(op.X)) == target || op.Op != token.SUB && types.ExprString(ast.Unparen(op.Y)) == target {
+		return goPlainUpdateOps[op.Op]
+	}
+	return ""
+}
+
 // updateKind is kind for an update of an integer, which commutes with
-// another update of its kind; a sum of floats rounds by its order, a sum of
-// texts is another text.
-func (w *goNearWalker) updateKind(kind string, target ast.Expr) string {
+// another update of its kind, when stmt reads the place target names no
+// more than the times its update does, names — the target and, in a plain
+// assignment, the operand plainUpdate found — and so reads it only to
+// update it: w += w doubles w, which does not commute with w += 1, while
+// s.N += s.M reads another field of s, apart from s.N (goFieldsApart). A
+// sum of floats rounds by its order, a sum of texts is another text.
+func (w *goNearWalker) updateKind(kind string, target ast.Expr, stmt ast.Stmt, names int) string {
 	if kind == "" {
 		return ""
 	}
@@ -718,7 +868,92 @@ func (w *goNearWalker) updateKind(kind string, target ast.Expr) string {
 	if !ok || basic.Info()&types.IsInteger == 0 {
 		return ""
 	}
+	root := goNames(target)
+	if len(root) == 0 {
+		return ""
+	}
+	obj, count := w.n.info.ObjectOf(root[0]), 0
+	var stack []ast.Node
+	ast.Inspect(stmt, func(node ast.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		stack = append(stack, node)
+		if id, ok := node.(*ast.Ident); ok && obj != nil && w.n.info.ObjectOf(id) == obj && !goFieldsApart(w.n.info, goSelected(stack), target) {
+			count++
+		}
+		return true
+	})
+	if count > names {
+		return ""
+	}
 	return kind
+}
+
+// goSelected is the outermost selector that starts from the name on top of
+// stack: s.In.N for s. A name in parentheses, (s).N, stands for the whole
+// variable.
+func goSelected(stack []ast.Node) ast.Expr {
+	e := stack[len(stack)-1].(ast.Expr)
+	for k := len(stack) - 2; k >= 0; k-- {
+		switch x := stack[k].(type) {
+		case *ast.SelectorExpr:
+			e = x
+		default:
+			return e
+		}
+	}
+	return e
+}
+
+// goFieldsApart reports whether a and b, fields of one variable, hold no
+// memory in common: their paths of fields part, and neither passes a
+// pointer after the variable, which may point back into it.
+func goFieldsApart(info *types.Info, a, b ast.Expr) bool {
+	pa, oka := goFieldPath(info, a)
+	pb, okb := goFieldPath(info, b)
+	if !oka || !okb {
+		return false
+	}
+	for k := range min(len(pa), len(pb)) {
+		if pa[k] != pb[k] {
+			return true
+		}
+	}
+	return false
+}
+
+// goFieldPath is the fields e selects from a name, outermost last, and
+// whether e is such a selector that passes no pointer after the name and
+// names every field it passes: a promoted field passes one unnamed, and a
+// method value selects no field.
+func goFieldPath(info *types.Info, e ast.Expr) ([]*types.Var, bool) {
+	var path []*types.Var
+	for {
+		switch x := ast.Unparen(e).(type) {
+		case *ast.Ident:
+			slices.Reverse(path)
+			return path, true
+		case *ast.SelectorExpr:
+			selection := info.Selections[x]
+			if selection == nil {
+				return nil, false
+			}
+			_, root := ast.Unparen(x.X).(*ast.Ident)
+			if len(selection.Index()) > 1 || selection.Indirect() && !root {
+				return nil, false
+			}
+			field, ok := selection.Obj().(*types.Var)
+			if !ok {
+				return nil, false
+			}
+			path = append(path, field)
+			e = x.X
+		default:
+			return nil, false
+		}
+	}
 }
 
 // jumpScope is the statement a break, a continue or a fallthrough leaves:
@@ -755,17 +990,11 @@ func (w *goNearWalker) openNode(node ast.Node) {
 // and y may write into what it names only when that is shared, a slice, a
 // map or a pointer.
 func (w *goNearWalker) alias(assign *ast.AssignStmt) bool {
-	if assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+	name := w.aliasName(assign)
+	if name == nil {
 		return false
 	}
-	name, ok := assign.Lhs[0].(*ast.Ident)
-	if !ok || name.Name == "_" {
-		return false
-	}
-	root, field, local := w.localValue(assign.Rhs[0])
-	if !local {
-		return false
-	}
+	root, field, _ := w.localValue(assign.Rhs[0])
 	if w.assigns == nil {
 		assigned := goAssignments(w.n.info, w.body)
 		w.assigns = &assigned
@@ -784,31 +1013,159 @@ func (w *goNearWalker) alias(assign *ast.AssignStmt) bool {
 	return true
 }
 
+// aliasName is the name assign gives a variable of the function or a field
+// of one, y := v, nil for another assignment.
+func (w *goNearWalker) aliasName(assign *ast.AssignStmt) *ast.Ident {
+	if assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return nil
+	}
+	name, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	if _, _, local := w.localValue(assign.Rhs[0]); !local {
+		return nil
+	}
+	return name
+}
+
 // untouchedWhileNamed reports whether nothing may change what assign names
-// a second time while obj names it: nothing after assign in the scope of
-// obj calls or takes an address (goEffect), since a call may change a value
-// a name of its own keeps; and, when what it names is a field through a
-// pointer, nothing writes what another name may reach too (goReaches):
-// old := a.N; b.N = top; v := old * 2 reads the old a.N when a and b point
-// to one value, where v := a.N * 2 reads top.
+// a second time while obj names it (namedUntil): nothing after assign calls
+// or takes an address (goEffect), since a call may change a value a name of
+// its own keeps; and, when what it names is a field through a pointer,
+// nothing writes what another name may reach too (goReaches) and may hold
+// the field (goApart): old := a.N; b.N = top; v := old * 2 reads the old
+// a.N when a and b point to one value, where v := a.N * 2 reads top, but
+// b.M = top in its place, or b.N = top after v := old * 2, changes nothing
+// the name reads.
 func (w *goNearWalker) untouchedWhileNamed(assign *ast.AssignStmt, obj types.Object) bool {
-	from, to := assign.End(), obj.Parent().End()
+	from, to := assign.End(), w.namedUntil(assign, obj)
 	var written map[ast.Node]bool
+	var named *types.Var
 	if sel, ok := assign.Rhs[0].(*ast.SelectorExpr); ok && goReaches(w.n.info, sel) {
 		if w.bodyWrites == nil {
 			w.bodyWrites = goWrites(w.body)
 		}
-		written = w.bodyWrites
+		written, named = w.bodyWrites, w.n.info.Selections[sel].Obj().(*types.Var)
 	}
 	free := true
 	ast.Inspect(w.body, func(node ast.Node) bool {
 		if !free || node == nil || node.End() <= from || node.Pos() >= to {
 			return false
 		}
-		free = node.Pos() < from || !goEffect(w.n.info, node) && (!written[node] || !goReaches(w.n.info, node))
+		free = node.Pos() < from || !goEffect(w.n.info, node) && (!written[node] || !goReaches(w.n.info, node) || goApart(w.n.info, node, named))
 		return free
 	})
 	return free
+}
+
+// namedUntil is where obj, the name assign gives, is read for the last
+// time: the end of the statement of its last read, or of a loop that holds
+// a read and not assign in its body, which reads it again after what
+// follows the read; a name given in the head of a loop is read on every
+// turn. A name copied from obj, again := obj, reads what obj names where it
+// is read, so obj is read until the last read of any copy. It is the end of
+// the scope of obj when the body has a goto, which may run a read again.
+func (w *goNearWalker) namedUntil(assign *ast.AssignStmt, obj types.Object) token.Pos {
+	if goHasGoto(w.body) {
+		return obj.Parent().End()
+	}
+	until := assign.End()
+	names := []types.Object{obj}
+	for len(names) > 0 {
+		name := names[len(names)-1]
+		names = names[:len(names)-1]
+		var stack []ast.Node
+		ast.Inspect(w.body, func(node ast.Node) bool {
+			if node == nil {
+				stack = stack[:len(stack)-1]
+				return false
+			}
+			stack = append(stack, node)
+			if id, ok := node.(*ast.Ident); ok && w.n.info.Uses[id] == name {
+				until = max(until, readUntil(stack, assign))
+				if copied := w.copiedTo(stack); copied != nil {
+					names = append(names, copied)
+				}
+			}
+			return true
+		})
+	}
+	return until
+}
+
+// copiedTo is the variable the read on top of stack names a second time,
+// again := name or again := name.N (aliasName), nil for another read.
+func (w *goNearWalker) copiedTo(stack []ast.Node) types.Object {
+	k := len(stack) - 2
+	if _, ok := stack[k].(*ast.SelectorExpr); ok {
+		k--
+	}
+	assign, ok := stack[k].(*ast.AssignStmt)
+	if !ok {
+		return nil
+	}
+	return w.n.info.Defs[w.aliasName(assign)]
+}
+
+// goHasGoto reports whether body jumps with a goto.
+func goHasGoto(body ast.Node) bool {
+	found := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		if branch, ok := node.(*ast.BranchStmt); ok && branch.Tok == token.GOTO {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// readUntil is where a read on top of stack ends for namedUntil: its
+// statement, or the outermost loop that holds it and does not hold assign
+// in its body. A read follows assign, which gives the name, so a loop that
+// holds the read holds assign in its body or has it before the body: in
+// its head or before the loop.
+func readUntil(stack []ast.Node, assign ast.Node) token.Pos {
+	until := token.NoPos
+	for k := len(stack) - 1; k >= 0; k-- {
+		switch node := stack[k].(type) {
+		case *ast.ForStmt:
+			if assign.Pos() < node.Body.Pos() {
+				until = node.End()
+			}
+		case *ast.RangeStmt:
+			if assign.Pos() < node.Body.Pos() {
+				until = node.End()
+			}
+		case ast.Stmt:
+			if until == token.NoPos {
+				until = node.End()
+			}
+		}
+	}
+	return until
+}
+
+// goApart reports whether node, a place a body writes, and the field named
+// are apart: two other fields, both of a basic type, which holds no field,
+// as b.M = top for a.N. A selector written is a field or a name of another
+// package, which has no selection.
+func goApart(info *types.Info, node ast.Node, named *types.Var) bool {
+	sel, ok := node.(*ast.SelectorExpr)
+	if !ok || named == nil || !isBasic(named.Type()) {
+		return false
+	}
+	selection := info.Selections[sel]
+	if selection == nil {
+		return false
+	}
+	field, ok := selection.Obj().(*types.Var)
+	return ok && field.Origin() != named.Origin() && isBasic(field.Type())
+}
+
+func isBasic(t types.Type) bool {
+	_, ok := t.Underlying().(*types.Basic)
+	return ok
 }
 
 // localValue returns the variable of the function e is, or whose field it
@@ -1063,7 +1420,7 @@ func (w *goNearWalker) declaredBefore(a, b ast.Expr) bool {
 }
 
 // goNames lists the names in e in their order.
-func goNames(e ast.Expr) []*ast.Ident {
+func goNames(e ast.Node) []*ast.Ident {
 	var out []*ast.Ident
 	ast.Inspect(e, func(node ast.Node) bool {
 		if id, ok := node.(*ast.Ident); ok {
@@ -1597,7 +1954,7 @@ func keepsDependentOrder(roles, lib []nearRole, partner []int, roots map[int]int
 	if !keepsFixedPlaces(heldFixed(roles), heldFixed(lib), partner) || !keepsJumps(roles, partner) || !keepsJumps(lib, inversePartner(partner, len(lib))) {
 		return false
 	}
-	vars := statementVars(roles)
+	vars, kinds := statementVars(roles), updateKinds(roles)
 	access := make(map[int]*varAccess)
 	at := func(v int) *varAccess {
 		if access[v] == nil {
@@ -1611,7 +1968,7 @@ func keepsDependentOrder(roles, lib []nearRole, partner []int, roots map[int]int
 		}
 		for v := range sv.writes {
 			at(v).writers = append(at(v).writers, i)
-			at(v).updates = append(at(v).updates, updateOf(roles[i], v))
+			at(v).updates = append(at(v).updates, kinds[i][v])
 			if root, field := roots[v]; field {
 				at(root).fieldWriters = append(at(root).fieldWriters, i)
 			}
@@ -1669,23 +2026,43 @@ func keepsFixedPlaces(own, lib []bool, partner []int) bool {
 	return true
 }
 
-// updateOf is the kind of the update role makes of v (nearRole.Update),
-// empty unless that is all role does to v: it writes v alone and reads it
-// only to update it. w += w doubles w, which does not commute with w += 1.
-func updateOf(role nearRole, v int) string {
-	if role.Update == "" || len(role.Writes) != 1 || role.Writes[0] != v {
-		return ""
+// updateKinds is the kind of update (nearRole.Update) every statement,
+// with the statements it holds, makes of every variable it names: the kind
+// when all it does to the variable is updates of that kind, each made by a
+// statement that writes that variable alone, "" otherwise. if c { m += 1 }
+// adds to m as m += 1 does, so it may trade places with m += 2, but not
+// if c { m *= 3 }, nor if m > 3 { m += 1 }, which reads m, nor, with k += 2,
+// if c { m += k; k++ }, which reads k.
+func updateKinds(roles []nearRole) []map[int]string {
+	out := make([]map[int]string, len(roles))
+	merge := func(kinds map[int]string, v int, kind string) {
+		if seen, ok := kinds[v]; ok && seen != kind {
+			kind = ""
+		}
+		kinds[v] = kind
 	}
-	reads := 0
-	for _, local := range role.Locals {
-		if local == v {
-			reads++
+	for i := len(roles) - 1; i >= 0; i-- {
+		if out[i] == nil {
+			out[i] = make(map[int]string)
+		}
+		role := roles[i]
+		for _, v := range role.Locals {
+			kind := ""
+			if slices.Equal(role.Writes, []int{v}) {
+				kind = role.Update
+			}
+			merge(out[i], v, kind)
+		}
+		if p := role.Parent; p >= 0 {
+			if out[p] == nil {
+				out[p] = make(map[int]string)
+			}
+			for v, kind := range out[i] {
+				merge(out[p], v, kind)
+			}
 		}
 	}
-	if reads != 1 {
-		return ""
-	}
-	return role.Update
+	return out
 }
 
 // inversePartner is the partner in the body of every statement of the
@@ -1905,7 +2282,10 @@ const maxRestAlignCells = 1 << 22
 // in the library function, as when two checks trade what they guard or a
 // variable and a literal trade places. A statement the alignment matches must
 // be held as its counterpart is (heldInPlace). The variables
-// the alignment matches are checked together with the pairs sameRoles made.
+// the alignment matches are checked together with the pairs sameRoles made,
+// whose fields keep their roots (rootsKept) also when no statement is left
+// to align: if q == nil { return 0 }; v := q.N * 2 is no copy of
+// if q == nil { return 0 }; v := p.N * 2.
 // An adapted copy may merge variables (one pointer for the index and the
 // element of the library function) or split one, so a variable may stand for
 // several; what it may not do is cross: a variable that stands for two of the
@@ -1922,19 +2302,19 @@ func (m *roleMapping) sameRest(libSide, ownSide restSide) bool {
 func (m *roleMapping) alignRest(libSide, ownSide restSide) (bool, map[[2]int]int) {
 	lib, own := libSide.tokens, ownSide.tokens
 	rows, cols := len(lib)+1, len(own)+1
-	switch {
-	case len(own) == 0:
-		return !slices.ContainsFunc(lib, isNearJump), nil
-	case len(lib) == 0:
-		return true, nil
-	case rows*cols > maxRestAlignCells:
-		return false, nil
-	}
-	table := restTable(lib, own)
 	edges := make(map[[2]int]bool, len(m.forward))
 	for from, to := range m.forward {
 		edges[[2]int{from, to}] = true
 	}
+	switch {
+	case len(own) == 0:
+		return !slices.ContainsFunc(lib, isNearJump) && rootsKept(edges, libSide.roots, ownSide.roots), nil
+	case len(lib) == 0:
+		return rootsKept(edges, libSide.roots, ownSide.roots), nil
+	case rows*cols > maxRestAlignCells:
+		return false, nil
+	}
+	table := restTable(lib, own)
 	libSkipped, ownSkipped := false, false
 	libLeft, ownLeft := make(map[string]bool), make(map[string]bool)
 	libVars, ownVars := make(map[int]bool), make(map[int]bool)
