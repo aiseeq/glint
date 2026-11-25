@@ -244,3 +244,431 @@ export const payoutsURL = (page: number) => ` + "`/api/payouts?limit=${PAYOUTS_P
 		"web/pages.ts:5", "web/pages.ts:6", "web/pages.ts:7", "web/pages.ts:8", "web/pages.ts:9",
 	}, rulestest.ProjectFilesRulePlaces(t, NewTSConstantCopiesGoConstantRule(), files))
 }
+
+// A constant whose every use lies inside a loop that reads in pages of it is
+// not a contract: the loop steps a cursor by it (+= or x = x + c), ends on a
+// short page, or passes it to a call with a cursor it assigns (a stream that only stops on a short page is read
+// in pages too). A use outside
+// such a loop — a clamp helper, a constructor, min, a default, a header, a
+// validator, a conversion returned — keeps the finding, and so does any form
+// the loop does not prove.
+func TestTSConstantCopiesGoConstantReadLoops(t *testing.T) {
+	files := map[string]string{
+		"internal/orders/orders.go": `package orders
+
+const ordersPage = 100
+
+type Source interface {
+	Orders(cursor string, limit int) (rows []string, next string)
+}
+
+func Pull(src Source) []string {
+	var out []string
+	cursor := ""
+	for {
+		rows, next := src.Orders(cursor, ordersPage)
+		out = append(out, rows...)
+		if next == "" {
+			return out
+		}
+		cursor = next
+	}
+}
+`,
+		"internal/logs/logs.go": `package logs
+
+const (
+	logsPage  = 110
+	linesPage = 120
+)
+
+func Tail(read func(limit, offset int) []string, base int) []string {
+	var out []string
+	offset := 0
+	for {
+		rows := read(logsPage, base+offset)
+		out = append(out, rows...)
+		if len(rows) == 0 {
+			return out
+		}
+		offset = offset + logsPage
+	}
+}
+
+func Lines(read func(limit, offset int) []string, base int) int {
+	n := 0
+	for offset := 0; ; offset = linesPage + offset {
+		n += len(read(linesPage, base+offset))
+		if n == 0 {
+			return n
+		}
+	}
+}
+`,
+		"internal/notify/notify.go": `package notify
+
+const recipientsBatch = 130
+
+func Broadcast(send func([]string), ids []string) {
+	for i := 0; i < len(ids); i += recipientsBatch {
+		end := min(i+recipientsBatch, len(ids))
+		send(ids[i:end])
+	}
+}
+`,
+		"internal/ledger/ledger.go": `package ledger
+
+const entriesPage = 140
+
+func Sum(read func(limit, offset int) ([]int, error)) int {
+	sum := 0
+	for offset := 0; ; offset += entriesPage {
+		var rows []int
+		var err error
+		for attempt := 0; attempt < 3; attempt++ {
+			if rows, err = read(entriesPage, offset); err == nil {
+				break
+			}
+		}
+		sum += len(rows)
+		if entriesPage > len(rows) {
+			return sum
+		}
+	}
+}
+`,
+		"internal/reports/consts.go": `package reports
+
+const reportsPage = 200
+`,
+		"internal/reports/export.go": `package reports
+
+func Export(read func(limit, offset int) []string) []string {
+	var out []string
+	for offset := 0; ; offset += reportsPage {
+		rows := read(reportsPage, offset)
+		out = append(out, rows...)
+		if len(rows) < reportsPage {
+			return out
+		}
+	}
+}
+`,
+		"internal/reports/handler.go": `package reports
+
+func listLimit(requested int) int { return clampLimit(requested, reportsPage) }
+`,
+		"internal/reports/limits.go": `package reports
+
+func clampLimit(requested, maxLimit int) int {
+	if requested <= 0 || requested > maxLimit {
+		return maxLimit
+	}
+	return requested
+}
+`,
+		"internal/audit/audit.go": `package audit
+
+import (
+	"net/http"
+
+	"example.com/project/internal/httpx"
+)
+
+const auditPage = 210
+
+func listLimit(r *http.Request) int { return httpx.BoundLimit(r, auditPage) }
+
+func Archive(read func(limit, offset int) []string) int {
+	total := 0
+	for offset := 0; ; offset += auditPage {
+		rows := read(auditPage, offset)
+		total += len(rows)
+		if len(rows) < auditPage {
+			return total
+		}
+	}
+}
+`,
+		"internal/httpx/limit.go": `package httpx
+
+import (
+	"net/http"
+	"strconv"
+)
+
+func BoundLimit(r *http.Request, maxLimit int) int {
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || limit <= 0 || limit > maxLimit {
+		return maxLimit
+	}
+	return limit
+}
+`,
+		"internal/catalog/catalog.go": `package catalog
+
+import (
+	"net/http"
+	"strconv"
+)
+
+const (
+	invoicesPage = 220
+	eventsPage   = 230
+	feedPage     = 240
+	usersPage    = 250
+	filesPage    = 260
+	mediaPage    = 270
+	defaultPage  = 280
+)
+
+type Handler struct{ maxLimit int }
+
+func NewHandler(maxLimit int) *Handler { return &Handler{maxLimit: maxLimit} }
+
+var invoices = NewHandler(invoicesPage)
+
+func eventsLimit(limit int) int { return min(limit, eventsPage) }
+
+func feedHeader(w http.ResponseWriter) { w.Header().Set("X-Page-Size", strconv.Itoa(feedPage)) }
+
+func queryInt(r *http.Request, key string, fallback int) int {
+	if v, err := strconv.Atoi(r.URL.Query().Get(key)); err == nil {
+		return v
+	}
+	return fallback
+}
+
+func usersLimit(r *http.Request) int { return queryInt(r, "limit", usersPage) }
+
+type Errors []string
+
+func (e *Errors) Max(field string, got, limit int) {
+	if got > limit {
+		*e = append(*e, field)
+	}
+}
+
+func validateFiles(limit int) Errors {
+	var errs Errors
+	errs.Max("limit", limit, filesPage)
+	return errs
+}
+
+func mediaLimit(limit int32) int32 {
+	if limit <= 0 {
+		return int32(mediaPage)
+	}
+	return limit
+}
+
+func pageLimit(requested int) int {
+	limit := defaultPage
+	if requested > 0 {
+		limit = requested
+	}
+	return limit
+}
+
+func Walk(read func(limit, offset int) []string) {
+	for offset := 0; ; offset += invoicesPage {
+		if len(read(invoicesPage, offset)) < invoicesPage {
+			break
+		}
+	}
+	for offset := 0; ; offset += eventsPage {
+		if len(read(eventsPage, offset)) < eventsPage {
+			break
+		}
+	}
+	for offset := 0; ; offset += feedPage {
+		if len(read(feedPage, offset)) < feedPage {
+			break
+		}
+	}
+	for offset := 0; ; offset += usersPage {
+		if len(read(usersPage, offset)) < usersPage {
+			break
+		}
+	}
+	for offset := 0; ; offset += filesPage {
+		if len(read(filesPage, offset)) < filesPage {
+			break
+		}
+	}
+	for offset := 0; ; offset += mediaPage {
+		if len(read(mediaPage, offset)) < mediaPage {
+			break
+		}
+	}
+	for offset := 0; ; offset += defaultPage {
+		if len(read(defaultPage, offset)) < defaultPage {
+			break
+		}
+	}
+}
+`,
+		"internal/snapshots/snapshots.go": `package snapshots
+
+const SnapshotsPage = 300
+
+func Walk(read func(limit, offset int) int) {
+	for offset := 0; read(SnapshotsPage, offset) > 0; offset += SnapshotsPage {
+	}
+}
+`,
+		"internal/unproven/unproven.go": `package unproven
+
+const (
+	definedPage = 310
+	lessPage    = 320
+	closurePage = 330
+	keysPage    = 340
+	chunksPage  = 350
+	otherPage   = 360
+	nestedPage  = 370
+	turnPage    = 380
+	setPage     = 390
+	stridePage  = 400
+	belowPage   = 410
+	abovePage   = 420
+	tallPage    = 430
+	countPage   = 440
+	streamPage  = 450
+	fieldPage   = 460
+)
+
+type cursor struct{ n int }
+
+func Walk(read func(limit, offset int) []string, keys []string, run func(func()), send func([]string), next func(int) []string, count func() int, limit int) {
+	for offset := 0; ; offset += setPage {
+		size := 0
+		size = setPage
+		if len(read(size, offset)) == 0 {
+			break
+		}
+	}
+	for i := 0; i < limit; i += 2 {
+		read(stridePage, limit+i)
+	}
+	for offset := 0; ; offset += belowPage {
+		if offset < belowPage {
+			read(belowPage, offset)
+		}
+	}
+	for offset := 0; ; offset += abovePage {
+		if abovePage > offset {
+			read(abovePage, offset)
+		}
+	}
+	for {
+		if limit > len(next(tallPage)) {
+			break
+		}
+	}
+	for offset := 0; ; offset += countPage {
+		if count() < countPage {
+			break
+		}
+	}
+	for {
+		if len(next(streamPage)) < streamPage {
+			break
+		}
+	}
+	var cur cursor
+	for cur.n < limit {
+		read(limit, cur.n)
+		cur.n = cur.n + fieldPage
+	}
+	for offset := 0; ; offset += definedPage {
+		limit := definedPage
+		if len(read(limit, offset)) == 0 {
+			break
+		}
+	}
+	for offset := 0; ; offset += lessPage {
+		if len(read(lessPage, offset)) <= lessPage {
+			break
+		}
+	}
+	for offset := 0; ; offset += closurePage {
+		run(func() { read(min(offset, closurePage), offset) })
+		if len(read(closurePage, offset)) < closurePage {
+			break
+		}
+	}
+	for i := 0; i < len(keys); i++ {
+		key := keys[i]
+		read(keysPage, len(key))
+	}
+	start, end := 0, 0
+	for start < len(keys) {
+		end = start + chunksPage
+		send(keys[start:min(end, len(keys))])
+		start = end
+	}
+	start = 0
+	for start < len(keys) {
+		end = turnPage + start
+		send(keys[start:min(end, len(keys))])
+		start = end
+	}
+	var out []string
+	for limit := 5; len(out) < limit; {
+		out = append(out, read(otherPage, 0)...)
+	}
+	for i := 0; i < 3; i++ {
+		read(nestedPage, i)
+		run(func() {
+			for offset := 0; ; offset += nestedPage {
+				if len(read(nestedPage, offset)) < nestedPage {
+					return
+				}
+			}
+		})
+	}
+}
+`,
+		"web/loops.ts": `const ORDERS_PAGE = 100
+const LOGS_PAGE = 110
+const LINES_PAGE = 120
+const RECIPIENTS_BATCH = 130
+const ENTRIES_PAGE = 140
+const REPORTS_PAGE = 200
+const AUDIT_PAGE = 210
+const INVOICES_PAGE = 220
+const EVENTS_PAGE = 230
+const FEED_PAGE = 240
+const USERS_PAGE = 250
+const FILES_PAGE = 260
+const MEDIA_PAGE = 270
+const DEFAULT_PAGE = 280
+const SNAPSHOTS_PAGE = 300
+const DEFINED_PAGE = 310
+const LESS_PAGE = 320
+const CLOSURE_PAGE = 330
+const KEYS_PAGE = 340
+const CHUNKS_PAGE = 350
+const OTHER_PAGE = 360
+const NESTED_PAGE = 370
+const TURN_PAGE = 380
+const SET_PAGE = 390
+const STRIDE_PAGE = 400
+const BELOW_PAGE = 410
+const ABOVE_PAGE = 420
+const TALL_PAGE = 430
+const COUNT_PAGE = 440
+const STREAM_PAGE = 450
+const FIELD_PAGE = 460
+`,
+	}
+	assert.Equal(t, []string{
+		"web/loops.ts:10", "web/loops.ts:11", "web/loops.ts:12", "web/loops.ts:13", "web/loops.ts:14",
+		"web/loops.ts:15", "web/loops.ts:16", "web/loops.ts:17", "web/loops.ts:18", "web/loops.ts:19",
+		"web/loops.ts:20", "web/loops.ts:21", "web/loops.ts:22", "web/loops.ts:23", "web/loops.ts:24",
+		"web/loops.ts:25", "web/loops.ts:26", "web/loops.ts:27", "web/loops.ts:28", "web/loops.ts:29",
+		"web/loops.ts:31",
+		"web/loops.ts:6", "web/loops.ts:7", "web/loops.ts:8", "web/loops.ts:9",
+	}, rulestest.ProjectFilesRulePlaces(t, NewTSConstantCopiesGoConstantRule(), files))
+}
