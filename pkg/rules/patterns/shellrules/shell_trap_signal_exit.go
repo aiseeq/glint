@@ -55,16 +55,45 @@ func (s *exitScan) handler(action *syntax.File) handlerPaths {
 	return s.list(action.Stmts).returned()
 }
 
-// exitScan follows the paths of a trap handler through the functions
-// defined in the script.
+// exitScan follows the paths of a trap handler, or of a command of the
+// script, through the functions defined in the script: body gives the
+// body a call at a place runs, hides whether a function hides the builtin
+// of its name there, memo the paths of each function followed and stmts
+// those of each command. redirects marks the scan of a status that
+// chooses a path, where a redirection that may not open fails the
+// command; a handler that exits through such a command is taken to exit.
 type exitScan struct {
-	funcs    map[string]*syntax.Stmt
-	memo     map[string]handlerPaths
-	visiting map[string]bool
+	body      func(name string, at syntax.Pos) *syntax.Stmt
+	hides     func(name string, at syntax.Pos) bool
+	redirects bool
+	memo      map[string]handlerPaths
+	visiting  map[string]bool
+	stmts     map[*syntax.Stmt]handlerPaths
 }
 
-func newExitScan(funcs map[string]*syntax.Stmt) *exitScan {
-	return &exitScan{funcs: funcs, memo: make(map[string]handlerPaths), visiting: make(map[string]bool)}
+// handlerExits follows a handler, which runs once the script has defined
+// its functions, into the last definition of each.
+func (s *scriptFuncs) handlerExits() *exitScan {
+	return &exitScan{
+		body:     func(name string, _ syntax.Pos) *syntax.Stmt { return s.last[name] },
+		hides:    func(name string, _ syntax.Pos) bool { return hides(name, s.last[name]) },
+		memo:     make(map[string]handlerPaths),
+		visiting: make(map[string]bool),
+		stmts:    make(map[*syntax.Stmt]handlerPaths),
+	}
+}
+
+// statusScan follows a command of the script into the functions a call
+// surely runs where it is written.
+func (s *scriptFuncs) statusScan() *exitScan {
+	return &exitScan{
+		body:      s.at,
+		hides:     s.hidesAt,
+		redirects: true,
+		memo:      make(map[string]handlerPaths),
+		visiting:  make(map[string]bool),
+		stmts:     make(map[*syntax.Stmt]handlerPaths),
+	}
 }
 
 func (s *exitScan) list(stmts []*syntax.Stmt) handlerPaths {
@@ -87,12 +116,20 @@ func (s *exitScan) list(stmts []*syntax.Stmt) handlerPaths {
 
 // stmt treats a subshell, a pipeline, a command substitution and a
 // background command as not exiting: exit there ends only a child shell.
-// ! swaps the status the command goes on with.
+// In a status scan a redirection that may not open keeps the command from
+// running with status 1. ! swaps the status the command goes on with.
 func (s *exitScan) stmt(stmt *syntax.Stmt) handlerPaths {
+	if paths, ok := s.stmts[stmt]; ok {
+		return paths
+	}
 	paths := s.command(stmt)
+	if s.redirects && riskyRedirect(stmt.Redirs) {
+		paths = paths.join(handlerPaths{failed: true})
+	}
 	if stmt.Negated {
 		paths.ok, paths.failed = paths.failed, paths.ok
 	}
+	s.stmts[stmt] = paths
 	return paths
 }
 
@@ -123,28 +160,34 @@ func (s *exitScan) command(stmt *syntax.Stmt) handlerPaths {
 	return pathsFall
 }
 
+// call: a function named as a builtin hides it where hides says so,
+// unless command or builtin goes before the name, and these skip functions.
 func (s *exitScan) call(call *syntax.CallExpr) handlerPaths {
 	args := call.Args
-	for len(args) > 0 && (wordLit(args[0]) == "builtin" || wordLit(args[0]) == "command") {
+	prefixed := false
+	for len(args) > 0 && (wordLit(args[0]) == "builtin" || wordLit(args[0]) == "command") && !s.hides(wordLit(args[0]), call.Pos()) {
 		args = args[1:]
+		prefixed = true
 	}
 	if len(args) == 0 {
 		return pathsFall
 	}
 	name := wordLit(args[0])
-	switch name {
-	case "exit":
-		return handlerPaths{exit: true}
-	case "return":
-		return handlerPaths{ret: true}
-	case "true", ":":
-		return handlerPaths{ok: true}
-	case "false":
-		return handlerPaths{failed: true}
-	case "eval", ".", "source":
-		return pathsUnknown
+	if prefixed || !s.hides(name, call.Pos()) {
+		switch name {
+		case "exit":
+			return handlerPaths{exit: true}
+		case "return":
+			return handlerPaths{ret: true}
+		case "true", ":":
+			return handlerPaths{ok: true}
+		case "false":
+			return handlerPaths{failed: true}
+		case "eval", ".", "source":
+			return pathsUnknown
+		}
 	}
-	if body, ok := s.funcs[name]; ok {
+	if body := s.body(name, call.Pos()); body != nil && !prefixed {
 		return s.function(name, body)
 	}
 	return pathsFall

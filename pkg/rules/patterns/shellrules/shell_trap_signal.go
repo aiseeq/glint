@@ -70,19 +70,8 @@ func checkTrapSignalWithoutExit(r *shellRule, src *patternkit.ShellSource) []*co
 		// without its syntax tree no trap handler can be followed.
 		return nil
 	}
-	funcs := make(map[string]*syntax.Stmt)
-	sourced := false
-	syntax.Walk(file, func(n syntax.Node) bool {
-		if f, ok := n.(*syntax.FuncDecl); ok {
-			funcs[f.Name.Value] = f.Body
-		}
-		if call, ok := n.(*syntax.CallExpr); ok && len(call.Args) > 0 && (wordLit(call.Args[0]) == "." || wordLit(call.Args[0]) == "source") {
-			sourced = true
-		}
-		return true
-	})
-	exits := newExitScan(funcs)
-	flow := newTrapFlow(file, exits)
+	flow := newScriptFuncs(file).flow(file)
+	funcs := flow.funcs.last
 	var prints map[*syntax.Stmt]bool
 	var out []*core.Violation
 	for _, stmt := range flow.order {
@@ -100,10 +89,10 @@ func checkTrapSignalWithoutExit(r *shellRule, src *patternkit.ShellSource) []*co
 			// runs is not known, so the trap is left alone.
 			continue
 		}
-		if exitsAlways, sure := exits.handler(action).alwaysExits(); exitsAlways || !sure {
+		if exitsAlways, sure := flow.exits.handler(action).alwaysExits(); exitsAlways || !sure {
 			continue
 		}
-		if sourced && unknownTrapHandler(action.Stmts, funcs) {
+		if flow.funcs.sourced && unknownTrapHandler(action.Stmts, funcs) {
 			continue
 		}
 		handled, flags, handlerBodies := trapHandlerEffects(action, funcs)
