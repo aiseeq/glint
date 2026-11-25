@@ -127,6 +127,11 @@ type nearRole struct {
 	// value, after it only those it does not skip.
 	Jump  bool `json:"j,omitempty"`
 	Scope int  `json:"k,omitempty"`
+	// Shows are the named results of a function that defers a function
+	// that may recover, when the statement may panic: the deferred function
+	// sees them as the panic left them, so the statement reads them, and
+	// what it writes of them it does not update in a way that commutes.
+	Shows []int `json:"o,omitempty"`
 }
 
 // nearBodyBuilder collects a nearBody in one pass over the body: every token
@@ -141,6 +146,10 @@ type nearBodyBuilder struct {
 	// roleOf is the index in Roles of every statement opened, by its order
 	// of opening, -1 for one with no tokens.
 	roleOf []int
+	// panics are the statements, by their order of opening, that may
+	// panic, and shown the variables their roles show (nearRole.Shows).
+	panics []int
+	shown  []int
 	calls  map[string]bool
 	ops    map[string]bool
 	lits   map[string]bool
@@ -192,6 +201,14 @@ func (b *nearBodyBuilder) parallel() {
 func (b *nearBodyBuilder) fix() {
 	if b.detailed && len(b.open) > 0 {
 		b.open[len(b.open)-1].role.Fixed = true
+	}
+}
+
+// panic marks the innermost open statement of a detailed body as one that
+// may panic.
+func (b *nearBodyBuilder) panic() {
+	if len(b.open) > 0 {
+		b.panics = append(b.panics, b.open[len(b.open)-1].id)
 	}
 }
 
@@ -310,6 +327,11 @@ func (b *nearBodyBuilder) finish() nearBody {
 	for len(b.open) > 0 {
 		b.closeStmt()
 	}
+	for _, id := range b.panics {
+		if k := b.roleOf[id]; k >= 0 {
+			b.body.Roles[k].Shows = b.shown
+		}
+	}
 	b.orderRoles()
 	slices.Sort(b.body.Stmts)
 	b.body.Calls = slices.Sorted(maps.Keys(b.calls))
@@ -363,6 +385,15 @@ func goNearBody(info *types.Info, fd *ast.FuncDecl, detailed bool) nearBody {
 		w.recovers = goNamedResults(fd) && goRecovers(info, fd.Body)
 	}
 	w.walk(fd.Body)
+	if fd.Type.Results != nil {
+		for _, field := range fd.Type.Results.List {
+			for _, name := range field.Names {
+				if num, ok := w.n.locals[info.Defs[name]]; ok {
+					w.b.shown = append(w.b.shown, num)
+				}
+			}
+		}
+	}
 	return w.b.finish()
 }
 
@@ -493,8 +524,11 @@ func goReference(t types.Type) bool {
 // holds, has an effect (goEffect) or reaches what is not the function's own
 // (goReaches).
 func (w *goNearWalker) note(node ast.Node) {
-	if w.b.detailed && (goEffect(w.n.info, node) || goReaches(w.n.info, node) || w.recovers && goMayPanic(w.n.info, node)) {
+	if w.b.detailed && (goEffect(w.n.info, node) || goReaches(w.n.info, node)) {
 		w.b.fix()
+	}
+	if w.recovers && !goCannotPanic(w.n.info, node) {
+		w.b.panic()
 	}
 }
 
@@ -503,6 +537,119 @@ func (w *goNearWalker) note(node ast.Node) {
 func goNamedResults(fd *ast.FuncDecl) bool {
 	results := fd.Type.Results
 	return results != nil && len(results.List) > 0 && len(results.List[0].Names) > 0
+}
+
+// goCannotPanic reports whether node, apart from what it holds, cannot
+// panic: a name, a constant, a type, a literal, a field of a value, an
+// element of an array at a constant index, arithmetic but a division by
+// what is not a constant or a shift by a signed count that is not one, a
+// comparison but of two values that hold an interface, a conversion but of
+// a slice to an array, len and cap, and a statement that only holds such.
+// Anything else may: a == b for two interfaces panics on values of a type
+// that does not compare, so does a switch on one with a case of one,
+// [4]int(s) on a short slice, a call. What has an effect or reaches what
+// another value may reach keeps its place anyway (goEffect, goReaches).
+func goCannotPanic(info *types.Info, node ast.Node) bool {
+	if e, ok := node.(ast.Expr); ok && (info.Types[e].IsType() || info.Types[e].Value != nil) {
+		return true
+	}
+	switch x := node.(type) {
+	case *ast.Ident, *ast.BasicLit, *ast.CompositeLit, *ast.KeyValueExpr, *ast.ParenExpr,
+		*ast.BlockStmt, *ast.ExprStmt, *ast.IncDecStmt, *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt,
+		*ast.ReturnStmt, *ast.BranchStmt, *ast.LabeledStmt, *ast.EmptyStmt, *ast.DeclStmt,
+		*ast.GenDecl, *ast.ValueSpec, *ast.CaseClause, *ast.TypeSwitchStmt:
+		return true
+	case *ast.SelectorExpr:
+		selection := info.Selections[x]
+		return selection == nil || selection.Kind() == types.FieldVal
+	case *ast.IndexExpr:
+		_, array := info.TypeOf(x.X).Underlying().(*types.Array)
+		return array && info.Types[x.Index].Value != nil
+	case *ast.UnaryExpr:
+		return x.Op != token.ARROW
+	case *ast.BinaryExpr:
+		return goOpCannotPanic(info, x.Op, x.X, x.Y)
+	case *ast.AssignStmt:
+		if op, ok := goAssignOps[x.Tok]; ok {
+			return goOpCannotPanic(info, op, x.Lhs[0], x.Rhs[0])
+		}
+		return true
+	case *ast.SwitchStmt:
+		for _, clause := range x.Body.List {
+			for _, value := range clause.(*ast.CaseClause).List {
+				if x.Tag != nil && !goOpCannotPanic(info, token.EQL, x.Tag, value) {
+					return false
+				}
+			}
+		}
+		return true
+	case *ast.CallExpr:
+		if fun := info.Types[x.Fun]; fun.IsType() {
+			return goConvertsSafely(info.TypeOf(x.Args[0]), fun.Type)
+		}
+		id, ok := ast.Unparen(x.Fun).(*ast.Ident)
+		return ok && (info.Uses[id] == types.Universe.Lookup("len") || info.Uses[id] == types.Universe.Lookup("cap"))
+	}
+	return false
+}
+
+// goAssignOps are the operators of the assignments that apply one.
+var goAssignOps = map[token.Token]token.Token{
+	token.ADD_ASSIGN: token.ADD, token.SUB_ASSIGN: token.SUB, token.MUL_ASSIGN: token.MUL,
+	token.QUO_ASSIGN: token.QUO, token.REM_ASSIGN: token.REM, token.AND_ASSIGN: token.AND,
+	token.OR_ASSIGN: token.OR, token.XOR_ASSIGN: token.XOR, token.SHL_ASSIGN: token.SHL,
+	token.SHR_ASSIGN: token.SHR, token.AND_NOT_ASSIGN: token.AND_NOT,
+}
+
+// goOpCannotPanic reports whether left op right cannot panic: a division or
+// a remainder of integers only by a constant, a shift only by an unsigned or
+// a constant count, a comparison of values that both hold an interface not
+// at all: two interfaces of one dynamic type that does not compare panic,
+// an interface and a number, or nil, compare without one.
+func goOpCannotPanic(info *types.Info, op token.Token, left, right ast.Expr) bool {
+	switch op {
+	case token.QUO, token.REM:
+		return info.Types[right].Value != nil || !goBasicIs(info.TypeOf(left), types.IsInteger)
+	case token.SHL, token.SHR:
+		return info.Types[right].Value != nil || goBasicIs(info.TypeOf(right), types.IsUnsigned)
+	case token.EQL, token.NEQ:
+		return goComparesSafely(info.TypeOf(left)) || goComparesSafely(info.TypeOf(right))
+	}
+	return true
+}
+
+// goComparesSafely reports whether comparing values of t cannot panic: t
+// holds no interface, nor a type parameter, which may be one.
+func goComparesSafely(t types.Type) bool {
+	switch u := t.Underlying().(type) {
+	case *types.Basic, *types.Pointer, *types.Chan:
+		return true
+	case *types.Array:
+		return goComparesSafely(u.Elem())
+	case *types.Struct:
+		for field := range u.Fields() {
+			if !goComparesSafely(field.Type()) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// goConvertsSafely reports whether converting a value of type from to type
+// to cannot panic: only a slice to an array that is not empty, or to a
+// pointer to one, panics, when the slice is short.
+func goConvertsSafely(from, to types.Type) bool {
+	if _, slice := from.Underlying().(*types.Slice); !slice {
+		return true
+	}
+	target := to.Underlying()
+	if pointer, ok := target.(*types.Pointer); ok {
+		target = pointer.Elem().Underlying()
+	}
+	array, ok := target.(*types.Array)
+	return !ok || array.Len() == 0
 }
 
 // goRecovers reports whether body defers a function that may recover from a
@@ -541,76 +688,6 @@ func goCallsRecover(info *types.Info, body *ast.BlockStmt) bool {
 		return !found
 	})
 	return found
-}
-
-// goMayPanic reports whether node, apart from what it holds, may panic
-// without a call: an index of an array or a text, a division or a
-// remainder of integers, a shift by a signed count and a type assertion,
-// as x / k or m /= k is when k is zero; an assertion with ok does not
-// panic, but is taken as one that may. A constant index of an array and a
-// constant divisor do not. What a slice, a map or a pointer reaches keeps
-// its place anyway (goReaches).
-func goMayPanic(info *types.Info, node ast.Node) bool {
-	switch x := node.(type) {
-	case *ast.IndexExpr:
-		t := info.TypeOf(x.X)
-		if t == nil {
-			return false
-		}
-		switch u := t.Underlying().(type) {
-		case *types.Array:
-			return info.Types[x.Index].Value == nil
-		case *types.Basic:
-			return u.Info()&types.IsString != 0
-		}
-	case *ast.BinaryExpr:
-		return goMayPanicOp(info, x.Op, x.X, x.Y)
-	case *ast.AssignStmt:
-		if len(x.Lhs) == 1 && len(x.Rhs) == 1 {
-			return goMayPanicOp(info, goAssignOps[x.Tok], x.Lhs[0], x.Rhs[0])
-		}
-	case *ast.TypeAssertExpr:
-		return x.Type != nil
-	}
-	return false
-}
-
-// goAssignOps are the operators of the assignments that may panic.
-var goAssignOps = map[token.Token]token.Token{
-	token.QUO_ASSIGN: token.QUO, token.REM_ASSIGN: token.REM, token.SHL_ASSIGN: token.SHL, token.SHR_ASSIGN: token.SHR,
-}
-
-// goMayPanicOp reports whether left op right may panic: a division or a
-// remainder of integers by what is not a constant, a shift by a signed
-// count that is not one.
-func goMayPanicOp(info *types.Info, op token.Token, left, right ast.Expr) bool {
-	if info.Types[right].Value != nil {
-		return false
-	}
-	switch op {
-	case token.QUO, token.REM:
-		return goIsInteger(info.TypeOf(left))
-	case token.SHL, token.SHR:
-		return !goIsUnsigned(info.TypeOf(right))
-	}
-	return false
-}
-
-func goIsInteger(t types.Type) bool {
-	return goBasicIs(t, types.IsInteger)
-}
-
-func goIsUnsigned(t types.Type) bool {
-	return goBasicIs(t, types.IsUnsigned)
-}
-
-// goBasicIs reports whether t is a basic type with the property info.
-func goBasicIs(t types.Type, info types.BasicInfo) bool {
-	if t == nil {
-		return false
-	}
-	basic, ok := t.Underlying().(*types.Basic)
-	return ok && basic.Info()&info != 0
 }
 
 // goEffectFree reports whether node holds nothing goEffect sees.
@@ -653,9 +730,8 @@ type goNearWalker struct {
 	// a value another name may reach needs it.
 	bodyWrites map[ast.Node]bool
 	// recovers marks a body with named results that defers a function that
-	// may recover (goRecovers): a statement that may panic keeps its place
-	// there, since the deferred function sees the results as the panic left
-	// them.
+	// may recover (goRecovers): a statement that may panic (goCannotPanic)
+	// shows the results there (nearRole.Shows).
 	recovers bool
 }
 
@@ -907,53 +983,55 @@ func goSelected(stack []ast.Node) ast.Expr {
 	return e
 }
 
-// goFieldsApart reports whether a and b, fields of one variable, hold no
-// memory in common: their paths of fields part, and neither passes a
-// pointer after the variable, which may point back into it.
+// goFieldsApart reports whether a and b, fields of one variable, are two
+// values for the near comparison, which numbers a field of a variable
+// (field) and not a field of a field: they start with two fields of the
+// variable, and neither passes a pointer after the variable, which may
+// point back into it. s.K and s.In.N are apart, s.In.M and s.In.N are one
+// value, as s.In is.
 func goFieldsApart(info *types.Info, a, b ast.Expr) bool {
-	pa, oka := goFieldPath(info, a)
-	pb, okb := goFieldPath(info, b)
-	if !oka || !okb {
-		return false
-	}
-	for k := range min(len(pa), len(pb)) {
-		if pa[k] != pb[k] {
-			return true
-		}
-	}
-	return false
+	fa, fb := goFirstField(info, a), goFirstField(info, b)
+	return fa != nil && fb != nil && fa != fb
 }
 
-// goFieldPath is the fields e selects from a name, outermost last, and
-// whether e is such a selector that passes no pointer after the name and
-// names every field it passes: a promoted field passes one unnamed, and a
-// method value selects no field.
-func goFieldPath(info *types.Info, e ast.Expr) ([]*types.Var, bool) {
-	var path []*types.Var
+// goFirstField is the field of a variable e starts with, s.In for s.In.N
+// and for the method value s.In.Sum, which reads the value it is taken
+// from, s.Arr for s.Arr[0], an element of an array the field holds; nil
+// when e is the variable itself, s.Len too, or passes a pointer after it,
+// an element of a slice or a map, which another value may share, or a
+// promoted field, which passes one unnamed.
+func goFirstField(info *types.Info, e ast.Expr) *types.Var {
+	var first *types.Var
 	for {
 		switch x := ast.Unparen(e).(type) {
 		case *ast.Ident:
-			slices.Reverse(path)
-			return path, true
+			return first
 		case *ast.SelectorExpr:
 			selection := info.Selections[x]
 			if selection == nil {
-				return nil, false
+				return nil
 			}
 			_, root := ast.Unparen(x.X).(*ast.Ident)
 			if len(selection.Index()) > 1 || selection.Indirect() && !root {
-				return nil, false
+				return nil
 			}
-			field, ok := selection.Obj().(*types.Var)
-			if !ok {
-				return nil, false
+			field, _ := selection.Obj().(*types.Var)
+			first, e = field, x.X
+		case *ast.IndexExpr:
+			if _, array := info.TypeOf(x.X).Underlying().(*types.Array); !array {
+				return nil
 			}
-			path = append(path, field)
 			e = x.X
 		default:
-			return nil, false
+			return nil
 		}
 	}
+}
+
+// goBasicIs reports whether t is a basic type with the property info.
+func goBasicIs(t types.Type, info types.BasicInfo) bool {
+	basic, ok := t.Underlying().(*types.Basic)
+	return ok && basic.Info()&info != 0
 }
 
 // jumpScope is the statement a break, a continue or a fallthrough leaves:
@@ -1937,8 +2015,11 @@ func keepsParallel(roles, lib []nearRole, partner []int) bool {
 // variable are apart. A copy may swap two lookups, two counts or two sums
 // into one integer, but not a rewrite of a value and a statement that
 // reads it, which then reads another value, nor two rewrites of one value
-// that do not commute. A statement opens before the statements it holds,
-// on both sides, so the two keep their order.
+// that do not commute. Under a deferred recover a statement that may panic
+// reads the named results (nearRole.Shows): a division moves past a
+// statement that sets no result, not past one that sets one. A statement
+// opens before the statements it holds, on both sides, so the two keep
+// their order.
 func keepsDependentOrder(roles, lib []nearRole, partner []int, roots map[int]int) bool {
 	last := -1
 	inOrder := true
@@ -2032,7 +2113,8 @@ func keepsFixedPlaces(own, lib []bool, partner []int) bool {
 // statement that writes that variable alone, "" otherwise. if c { m += 1 }
 // adds to m as m += 1 does, so it may trade places with m += 2, but not
 // if c { m *= 3 }, nor if m > 3 { m += 1 }, which reads m, nor, with k += 2,
-// if c { m += k; k++ }, which reads k.
+// if c { m += k; k++ }, which reads k, nor a statement that may panic
+// where a deferred function sees m (nearRole.Shows).
 func updateKinds(roles []nearRole) []map[int]string {
 	out := make([]map[int]string, len(roles))
 	merge := func(kinds map[int]string, v int, kind string) {
@@ -2052,6 +2134,9 @@ func updateKinds(roles []nearRole) []map[int]string {
 				kind = role.Update
 			}
 			merge(out[i], v, kind)
+		}
+		for _, v := range role.Shows {
+			merge(out[i], v, "")
 		}
 		if p := role.Parent; p >= 0 {
 			if out[p] == nil {
@@ -2197,7 +2282,9 @@ func statementVars(roles []nearRole) []stmtVars {
 		for _, v := range roles[i].Locals {
 			out[i].reads[v] = true
 		}
-
+		for _, v := range roles[i].Shows {
+			out[i].reads[v] = true
+		}
 		if p := roles[i].Parent; p >= 0 {
 			maps.Copy(out[p].writes, out[i].writes)
 			maps.Copy(out[p].reads, out[i].reads)
