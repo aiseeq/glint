@@ -139,6 +139,8 @@ func (s *exitScan) call(call *syntax.CallExpr) handlerPaths {
 		return handlerPaths{ret: true}
 	case "true", ":":
 		return handlerPaths{ok: true}
+	case "false":
+		return handlerPaths{failed: true}
 	case "eval", ".", "source":
 		return pathsUnknown
 	}

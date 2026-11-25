@@ -81,8 +81,8 @@ func checkTrapSignalWithoutExit(r *shellRule, src *patternkit.ShellSource) []*co
 		}
 		return true
 	})
-	flow := newTrapFlow(file)
 	exits := newExitScan(funcs)
+	flow := newTrapFlow(file, exits)
 	var prints map[*syntax.Stmt]bool
 	var out []*core.Violation
 	for _, stmt := range flow.order {
