@@ -4,6 +4,7 @@ import (
 	"github.com/aiseeq/akit/shellcmd"
 
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"path/filepath"
@@ -780,17 +781,37 @@ func infoObject(i *types.Info, id *ast.Ident) types.Object {
 	return i.ObjectOf(id)
 }
 func pidsFrom(e ast.Expr, i *types.Info, p map[types.Object]bool) bool {
-	id, ok := ast.Unparen(e).(*ast.Ident)
+	id, ok := unconverted(e, i).(*ast.Ident)
 	return ok && p[infoObject(i, id)]
 }
-func isTarget(e ast.Expr, i *types.Info, p map[types.Object]bool) bool {
-	if isParentProcessID(e, i) || pidsFrom(e, i, p) {
+
+// isTarget reports an implicit target: the parent, a constant pid of -1 or 0
+// or any negative group however it is written, or the caller's own process
+// group negated.
+func isTarget(e ast.Expr, i *types.Info, parent processAliases) bool {
+	if isParentProcessID(e, i) || pidsFrom(e, i, parent.PIDs) {
 		return true
 	}
-	u, ok := ast.Unparen(e).(*ast.UnaryExpr)
-	return ok && u.Op == token.SUB && strings.HasPrefix(iValue(e, i), "-")
+	if value, known := pidValue(e, i); known {
+		return value <= 0
+	}
+	u, ok := unconverted(e, i).(*ast.UnaryExpr)
+	return ok && u.Op == token.SUB && (isOwnProcessGroup(u.X, i) || pidsFrom(u.X, i, parent.Groups))
 }
-func isZeroInt(e ast.Expr, i *types.Info) bool { return iValue(e, i) == "0" }
+
+// pidValue is the constant e passes as a pid: the kernel reads pid_t, a
+// signed 32-bit int, so a raw system call's ^uintptr(0) is -1.
+func pidValue(e ast.Expr, i *types.Info) (int32, bool) {
+	value := i.Types[e].Value
+	if value == nil || value.Kind() != constant.Int {
+		return 0, false
+	}
+	if n, exact := constant.Int64Val(value); exact {
+		return int32(n), true
+	}
+	n, exact := constant.Uint64Val(value)
+	return int32(n), exact
+}
 
 // harmlessSignal reports a signal value that ends no process by default.
 func harmlessSignal(e ast.Expr, i *types.Info) bool { return harmlessSignals[iValue(e, i)] }

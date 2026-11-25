@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -65,13 +66,14 @@ func typeSignalFiles(project *core.GoProjectContext) map[*core.FileContext]*sign
 			continue
 		}
 		pkg := run.add(newSignalPackage(loaded.Package.PkgPath, loaded.Package.TypesInfo, loaded.Package.Syntax...))
+		pkg.built = true
 		pkg.packageAliases()
 		maps.Copy(aliases, pkg.functions)
 		for _, file := range loaded.Files {
 			out[file] = pkg
 		}
 	}
-	byDir, neededDirs := signalSourceGroups(project, aliases)
+	byDir, neededDirs := signalSourceGroups(project, aliases, out)
 	imports := loadedSignalImports(project.Packages)
 	groups := make([]*signalSourcePackage, 0, len(byDir))
 	for _, group := range byDir {
@@ -103,9 +105,11 @@ func typeSignalFiles(project *core.GoProjectContext) map[*core.FileContext]*sign
 
 // signalSourceGroups groups the syntax of each directory by package name; a
 // directory is needed when a test file names a signal function or one of the
-// aliases of Kill and Tgkill the loaded packages declare.
-func signalSourceGroups(project *core.GoProjectContext, aliases map[types.Object]*types.Func) (map[string]*signalSourcePackage, map[string]bool) {
-	names := map[string]bool{"Kill": true, "Signal": true, "Tgkill": true}
+// aliases of Kill and Tgkill the loaded packages declare. A Go file under
+// testdata no package builds is typed as a test file: tests run it, and
+// whether the root of the run makes it a test file must not decide.
+func signalSourceGroups(project *core.GoProjectContext, aliases map[types.Object]*types.Func, loaded map[*core.FileContext]*signalPackage) (map[string]*signalSourcePackage, map[string]bool) {
+	names := map[string]bool{"Kill": true, "Signal": true, "Tgkill": true, "SYS_KILL": true, "SYS_TGKILL": true}
 	for obj := range aliases {
 		names[obj.Name()] = true
 	}
@@ -131,7 +135,7 @@ func signalSourceGroups(project *core.GoProjectContext, aliases map[types.Object
 		}
 	}
 	for _, file := range project.Files {
-		if file == nil || file.GoAST == nil || !file.IsTestFile() {
+		if file == nil || file.GoAST == nil || !file.IsTestFile() && (loaded[file] != nil || !underTestdata(file.Path)) {
 			continue
 		}
 		dir := filepath.Clean(filepath.Dir(file.Path))
@@ -148,6 +152,12 @@ func signalSourceGroups(project *core.GoProjectContext, aliases map[types.Object
 		}
 	}
 	return byDir, neededDirs
+}
+
+// underTestdata reports a path inside a testdata directory, which the go
+// command builds no package of.
+func underTestdata(path string) bool {
+	return slices.Contains(strings.Split(filepath.ToSlash(path), "/"), "testdata")
 }
 
 func typeSignalGroup(project *core.GoProjectContext, group *signalSourcePackage, path string, importer signalImporter) *types.Info {

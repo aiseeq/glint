@@ -278,13 +278,13 @@ func returnedStringParams(info *types.Info, file *ast.File) map[*types.Func]map[
 
 func isSQLFragment(literal *ast.BasicLit, parents map[ast.Node]ast.Node, info *types.Info, flowingParams map[*types.Func]map[int]bool) bool {
 	for node := ast.Node(literal); node != nil; node = parents[node] {
-		if call, ok := node.(*ast.CallExpr); ok && isDiagnosticCall(calledObject(info, call)) {
+		if call, ok := node.(*ast.CallExpr); ok && isDiagnosticCall(patternkit.NamedObject(info, call.Fun)) {
 			return false
 		}
 	}
 	for node := ast.Node(literal); node != nil; node = parents[node] {
 		if call, ok := node.(*ast.CallExpr); ok {
-			obj := calledObject(info, call)
+			obj := patternkit.NamedObject(info, call.Fun)
 			if obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == "fmt" && obj.Name() == "Sprintf" {
 				return true
 			}
@@ -406,7 +406,7 @@ func isClockPackageVariable(info *types.Info, expression ast.Expr, clockPackage 
 }
 
 func callsClockPackage(info *types.Info, call *ast.CallExpr, clockPackage string) bool {
-	obj := calledObject(info, call)
+	obj := patternkit.NamedObject(info, call.Fun)
 	return obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == clockPackage
 }
 
@@ -441,7 +441,7 @@ func modulePathFor(importPath string, modules map[string]bool) bool {
 }
 
 func isProjectClockCall(info *types.Info, call *ast.CallExpr, modules map[string]bool) bool {
-	obj := calledObject(info, call)
+	obj := patternkit.NamedObject(info, call.Fun)
 	if obj == nil || obj.Name() != "Now" || !returnsTime(obj.Type()) {
 		return false
 	}
@@ -456,19 +456,6 @@ func isProjectClockCall(info *types.Info, call *ast.CallExpr, modules map[string
 		}
 	}
 	return false
-}
-
-func calledObject(info *types.Info, call *ast.CallExpr) types.Object {
-	switch fun := ast.Unparen(call.Fun).(type) {
-	case *ast.Ident:
-		return info.Uses[fun]
-	case *ast.SelectorExpr:
-		if selection := info.Selections[fun]; selection != nil {
-			return selection.Obj()
-		}
-		return info.Uses[fun.Sel]
-	}
-	return nil
 }
 
 func returnsTime(typ types.Type) bool {
@@ -535,7 +522,7 @@ func implementsClockHere(pkg *types.Package) bool {
 }
 
 func isStandardClockCall(info *types.Info, call *ast.CallExpr) bool {
-	obj := calledObject(info, call)
+	obj := patternkit.NamedObject(info, call.Fun)
 	if obj == nil || obj.Pkg() == nil || obj.Pkg().Path() != "time" {
 		return false
 	}
@@ -587,7 +574,7 @@ func isNamedStandardCall(info *types.Info, expr ast.Expr, name string) bool {
 	if !ok {
 		return false
 	}
-	obj := calledObject(info, call)
+	obj := patternkit.NamedObject(info, call.Fun)
 	return obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == "time" && obj.Name() == name
 }
 

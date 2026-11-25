@@ -847,6 +847,16 @@ func (i signalTestImporter) Import(path string) (*types.Package, error) {
 	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "Kill", types.NewSignatureType(nil, nil, nil, params, results, false)))
 	tgkillParams := types.NewTuple(types.NewVar(token.NoPos, pkg, "tgid", types.Typ[types.Int]), types.NewVar(token.NoPos, pkg, "tid", types.Typ[types.Int]), types.NewVar(token.NoPos, pkg, "sig", signal))
 	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "Tgkill", types.NewSignatureType(nil, nil, nil, tgkillParams, results, false)))
+	word := types.Typ[types.Uintptr]
+	words := func(names ...string) *types.Tuple {
+		vars := make([]*types.Var, len(names))
+		for i, name := range names {
+			vars[i] = types.NewVar(token.NoPos, pkg, name, word)
+		}
+		return types.NewTuple(vars...)
+	}
+	pkg.Scope().Insert(types.NewConst(token.NoPos, pkg, "SYS_KILL", types.Typ[types.UntypedInt], constant.MakeInt64(62)))
+	pkg.Scope().Insert(types.NewFunc(token.NoPos, pkg, "Syscall", types.NewSignatureType(nil, nil, nil, words("trap", "a1", "a2", "a3"), words("r1", "r2", "err"), false)))
 	pkg.MarkComplete()
 	return pkg, nil
 }
