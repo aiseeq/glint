@@ -231,6 +231,23 @@ func SafeShare(x, y, k int) (m int) {
 	return m
 }
 
+func SafeKeys(v any, n, k int) (m int) {
+	defer func() {
+		if recover() != nil {
+			m = -m
+		}
+	}()
+	m += k
+	for i := 0; i < n; i++ {
+		_ = map[any]int{v: 1}
+		m += 1
+	}
+	if m > 1000 {
+		m = 1000
+	}
+	return m
+}
+
 func SafeEqual(a, b any, n, k int) (m int) {
 	defer func() {
 		if recover() != nil {
@@ -521,6 +538,25 @@ func payprovSafe(p, q, step int) (m int) {
 	return m
 }
 `, ""},
+		"addition moved past map literals keyed by an interface under a recover": {`package app
+
+func payprovSafe(key any, n, step int) (m int) {
+	defer func() {
+		if recover() != nil {
+			m = -m
+		}
+	}()
+	for i := 0; i < n; i++ {
+		_ = map[any]int{key: 1}
+		m += 1
+	}
+	m += step
+	if m > 1000 {
+		m = 1000
+	}
+	return m
+}
+`, ""},
 		"addition moved past a loop that cannot panic under a recover": {`package app
 
 func payprovSafe(vals []int, step int) (m int) {
@@ -700,7 +736,9 @@ func payprovTally(vals []int, step int) int {
 // division or a remainder of integers by what is not a constant, a shift
 // by a signed count, an index of a text or of an array at an index that is
 // not a constant, a comparison of two interfaces or of values that hold
-// one, a switch on one with a case of one, a type assertion, a call, a conversion of a slice to a longer array, a
+// one, a switch on one with a case of one, a literal of a map whose key
+// holds an interface given a value that holds one, also inside another
+// literal, a type assertion, a call, a conversion of a slice to a longer array, a
 // method of an interface may; arithmetic, a comparison of numbers or of an
 // interface with a number or nil, len and cap and another conversion may
 // not. A
@@ -747,6 +785,15 @@ func TestGoNearBodyShowsUnderRecover(t *testing.T) {
 		"comparison of values that hold an array of interfaces": {recovers, "(m int)", "_ = arr == arr", true},
 		"comparison of arrays of numbers":                       {recovers, "(m int)", "_ = xs == xs", false},
 		"comparison of pointers":                                {recovers, "(m int)", "_ = bp == bp", false},
+		"map literal keyed by an interface":                     {recovers, "(m int)", "_ = map[any]int{v: 1}", true},
+		"map literal keyed by a struct that holds an interface": {recovers, "(m int)", "_ = map[struct{ A any }]int{st: 1}", true},
+		"map literal in a slice literal":                        {recovers, "(m int)", "_ = []map[any]int{{v: 1}}", true},
+		"map literal in a struct literal":                       {recovers, "(m int)", "_ = struct{ M map[any]int }{map[any]int{v: 1}}", true},
+		"map literal keyed by numbers":                          {recovers, "(m int)", "_ = map[int]int{x: 1}", false},
+		"map literal keyed by an interface, a number given":     {recovers, "(m int)", "_ = map[any]int{x: 1}", false},
+		"empty map literal keyed by an interface":               {recovers, "(m int)", "_ = map[any]int{}", false},
+		"slice literal of interfaces":                           {recovers, "(m int)", "_ = []any{v}", false},
+		"literal of a struct that holds an interface":           {recovers, "(m int)", "_ = struct{ A any }{v}", false},
 		"call of a function":                                    {recovers, "(m int)", "settle()", true},
 		"capacity":                                              {recovers, "(m int)", "m += cap(sl)", false},
 		"append":                                                {recovers, "(m int)", "sl = append(sl, x)", true},

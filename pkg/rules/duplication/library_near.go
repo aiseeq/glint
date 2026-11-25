@@ -543,8 +543,10 @@ func goNamedResults(fd *ast.FuncDecl) bool {
 // panic: a name, a constant, a type, a literal, a field of a value, an
 // element of an array at a constant index, arithmetic but a division by
 // what is not a constant or a shift by a signed count that is not one, a
-// comparison but of two values that hold an interface, a conversion but of
-// a slice to an array, len and cap, and a statement that only holds such.
+// comparison but of two values that hold an interface, a literal but of a
+// map given a key that holds an interface, which a value of a type that
+// does not hash panics on, a conversion but of a slice to an array, len
+// and cap, and a statement that only holds such.
 // Anything else may: a == b for two interfaces panics on values of a type
 // that does not compare, so does a switch on one with a case of one,
 // [4]int(s) on a short slice, a call. What has an effect or reaches what
@@ -554,10 +556,22 @@ func goCannotPanic(info *types.Info, node ast.Node) bool {
 		return true
 	}
 	switch x := node.(type) {
-	case *ast.Ident, *ast.BasicLit, *ast.CompositeLit, *ast.KeyValueExpr, *ast.ParenExpr,
+	case *ast.Ident, *ast.BasicLit, *ast.KeyValueExpr, *ast.ParenExpr, *ast.FieldList, *ast.Field,
 		*ast.BlockStmt, *ast.ExprStmt, *ast.IncDecStmt, *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt,
 		*ast.ReturnStmt, *ast.BranchStmt, *ast.LabeledStmt, *ast.EmptyStmt, *ast.DeclStmt,
 		*ast.GenDecl, *ast.ValueSpec, *ast.CaseClause, *ast.TypeSwitchStmt:
+		return true
+	case *ast.CompositeLit:
+		// A key that holds no interface has a type that holds none: the
+		// key type of the map holds one when the key does.
+		if _, ok := info.TypeOf(x).Underlying().(*types.Map); !ok {
+			return true
+		}
+		for _, element := range x.Elts {
+			if !goComparesSafely(info.TypeOf(element.(*ast.KeyValueExpr).Key)) {
+				return false
+			}
+		}
 		return true
 	case *ast.SelectorExpr:
 		selection := info.Selections[x]
