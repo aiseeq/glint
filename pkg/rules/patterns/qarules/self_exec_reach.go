@@ -781,7 +781,10 @@ func (a *selfExecAnalysis) check(dir string, node selfExecNode, point *selfExecP
 		return
 	}
 	a.reported[point.call] = true
-	a.findings = append(a.findings, &selfExecFinding{point: point, chain: selfExecChain(node, parent)})
+	bodies := selfExecChainBodies(node, parent)
+	found := &selfExecFinding{point: point, chain: selfExecChain(bodies)}
+	a.describe(found, dir, run, bodies, pattern, known, helper)
+	a.findings = append(a.findings, found)
 }
 
 // followChild follows the child of a start from the roots it runs, once
@@ -807,12 +810,18 @@ func (a *selfExecAnalysis) followChild(key selfExecHelperKey, roots []*selfExecB
 	return true
 }
 
-func selfExecChain(node selfExecNode, parent map[selfExecNode]selfExecNode) []string {
+// selfExecChainBodies returns the bodies from the root of the reach to a
+// node.
+func selfExecChainBodies(node selfExecNode, parent map[selfExecNode]selfExecNode) []*selfExecBody {
 	bodies := []*selfExecBody{node.body}
 	for cur, ok := parent[node]; ok; cur, ok = parent[cur] {
 		bodies = append(bodies, cur.body)
 	}
 	slices.Reverse(bodies)
+	return bodies
+}
+
+func selfExecChain(bodies []*selfExecBody) []string {
 	chain := make([]string, len(bodies))
 	for i, body := range bodies {
 		var prev *selfExecBody

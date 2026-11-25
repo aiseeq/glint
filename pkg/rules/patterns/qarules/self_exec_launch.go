@@ -109,11 +109,12 @@ func (r *SelfExecInTestRule) violation(ctx *core.GoProjectContext, found *selfEx
 
 func (r *SelfExecInTestRule) violationIn(fileCtx *core.FileContext, found *selfExecFinding) *core.Violation {
 	line := fileCtx.LineFor(found.point.call)
+	reason, suggestion := found.reason(fileCtx)
 	v := r.CreateViolation(fileCtx.RelPath, line, fmt.Sprintf(
-		"%s starts its own test binary: %s passes the process's own executable to %s, reached through %s — under go test that binary runs every test again, and each copy starts the next",
-		found.chain[0], found.chain[len(found.chain)-1], found.point.via, strings.Join(found.chain, " → ")))
+		"%s starts its own test binary: %s passes the process's own executable to %s, reached through %s — %s",
+		found.chain[0], found.chain[len(found.chain)-1], found.point.via, strings.Join(found.chain, " → "), reason))
 	v.WithCode(fileCtx.GetLine(line))
-	v.WithSuggestion("Refuse the launch when testing.Testing() is true, let the tests replace the launcher, or start a helper process: -test.run=TestHelperProcess in its arguments, or a TestMain that answers the child by its argument or environment before m.Run")
+	v.WithSuggestion(suggestion)
 	v.WithContext("test", found.chain[0])
 	return v
 }
@@ -266,6 +267,13 @@ type selfExecLaunch struct {
 type selfExecFinding struct {
 	point *selfExecPoint
 	chain []string
+	// answer is the branch that answers the child without ending it;
+	// pattern the -test.run the launch pins the child with.
+	answer  *selfExecAnswer
+	pattern string
+	// beforeAnswer marks a child the TestMain or an init answers after it
+	// reaches the launch.
+	beforeAnswer bool
 }
 
 type selfExecAnalysis struct {
@@ -276,6 +284,9 @@ type selfExecAnalysis struct {
 	pkgLevel []*selfExecBody
 	index    *selfExecIndex
 	resolved map[*ast.CallExpr][]*selfExecBody
+	// readsOf holds the reads of the test binary of a directory, found on
+	// first use: see readsBeside.
+	readsOf map[string]map[string][]token.Pos
 
 	// selfVars are the package variables that hold the own executable: a
 	// *types.Var, or a selfExecTestVar of a test file.
@@ -336,6 +347,7 @@ func newSelfExecAnalysis(ctx *core.GoProjectContext, decls map[*types.Func]patte
 		ctx: ctx, decls: decls,
 		typed:      map[*types.Func]*selfExecBody{},
 		resolved:   map[*ast.CallExpr][]*selfExecBody{},
+		readsOf:    map[string]map[string][]token.Pos{},
 		selfVars:   map[any]bool{},
 		selfResult: map[*selfExecBody][]string{},
 		sinks:      map[*selfExecBody]map[int]bool{},
