@@ -58,11 +58,15 @@ func (s *exitScan) handler(action *syntax.File) handlerPaths {
 // exitScan follows the paths of a trap handler, or of a command of the
 // script, through the functions defined in the script: body gives the
 // body a call at a place runs, memo the paths of each function followed
-// and stmts those of each command. redirects marks the scan of a status
+// and stmts those of each command. asMain marks the scan of a handler of
+// an opaque script, read as main read it: false gives no known status,
+// and command or builtin before a name does not keep a function from
+// running. redirects marks the scan of a status
 // that chooses a path, where a redirection that may not open fails the
 // command; a handler that exits through such a command is taken to exit.
 type exitScan struct {
 	body      func(name string, at syntax.Pos) *syntax.Stmt
+	asMain    bool
 	redirects bool
 	memo      map[string]handlerPaths
 	visiting  map[string]bool
@@ -74,6 +78,7 @@ type exitScan struct {
 func (s *scriptFuncs) handlerExits() *exitScan {
 	return &exitScan{
 		body:     func(name string, _ syntax.Pos) *syntax.Stmt { return s.last[name] },
+		asMain:   s.opaque,
 		memo:     make(map[string]handlerPaths),
 		visiting: make(map[string]bool),
 		stmts:    make(map[*syntax.Stmt]handlerPaths),
@@ -176,10 +181,10 @@ func (s *exitScan) call(call *syntax.CallExpr) handlerPaths {
 		return pathsFall
 	}
 	name := wordLit(args[0])
-	if paths, ok := builtinPaths[name]; ok {
+	if paths, ok := builtinPaths[name]; ok && (name != "false" || !s.asMain) {
 		return paths
 	}
-	if body := s.body(name, call.Pos()); body != nil && !prefixed {
+	if body := s.body(name, call.Pos()); body != nil && (!prefixed || s.asMain) {
 		return s.function(name, body)
 	}
 	return pathsFall

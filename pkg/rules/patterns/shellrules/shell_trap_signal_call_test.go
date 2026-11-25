@@ -1005,3 +1005,47 @@ while poll-once; do sleep 5; done
 `)
 	}
 }
+
+// In an opaque script the handler is read as main reads it, and an alias
+// that names a builtin the rule reads makes a script opaque as a function
+// of that name does.
+func TestShellTrapSignalWithoutExitOpaqueHandlerAndAlias(t *testing.T) {
+	for name, source := range map[string]string{
+		"q01_false_fn_handler_or_exit.sh": `#!/bin/bash
+false() { :; }
+trap 'false || exit 1' TERM # want
+while poll-once; do sleep 5; done
+`,
+		"q06_opaque_handler_false_or_exit.sh": `#!/bin/bash
+eval x=1
+trap 'false || exit 1' TERM # want
+while poll-once; do sleep 5; done
+`,
+		"opaque_handler_command_fn.sh": `#!/bin/bash
+eval x=1
+die() { exit 1; }
+trap 'command die' TERM
+while poll-once; do sleep 5; done
+`,
+		"q05_handler_false_or_exit.sh": `#!/bin/bash
+trap 'false || exit 1' TERM
+while poll-once; do sleep 5; done
+`,
+		"q02_alias_true_false.sh": `#!/bin/bash
+shopt -s expand_aliases
+alias true=false
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"alias_other_name_keeps_status.sh": `#!/bin/bash
+shopt -s expand_aliases
+alias ll='ls -l'
+trap 'echo bye' TERM
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+	} {
+		shellWanted(t, "shell-trap-signal-without-exit", name, source)
+	}
+}

@@ -70,7 +70,7 @@ func newScriptFuncs(file *syntax.File) *scriptFuncs {
 				}
 			}
 		case *syntax.CallExpr:
-			hideNames(x, hidden)
+			s.hideNames(x, hidden)
 			s.noteRunner(x)
 		}
 		return true
@@ -129,8 +129,9 @@ func (s *scriptFuncs) epoch(time uint) int {
 }
 
 // hideNames records the names unset, functions too unless -v is given,
-// and the names given to an alias.
-func hideNames(call *syntax.CallExpr, hidden map[string]bool) {
+// and the names given to an alias; an alias named as a builtin the rule
+// reads makes the script opaque, as a function of that name does.
+func (s *scriptFuncs) hideNames(call *syntax.CallExpr, hidden map[string]bool) {
 	if len(call.Args) == 0 {
 		return
 	}
@@ -151,6 +152,7 @@ func hideNames(call *syntax.CallExpr, hidden map[string]bool) {
 			if lit, ok := arg.Parts[0].(*syntax.Lit); ok {
 				name, _, _ := strings.Cut(lit.Value, "=")
 				hidden[name] = true
+				s.opaque = s.opaque || readBuiltins[name]
 			}
 		}
 	}
