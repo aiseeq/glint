@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -71,7 +72,7 @@ func (r *TSConstantCopiesGoConstantRule) UseProjectFiles(files []*core.FileConte
 		}
 	}
 	for pkg, decls := range private {
-		steps := readLoopsOnly(packages[pkg], decls)
+		steps := pagedReadsOnly(packages[pkg], decls)
 		for decl, value := range decls {
 			if !steps[decl.Name] {
 				r.goConstants = append(r.goConstants, goNumericConstant{name: decl.Name, value: value})
@@ -109,22 +110,20 @@ func goNumericConstants(file *ast.File) []declaredConstant {
 	return out
 }
 
-// readLoopsOnly names the constants declared at decls that the package uses
-// only inside loops that read in pages of them. A read loop of a constant
-// moves a cursor by it (offset += page, offset = offset + page), stops on a
-// page shorter than it (len(rows) < page) or passes it to a call together
-// with a cursor the loop assigns (cursor = next). Inside such a loop the
-// constant may only step the cursor, bound a slice (i+page), end the reads on
-// a short page or go to a call. Any use outside a read loop of the same
-// function — a handler, a helper, a constructor, a response — and any other
-// use, a shadowing declaration too, keeps it a contract.
-func readLoopsOnly(files []*ast.File, decls map[*ast.Ident]float64) map[string]bool {
+// pagedReadsOnly names the constants declared at decls whose every use in the
+// package is a form of a loop reading in pages of it, inside a for loop of the
+// same function (a function literal ends the loop): the step of a cursor, an
+// argument of a page read, a stop on a short page, a slice bound. Any other
+// use — a return, a literal, another sum, the condition of the for, an
+// argument of a call that is not a read, a shadowing declaration — keeps the
+// constant a contract.
+func pagedReadsOnly(files []*ast.File, decls map[*ast.Ident]float64) map[string]bool {
 	names := make(map[string]bool, len(decls))
 	for decl := range decls {
 		names[decl.Name] = true
 	}
-	inLoop, other := make(map[string]bool), make(map[string]bool)
-	loops := make(map[readLoopKey]bool)
+	paged, other := make(map[string]bool), make(map[string]bool)
+	loops := make(map[pageLoopKey]*pageLoop)
 	for _, file := range files {
 		var stack []ast.Node
 		ast.Inspect(file, func(n ast.Node) bool {
@@ -134,8 +133,8 @@ func readLoopsOnly(files []*ast.File, decls map[*ast.Ident]float64) map[string]b
 			}
 			if ident, ok := n.(*ast.Ident); ok && names[ident.Name] {
 				if _, declared := decls[ident]; !declared {
-					if readLoopUse(stack[len(stack)-1]) && insideReadLoop(stack, ident.Name, loops) {
-						inLoop[ident.Name] = true
+					if pagedUse(stack, ident.Name, loops) {
+						paged[ident.Name] = true
 					} else {
 						other[ident.Name] = true
 					}
@@ -145,128 +144,192 @@ func readLoopsOnly(files []*ast.File, decls map[*ast.Ident]float64) map[string]b
 			return true
 		})
 	}
-	only := make(map[string]bool, len(inLoop))
-	for name := range inLoop {
+	only := make(map[string]bool, len(paged))
+	for name := range paged {
 		only[name] = !other[name]
 	}
 	return only
 }
 
-// readLoopUse reports whether the parent of a use of a constant lets it step
-// a cursor (+=, +), go to a call or end the reads on a short page. A
-// constant can only be the value added or an argument: a variable of its name
-// is caught as another use where it is declared.
-func readLoopUse(parent ast.Node) bool {
-	switch p := parent.(type) {
-	case *ast.AssignStmt:
-		return p.Tok == token.ADD_ASSIGN
-	case *ast.CallExpr:
-		return true
-	case *ast.BinaryExpr:
-		return p.Op == token.ADD || shortPage(p, "")
-	}
-	return false
-}
-
-type readLoopKey struct {
+type pageLoopKey struct {
 	loop *ast.ForStmt
 	name string
 }
 
-// insideReadLoop reports whether a for loop of the function holding the top
-// of stack reads in pages of the constant name.
-func insideReadLoop(stack []ast.Node, name string, loops map[readLoopKey]bool) bool {
-	for i := len(stack) - 1; i >= 0; i-- {
-		switch n := stack[i].(type) {
-		case *ast.FuncLit:
+// pageLoop is what a for loop, outside its function literals, does with a
+// page constant.
+type pageLoop struct {
+	cursors map[string]bool // x of x += c, x = x + c, x = c + x
+	reads   map[string]bool // v of v, … := call(…, c, …)
+	stops   map[string]bool // v of len(v) < c, c > len(v); pagedUse checks the if around it
+}
+
+// pagedUse reports whether the use of the constant name at the top of stack
+// is one of the forms of a paged read in a for loop around it.
+func pagedUse(stack []ast.Node, name string, loops map[pageLoopKey]*pageLoop) bool {
+	around := enclosingPageLoops(stack, name, loops)
+	if len(around) == 0 {
+		return false
+	}
+	parent, grand := stack[len(stack)-1], stack[len(stack)-2]
+	switch p := parent.(type) {
+	case *ast.AssignStmt:
+		return cursorStep(p, name) != ""
+	case *ast.CallExpr:
+		assign, ok := grand.(*ast.AssignStmt)
+		if !ok || len(assign.Rhs) != 1 {
 			return false
-		case *ast.ForStmt:
-			key := readLoopKey{loop: n, name: name}
-			read, seen := loops[key]
-			if !seen {
-				read = readsInPages(n, name)
-				loops[key] = read
-			}
-			if read {
-				return true
-			}
 		}
+		return slices.ContainsFunc(around, func(l *pageLoop) bool { return len(l.cursors) > 0 || anyName(assign.Lhs, l.stops) })
+	case *ast.BinaryExpr:
+		if v := shortPage(p, name); v != "" {
+			stop, ok := grand.(*ast.IfStmt)
+			return ok && endsLoop(stop) && slices.ContainsFunc(around, func(l *pageLoop) bool { return l.reads[v] })
+		}
+		if p.Op != token.ADD {
+			return false
+		}
+		if assign, ok := grand.(*ast.AssignStmt); ok {
+			return cursorStep(assign, name) != ""
+		}
+		cursor, ok := p.X.(*ast.Ident)
+		return ok && sliceBound(stack) && slices.ContainsFunc(around, func(l *pageLoop) bool { return l.cursors[cursor.Name] })
 	}
 	return false
 }
 
-// readsInPages reports whether loop, outside its function literals, moves a
-// cursor by name, stops on a page shorter than name, or passes name to a call
-// together with a variable the loop assigns.
-func readsInPages(loop *ast.ForStmt, name string) bool {
-	assigned := make(map[string]bool)
-	var calls []*ast.CallExpr
-	found := false
+// enclosingPageLoops lists the for loops around the top of stack up to the
+// function that holds it.
+func enclosingPageLoops(stack []ast.Node, name string, loops map[pageLoopKey]*pageLoop) []*pageLoop {
+	var out []*pageLoop
+	for i := len(stack) - 1; i >= 0; i-- {
+		switch n := stack[i].(type) {
+		case *ast.FuncLit:
+			return out
+		case *ast.ForStmt:
+			key := pageLoopKey{loop: n, name: name}
+			if loops[key] == nil {
+				loops[key] = newPageLoop(n, name)
+			}
+			out = append(out, loops[key])
+		}
+	}
+	return out
+}
+
+func newPageLoop(loop *ast.ForStmt, name string) *pageLoop {
+	l := &pageLoop{cursors: make(map[string]bool), reads: make(map[string]bool), stops: make(map[string]bool)}
 	ast.Inspect(loop, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.FuncLit:
 			return false
 		case *ast.AssignStmt:
-			found = found || cursorStep(n, name)
-			if n.Tok == token.ASSIGN {
+			if cursor := cursorStep(n, name); cursor != "" {
+				l.cursors[cursor] = true
+			}
+			if call, ok := n.Rhs[0].(*ast.CallExpr); ok && passes(call, name) {
 				for _, lhs := range n.Lhs {
 					if ident, ok := lhs.(*ast.Ident); ok {
-						assigned[ident.Name] = true
+						l.reads[ident.Name] = true
 					}
 				}
 			}
 		case *ast.BinaryExpr:
-			found = found || shortPage(n, name)
-		case *ast.CallExpr:
-			calls = append(calls, n)
+			if v := shortPage(n, name); v != "" {
+				l.stops[v] = true
+			}
 		}
 		return true
 	})
-	if found {
+	return l
+}
+
+// cursorStep names x of a statement x += name, x = x + name or x = name + x.
+// The operator of the sum is left to pagedUse: name under any other operator
+// is another use, which keeps the constant a contract anyway.
+func cursorStep(assign *ast.AssignStmt, name string) string {
+	if len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return ""
+	}
+	cursor, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	if assign.Tok == token.ADD_ASSIGN && isName(assign.Rhs[0], name) {
+		return cursor.Name
+	}
+	sum, ok := assign.Rhs[0].(*ast.BinaryExpr)
+	if assign.Tok != token.ASSIGN || !ok {
+		return ""
+	}
+	if isName(sum.X, cursor.Name) && isName(sum.Y, name) || isName(sum.X, name) && isName(sum.Y, cursor.Name) {
+		return cursor.Name
+	}
+	return ""
+}
+
+// shortPage names v of len(v) < name or name > len(v).
+func shortPage(cmp *ast.BinaryExpr, name string) string {
+	switch {
+	case cmp.Op == token.LSS && isName(cmp.Y, name):
+		return lenOf(cmp.X)
+	case cmp.Op == token.GTR && isName(cmp.X, name):
+		return lenOf(cmp.Y)
+	}
+	return ""
+}
+
+// endsLoop reports an if without else whose body only breaks or returns.
+func endsLoop(stop *ast.IfStmt) bool {
+	if stop.Else != nil || len(stop.Body.List) != 1 {
+		return false
+	}
+	switch s := stop.Body.List[0].(type) {
+	case *ast.BranchStmt:
+		return s.Tok == token.BREAK
+	case *ast.ReturnStmt:
 		return true
 	}
-	for _, call := range calls {
-		if passesWithCursor(call, name, assigned) {
+	return false
+}
+
+// sliceBound reports whether the sum at the top of stack bounds a slice:
+// s[i:i+c], s[i:min(i+c, len(s))] or end := min(i+c, len(s)).
+func sliceBound(stack []ast.Node) bool {
+	parent := stack[len(stack)-2]
+	if _, ok := parent.(*ast.SliceExpr); ok {
+		return true
+	}
+	// With len(s) second, the sum can only be the first argument.
+	call, ok := parent.(*ast.CallExpr)
+	if !ok || !isName(call.Fun, "min") || len(call.Args) != 2 || lenOf(call.Args[1]) == "" {
+		return false
+	}
+	switch stack[len(stack)-3].(type) {
+	case *ast.SliceExpr:
+		return true
+	case *ast.AssignStmt:
+		return true
+	}
+	return false
+}
+
+func passes(call *ast.CallExpr, name string) bool {
+	for _, arg := range call.Args {
+		if isName(arg, name) {
 			return true
 		}
 	}
 	return false
 }
 
-// cursorStep reports offset += name, offset = offset + name or offset = name + offset.
-// The operator of the sum is left to readLoopUse: name under any other
-// operator is another use, which keeps the constant a contract anyway.
-func cursorStep(assign *ast.AssignStmt, name string) bool {
-	if assign.Tok == token.ADD_ASSIGN {
-		return isName(assign.Rhs[0], name)
-	}
-	cursor, ok := assign.Lhs[0].(*ast.Ident)
-	sum, isSum := assign.Rhs[0].(*ast.BinaryExpr)
-	if !ok || !isSum {
-		return false
-	}
-	return isName(sum.X, cursor.Name) && isName(sum.Y, name) || isName(sum.X, name) && isName(sum.Y, cursor.Name)
-}
-
-// shortPage reports len(rows) < name or name > len(rows); an empty name
-// takes any operand in its place.
-func shortPage(cmp *ast.BinaryExpr, name string) bool {
-	return cmp.Op == token.LSS && lenCall(cmp.X) && (name == "" || isName(cmp.Y, name)) ||
-		cmp.Op == token.GTR && lenCall(cmp.Y) && (name == "" || isName(cmp.X, name))
-}
-
-// passesWithCursor reports a call that takes name and a variable of assigned.
-func passesWithCursor(call *ast.CallExpr, name string, assigned map[string]bool) bool {
-	page, cursor := false, false
-	for _, arg := range call.Args {
-		ident, ok := arg.(*ast.Ident)
-		if !ok {
-			continue
+func anyName(exprs []ast.Expr, set map[string]bool) bool {
+	for _, expr := range exprs {
+		if ident, ok := expr.(*ast.Ident); ok && set[ident.Name] {
+			return true
 		}
-		page = page || ident.Name == name
-		cursor = cursor || assigned[ident.Name]
 	}
-	return page && cursor
+	return false
 }
 
 func isName(expr ast.Expr, name string) bool {
@@ -274,13 +337,16 @@ func isName(expr ast.Expr, name string) bool {
 	return ok && ident.Name == name
 }
 
-func lenCall(expr ast.Expr) bool {
+// lenOf names v of len(v).
+func lenOf(expr ast.Expr) string {
 	call, ok := expr.(*ast.CallExpr)
-	if !ok {
-		return false
+	if !ok || !isName(call.Fun, "len") || len(call.Args) != 1 {
+		return ""
 	}
-	fun, ok := call.Fun.(*ast.Ident)
-	return ok && fun.Name == "len"
+	if v, ok := call.Args[0].(*ast.Ident); ok {
+		return v.Name
+	}
+	return ""
 }
 
 func goNumericValue(expr ast.Expr) (float64, bool) {

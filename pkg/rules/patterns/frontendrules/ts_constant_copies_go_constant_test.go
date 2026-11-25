@@ -1,6 +1,8 @@
 package frontendrules
 
 import (
+	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
@@ -246,12 +248,13 @@ export const payoutsURL = (page: number) => ` + "`/api/payouts?limit=${PAYOUTS_P
 }
 
 // A constant whose every use lies inside a loop that reads in pages of it is
-// not a contract: the loop steps a cursor by it (+= or x = x + c), ends on a
-// short page, or passes it to a call with a cursor it assigns (a stream that only stops on a short page is read
-// in pages too). A use outside
-// such a loop — a clamp helper, a constructor, min, a default, a header, a
-// validator, a conversion returned — keeps the finding, and so does any form
-// the loop does not prove.
+// not a contract: the loop steps a cursor by it (+= or x = x + c), reads a
+// page of it into a variable and ends when that page is short, or bounds a
+// slice by the cursor plus it. A use outside such a loop — a clamp helper, a
+// constructor, min, a default, a header, a validator, a conversion returned —
+// keeps the finding, and so does any form the loop does not prove: a cursor
+// the loop reassigns without a step and a stream that only stops on a short
+// page of an inline call remain findings, as in main.
 func TestTSConstantCopiesGoConstantReadLoops(t *testing.T) {
 	files := map[string]string{
 		"internal/orders/orders.go": `package orders
@@ -298,7 +301,8 @@ func Tail(read func(limit, offset int) []string, base int) []string {
 func Lines(read func(limit, offset int) []string, base int) int {
 	n := 0
 	for offset := 0; ; offset = linesPage + offset {
-		n += len(read(linesPage, base+offset))
+		rows := read(linesPage, base+offset)
+		n += len(rows)
 		if n == 0 {
 			return n
 		}
@@ -512,8 +516,12 @@ func Walk(read func(limit, offset int) []string) {
 
 const SnapshotsPage = 300
 
-func Walk(read func(limit, offset int) int) {
-	for offset := 0; read(SnapshotsPage, offset) > 0; offset += SnapshotsPage {
+func Walk(read func(limit, offset int) []string) {
+	for offset := 0; ; offset += SnapshotsPage {
+		rows := read(SnapshotsPage, offset)
+		if len(rows) < SnapshotsPage {
+			return
+		}
 	}
 }
 `,
@@ -588,7 +596,8 @@ func Walk(read func(limit, offset int) []string, keys []string, run func(func())
 		}
 	}
 	for offset := 0; ; offset += lessPage {
-		if len(read(lessPage, offset)) <= lessPage {
+		rows := read(lessPage, offset)
+		if len(rows) <= lessPage {
 			break
 		}
 	}
@@ -664,11 +673,464 @@ const FIELD_PAGE = 460
 `,
 	}
 	assert.Equal(t, []string{
+		"web/loops.ts:1",
 		"web/loops.ts:10", "web/loops.ts:11", "web/loops.ts:12", "web/loops.ts:13", "web/loops.ts:14",
 		"web/loops.ts:15", "web/loops.ts:16", "web/loops.ts:17", "web/loops.ts:18", "web/loops.ts:19",
 		"web/loops.ts:20", "web/loops.ts:21", "web/loops.ts:22", "web/loops.ts:23", "web/loops.ts:24",
 		"web/loops.ts:25", "web/loops.ts:26", "web/loops.ts:27", "web/loops.ts:28", "web/loops.ts:29",
-		"web/loops.ts:31",
+		"web/loops.ts:30", "web/loops.ts:31",
 		"web/loops.ts:6", "web/loops.ts:7", "web/loops.ts:8", "web/loops.ts:9",
 	}, rulestest.ProjectFilesRulePlaces(t, NewTSConstantCopiesGoConstantRule(), files))
+}
+
+// Only the listed forms of a paged read make a constant internal: a step of a
+// cursor as a statement of its own, a page read into a variable by a call in
+// an assignment, a stop on a short page of that variable that breaks or
+// returns, and a slice bound by the stepped cursor plus the constant. Any
+// other form inside such a loop — a value in a response, a return, a sum, the
+// condition of the for, an argument of a call that is not a read — is a
+// contract, as in main. The last four constants of web/forms.ts are known
+// false findings left as in main: a page put in a params literal, a page
+// formatted into a query by a helper, a buffer preallocated by it and a cursor
+// moved by the length of the page.
+func TestTSConstantCopiesGoConstantPagedReadForms(t *testing.T) {
+	files := map[string]string{
+		"internal/shop/shop.go": `package shop
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+const productsPage = 1010
+
+type Page struct {
+	Items []string
+	Next  int
+}
+
+func List(w http.ResponseWriter, read func(limit, offset int) []string, offset int) {
+	for {
+		rows := read(productsPage, offset)
+		if len(rows) > 1 || len(rows) < productsPage {
+			_ = json.NewEncoder(w).Encode(Page{Items: rows, Next: offset + productsPage})
+			return
+		}
+		offset += productsPage
+	}
+}
+`,
+		"internal/inbox/inbox.go": `package inbox
+
+const messagesPage = 1020
+
+func NextPage(read func(limit, offset int) []string, offset int) ([]string, int) {
+	for {
+		rows := read(messagesPage, offset)
+		if len(rows) > 0 {
+			return rows, offset + messagesPage
+		}
+		offset += messagesPage
+	}
+}
+`,
+		"internal/finder/finder.go": `package finder
+
+const hitsPage = 1030
+
+func Search(read func(cursor string, limit int) ([]string, string), cursor string) []string {
+	var out []string
+	for len(out) < hitsPage && cursor != "end" {
+		hits, next := read(cursor, hitsPage)
+		out = append(out, hits...)
+		cursor = next
+	}
+	return out
+}
+`,
+		"internal/bulk/bulk.go": `package bulk
+
+import (
+	"errors"
+	"strings"
+)
+
+const maxBulkItems = 1040
+
+func ensureAtMost(n, limit int) error {
+	if n > limit {
+		return errors.New("too many ids")
+	}
+	return nil
+}
+
+func Parse(rest string) ([]string, error) {
+	var ids []string
+	n := 0
+	for rest != "" {
+		var id string
+		id, rest, _ = strings.Cut(rest, ",")
+		ids = append(ids, id)
+		n = len(ids)
+		if err := ensureAtMost(n, maxBulkItems); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
+}
+`,
+		"internal/dump/dump.go": `package dump
+
+import (
+	"net/http"
+	"strconv"
+)
+
+const dumpChunk = 1050
+
+func Dump(w http.ResponseWriter, read func(limit, offset int) []string) {
+	for offset := 0; ; offset += dumpChunk {
+		rows := read(dumpChunk, offset)
+		if offset == 0 {
+			w.Header().Set("X-Chunk-Size", strconv.Itoa(dumpChunk))
+		}
+		if len(rows) < dumpChunk {
+			return
+		}
+	}
+}
+`,
+		"internal/forms/forms.go": `package forms
+
+type cursor struct{ n int }
+
+const (
+	fieldStepPage = 1100
+	pairStepPage  = 1110
+	backPage      = 1120
+	inlinePage    = 1130
+	pairReadPage  = 1140
+	twinPage      = 1150
+	orPage        = 1160
+	noisyPage     = 1170
+	elsePage      = 1180
+	bufPage       = 1190
+	overPage      = 1200
+	skipPage      = 1210
+	skewPage      = 1220
+	totalPage     = 1230
+	minArgPage    = 1240
+	logPage       = 1250
+	maxPage       = 1260
+	flipPage      = 1270
+	scaledPage    = 1280
+	slicePage     = 1290
+	clipPage      = 1300
+	shortPage     = 1310
+	loneStepPage  = 1320
+	hiddenPage    = 1330
+	definedPage   = 1340
+	limitPage     = 1350
+	tallerPage    = 1360
+	capPage       = 1370
+	onePage       = 1380
+	litPage       = 1390
+	closureRead   = 1395
+	deadPage      = 1396
+)
+
+func lone(off int) int {
+	off += loneStepPage
+	return off
+}
+
+func Forms(read func(limit, offset int) []string, ids []string, log func(int), run func(func()), limit int) {
+	var cur cursor
+	for cur.n < len(ids) {
+		_ = read(fieldStepPage, cur.n)
+		cur.n += fieldStepPage
+	}
+	for off, n := 0, 0; n < len(ids); {
+		_ = read(pairStepPage, off)
+		off, n = off+pairStepPage, n+1
+	}
+	for off := len(ids); off > 0; off -= backPage {
+		_ = read(backPage, off)
+	}
+	for off := 0; ; off += inlinePage {
+		log(len(read(inlinePage, off)))
+	}
+	for off := 0; off < len(ids); off += pairReadPage {
+		rows, n := read(pairReadPage, off), 0
+		log(len(rows) + n)
+	}
+	for {
+		rows := read(twinPage, 0)
+		more := read(twinPage, 1)
+		log(len(rows))
+		if len(more) < twinPage {
+			break
+		}
+	}
+	for {
+		rows := read(orPage, 0)
+		if len(rows) == 0 || len(rows) < orPage {
+			break
+		}
+	}
+	for {
+		rows := read(noisyPage, 0)
+		if len(rows) < noisyPage {
+			log(0)
+			break
+		}
+	}
+	for {
+		rows := read(elsePage, 0)
+		if len(rows) < elsePage {
+			break
+		} else {
+			log(0)
+		}
+	}
+	for {
+		buf := read(0, 0)
+		if len(buf) < bufPage {
+			break
+		}
+	}
+	for {
+		rows := read(overPage, 0)
+		if len(rows) > overPage {
+			break
+		}
+	}
+	for i := 0; i < 3; i++ {
+		rows := read(skipPage, i)
+		if len(rows) < skipPage {
+			continue
+		}
+	}
+	for i, j := 0, 0; i < len(ids); i += skewPage {
+		log(len(ids[j : j+skewPage]))
+	}
+	for i := 0; i < len(ids); i += totalPage {
+		end := min(i+totalPage, 7)
+		log(end)
+	}
+	for i := 0; i < len(ids); i += minArgPage {
+		log(min(i+minArgPage, len(ids)))
+	}
+	for i := 0; i < len(ids); i += logPage {
+		log(i + logPage)
+	}
+	for i := 0; i < len(ids); i += maxPage {
+		end := max(i+maxPage, len(ids))
+		log(end)
+	}
+	for i := 0; i < len(ids); i += flipPage {
+		end := min(len(ids), i+flipPage)
+		log(end)
+	}
+	for i := 0; i < len(ids); i += scaledPage {
+		log(len(ids[i : i*scaledPage]))
+	}
+	for i := 0; i < len(ids); i += slicePage {
+		log(len(ids[i : i+slicePage]))
+	}
+	for i := 0; i < len(ids); i += clipPage {
+		log(len(ids[i:min(i+clipPage, len(ids))]))
+	}
+	for {
+		rows := read(shortPage, 0)
+		if shortPage > len(rows) {
+			return
+		}
+	}
+	for {
+		rows := read(hiddenPage, 0)
+		log(len(rows))
+		run(func() {
+			for off := 0; ; off += hiddenPage {
+				log(off)
+			}
+		})
+	}
+	for off := 0; off < len(ids); off++ {
+		rows := read(definedPage, off)
+		log(len(rows))
+		{
+			off := off + definedPage
+			log(off)
+		}
+	}
+	for {
+		rows := read(limitPage, 0)
+		if len(rows) < limit {
+			break
+		}
+	}
+	for {
+		rows := read(tallerPage, 0)
+		if limit > len(rows) {
+			break
+		}
+	}
+	for {
+		rows := read(capPage, 0)
+		if cap(rows) < capPage {
+			break
+		}
+	}
+	for i := 0; i < len(ids); i += onePage {
+		end := min(i + onePage)
+		log(end)
+	}
+	for i := 0; i < len(ids); i += litPage {
+		log(len(ids[i : 1+litPage]))
+	}
+	for off := 0; ; off += closureRead {
+		run(func() {
+			rows := read(closureRead, off)
+			log(len(rows))
+		})
+	}
+	for {
+		rows := read(deadPage, 0)
+		if len(rows) < deadPage {
+			return
+			log(0)
+		}
+	}
+}
+`,
+		"internal/tickets/tickets.go": `package tickets
+
+const ticketsPage = 1400
+
+type ListParams struct {
+	Cursor string
+	Limit  int
+}
+
+func Pull(read func(ListParams) ([]string, string)) []string {
+	var out []string
+	cursor := ""
+	for {
+		rows, next := read(ListParams{Cursor: cursor, Limit: ticketsPage})
+		out = append(out, rows...)
+		if next == "" {
+			return out
+		}
+		cursor = next
+	}
+}
+`,
+		"internal/billing/billing.go": `package billing
+
+import "fmt"
+
+const chargesBatch = 1410
+
+func chargesQuery(offset int) string {
+	return fmt.Sprintf("SELECT id FROM t LIMIT %d OFFSET %d", chargesBatch, offset)
+}
+
+func IDs(query func(string) []int64) []int64 {
+	var out []int64
+	for offset := 0; ; offset += chargesBatch {
+		rows := query(chargesQuery(offset))
+		out = append(out, rows...)
+		if len(rows) < chargesBatch {
+			return out
+		}
+	}
+}
+`,
+		"internal/places/places.go": `package places
+
+const placesPage = 1420
+
+func All(read func(limit, offset int) []string) []string {
+	out := make([]string, 0, placesPage)
+	for offset := 0; ; offset += placesPage {
+		rows := read(placesPage, offset)
+		out = append(out, rows...)
+		if len(rows) < placesPage {
+			return out
+		}
+	}
+}
+`,
+		"internal/outbox/outbox.go": `package outbox
+
+const outboxPage = 1430
+
+func Drain(read func(limit, offset int) []string, send func(string)) {
+	offset := 0
+	for {
+		rows := read(outboxPage, offset)
+		if len(rows) == 0 {
+			return
+		}
+		for _, m := range rows {
+			send(m)
+		}
+		offset += len(rows)
+	}
+}
+`,
+		"web/forms.ts": `const PRODUCTS_PAGE = 1010
+const MESSAGES_PAGE = 1020
+const HITS_PAGE = 1030
+const MAX_BULK_ITEMS = 1040
+const DUMP_CHUNK = 1050
+const FIELD_STEP_PAGE = 1100
+const PAIR_STEP_PAGE = 1110
+const BACK_PAGE = 1120
+const INLINE_PAGE = 1130
+const PAIR_READ_PAGE = 1140
+const TWIN_PAGE = 1150
+const OR_PAGE = 1160
+const NOISY_PAGE = 1170
+const ELSE_PAGE = 1180
+const BUF_PAGE = 1190
+const OVER_PAGE = 1200
+const SKIP_PAGE = 1210
+const SKEW_PAGE = 1220
+const TOTAL_PAGE = 1230
+const MIN_ARG_PAGE = 1240
+const LOG_PAGE = 1250
+const MAX_PAGE = 1260
+const FLIP_PAGE = 1270
+const SCALED_PAGE = 1280
+const SLICE_PAGE = 1290
+const CLIP_PAGE = 1300
+const SHORT_PAGE = 1310
+const LONE_STEP_PAGE = 1320
+const HIDDEN_PAGE = 1330
+const DEFINED_PAGE = 1340
+const LIMIT_PAGE = 1350
+const TALLER_PAGE = 1360
+const CAP_PAGE = 1370
+const ONE_PAGE = 1380
+const LIT_PAGE = 1390
+const CLOSURE_READ = 1395
+const DEAD_PAGE = 1396
+const TICKETS_PAGE = 1400
+const CHARGES_BATCH = 1410
+const PLACES_PAGE = 1420
+const OUTBOX_PAGE = 1430
+`,
+	}
+	want := []string{}
+	for line := 1; line <= 41; line++ {
+		switch line {
+		case 25, 26, 27:
+			continue
+		}
+		want = append(want, fmt.Sprintf("web/forms.ts:%d", line))
+	}
+	sort.Strings(want)
+	assert.Equal(t, want, rulestest.ProjectFilesRulePlaces(t, NewTSConstantCopiesGoConstantRule(), files))
 }
