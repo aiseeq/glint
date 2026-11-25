@@ -129,8 +129,9 @@ func (s *scriptFuncs) epoch(time uint) int {
 }
 
 // hideNames records the names unset, functions too unless -v is given,
-// and the names given to an alias; an alias named as a builtin the rule
-// reads makes the script opaque, as a function of that name does.
+// and the names given to an alias, read without their quotes and escapes;
+// an alias named as a builtin the rule reads makes the script opaque, as a
+// function of that name does, and so does one named at run time.
 func (s *scriptFuncs) hideNames(call *syntax.CallExpr, hidden map[string]bool) {
 	if len(call.Args) == 0 {
 		return
@@ -149,11 +150,10 @@ func (s *scriptFuncs) hideNames(call *syntax.CallExpr, hidden map[string]bool) {
 		}
 	case "alias":
 		for _, arg := range call.Args[1:] {
-			if lit, ok := arg.Parts[0].(*syntax.Lit); ok {
-				name, _, _ := strings.Cut(lit.Value, "=")
-				hidden[name] = true
-				s.opaque = s.opaque || readBuiltins[name]
-			}
+			text, known := wordValue(arg)
+			name, _, _ := strings.Cut(text, "=")
+			hidden[name] = true
+			s.opaque = s.opaque || !known || readBuiltins[name]
 		}
 	}
 }

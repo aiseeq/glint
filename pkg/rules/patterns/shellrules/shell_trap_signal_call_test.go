@@ -1038,6 +1038,28 @@ trap 'echo bye' TERM # want
 true && trap - TERM
 while poll-once; do sleep 5; done
 `,
+		"a1_alias_quoted_whole.sh": `#!/bin/bash
+shopt -s expand_aliases
+alias 'true=false'
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"alias_quoted_part_and_escape.sh": `#!/bin/bash
+shopt -s expand_aliases
+alias "true"=false
+alias tr\ue=false
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"alias_name_from_variable.sh": `#!/bin/bash
+shopt -s expand_aliases
+alias "$name=false"
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
 		"alias_other_name_keeps_status.sh": `#!/bin/bash
 shopt -s expand_aliases
 alias ll='ls -l'
