@@ -70,8 +70,9 @@ func newScriptFuncs(file *syntax.File) *scriptFuncs {
 				}
 			}
 		case *syntax.CallExpr:
-			s.hideNames(x, hidden)
-			s.noteRunner(x)
+			args := strippedCommand(x.Args)
+			s.hideNames(args, hidden)
+			s.noteRunner(args)
 		}
 		return true
 	})
@@ -83,10 +84,32 @@ func newScriptFuncs(file *syntax.File) *scriptFuncs {
 	return s
 }
 
+// strippedCommand drops builtin and command, with the options -p, -v and -V
+// of command, before the name of a command, so a sign of an opaque script
+// is read whatever it is written behind; a backslash or quotes in the name
+// go with its value.
+func strippedCommand(args []*syntax.Word) []*syntax.Word {
+	n := 0
+	for n < len(args) {
+		name := wordLit(args[n])
+		if name != "builtin" && name != "command" {
+			break
+		}
+		for n++; name == "command" && n < len(args) && commandOption(wordLit(args[n])); n++ {
+		}
+	}
+	return args[n:]
+}
+
+// commandOption is an option word of command: --, or - with p, v and V.
+func commandOption(word string) bool {
+	return word == "--" || len(word) > 1 && word[0] == '-' && strings.Trim(word[1:], "pvV") == ""
+}
+
 // noteRunner marks a command that reads a file other than /dev/null,
-// evaluates a string or is named by a variable or a substitution.
-func (s *scriptFuncs) noteRunner(call *syntax.CallExpr) {
-	args, _ := unprefixed(call.Args)
+// evaluates a string, defines an alias or is named by a variable or a
+// substitution; alias with no arguments or with -p alone only lists.
+func (s *scriptFuncs) noteRunner(args []*syntax.Word) {
 	if len(args) == 0 {
 		return
 	}
@@ -94,6 +117,10 @@ func (s *scriptFuncs) noteRunner(call *syntax.CallExpr) {
 	switch {
 	case !known, name == "eval":
 		s.opaque = true
+	case name == "alias":
+		for _, arg := range args[1:] {
+			s.opaque = s.opaque || wordLit(arg) != "-p"
+		}
 	case name == "." || name == "source":
 		if len(args) < 2 || wordLit(args[1]) != "/dev/null" {
 			s.sourced, s.opaque = true, true
@@ -128,33 +155,20 @@ func (s *scriptFuncs) epoch(time uint) int {
 	return n
 }
 
-// hideNames records the names unset, functions too unless -v is given,
-// and the names given to an alias, read without their quotes and escapes;
-// an alias named as a builtin the rule reads makes the script opaque, as a
-// function of that name does, and so does one named at run time.
-func (s *scriptFuncs) hideNames(call *syntax.CallExpr, hidden map[string]bool) {
-	if len(call.Args) == 0 {
+// hideNames records the names unset, functions too unless -v is given.
+func (s *scriptFuncs) hideNames(args []*syntax.Word, hidden map[string]bool) {
+	if len(args) == 0 || wordLit(args[0]) != "unset" {
 		return
 	}
-	switch wordLit(call.Args[0]) {
-	case "unset":
-		for _, arg := range call.Args[1:] {
-			name := wordLit(arg)
-			if strings.HasPrefix(name, "-") {
-				if strings.Contains(name, "v") {
-					return
-				}
-				continue
+	for _, arg := range args[1:] {
+		name := wordLit(arg)
+		if strings.HasPrefix(name, "-") {
+			if strings.Contains(name, "v") {
+				return
 			}
-			hidden[name] = true
+			continue
 		}
-	case "alias":
-		for _, arg := range call.Args[1:] {
-			text, known := wordValue(arg)
-			name, _, _ := strings.Cut(text, "=")
-			hidden[name] = true
-			s.opaque = s.opaque || !known || readBuiltins[name]
-		}
+		hidden[name] = true
 	}
 }
 

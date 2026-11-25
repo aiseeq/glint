@@ -273,9 +273,9 @@ func TestShellTrapSignalWithoutExitFunctionCallChain(t *testing.T) {
 }
 
 // A call is followed only into the function the script surely runs: one
-// defined once, at the top level of the script, before the call, never
-// unset and not hidden by an alias. Otherwise the call is work and its
-// status is unknown, as in main.
+// defined once, at the top level of the script, before the call and never
+// unset. Otherwise the call is work and its status is unknown, as in main;
+// a script that defines an alias is read as main reads it.
 func TestShellTrapSignalWithoutExitFunctionVisibility(t *testing.T) {
 	for name, source := range map[string]string{
 		"d02_call_before_def.sh": `#!/bin/bash
@@ -344,10 +344,10 @@ unset -v f
 f
 while poll-once; do sleep 5; done
 `,
-		"alias_other_name.sh": `#!/bin/bash
+		"alias_other_name_fn_as_main.sh": `#!/bin/bash
 f() { trap - TERM; }
 alias ll='ls -l'
-trap 'echo bye' TERM
+trap 'echo bye' TERM # want
 f
 while poll-once; do sleep 5; done
 `,
@@ -1006,9 +1006,8 @@ while poll-once; do sleep 5; done
 	}
 }
 
-// In an opaque script the handler is read as main reads it, and an alias
-// that names a builtin the rule reads makes a script opaque as a function
-// of that name does.
+// In an opaque script the handler is read as main reads it, and a call of
+// alias makes a script opaque unless it only lists the aliases.
 func TestShellTrapSignalWithoutExitOpaqueHandlerAndAlias(t *testing.T) {
 	for name, source := range map[string]string{
 		"q01_false_fn_handler_or_exit.sh": `#!/bin/bash
@@ -1060,9 +1059,102 @@ trap 'echo bye' TERM # want
 true && trap - TERM
 while poll-once; do sleep 5; done
 `,
-		"alias_other_name_keeps_status.sh": `#!/bin/bash
+		"alias_other_name_as_main.sh": `#!/bin/bash
 shopt -s expand_aliases
 alias ll='ls -l'
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"alias_listing_keeps_status.sh": `#!/bin/bash
+alias
+alias -p >/dev/null
+trap 'echo bye' TERM
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+	} {
+		shellWanted(t, "shell-trap-signal-without-exit", name, source)
+	}
+}
+
+// A sign of an opaque script is read behind builtin, command with its
+// options and a backslash, and so is unset.
+func TestShellTrapSignalWithoutExitPrefixedSigns(t *testing.T) {
+	for name, source := range map[string]string{
+		"b4_builtin_alias.sh": `#!/bin/bash
+shopt -s expand_aliases
+builtin alias true=false
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"command_options_alias.sh": `#!/bin/bash
+shopt -s expand_aliases
+command -p alias true=false
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"backslash_alias.sh": `#!/bin/bash
+shopt -s expand_aliases
+\alias true=false
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"builtin_command_eval.sh": `#!/bin/bash
+builtin command eval 'true() { return 1; }'
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"command_dashes_eval.sh": `#!/bin/bash
+command -- eval 'true() { return 1; }'
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"command_source.sh": `#!/bin/bash
+command -pV . ./lib.sh
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"builtin_dot.sh": `#!/bin/bash
+builtin . ./lib.sh
+trap 'echo bye' TERM # want
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"command_name_from_variable.sh": `#!/bin/bash
+command -v "$runner" 'false() { :; }'
+trap 'echo bye' TERM # want
+false || trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"builtin_unset_function.sh": `#!/bin/bash
+reset_term() { trap - TERM; }
+builtin unset -f reset_term
+trap 'echo bye' TERM # want
+reset_term
+while poll-once; do sleep 5; done
+`,
+		"builtin_alias_listing_keeps_status.sh": `#!/bin/bash
+builtin alias
+command -p alias -p >/dev/null
+trap 'echo bye' TERM
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"command_lone_dash_runs_no_eval.sh": `#!/bin/bash
+command - eval 'true() { return 1; }' 2>/dev/null
+trap 'echo bye' TERM
+true && trap - TERM
+while poll-once; do sleep 5; done
+`,
+		"command_dev_null_keeps_status.sh": `#!/bin/bash
+command -p . /dev/null
 trap 'echo bye' TERM
 true && trap - TERM
 while poll-once; do sleep 5; done
