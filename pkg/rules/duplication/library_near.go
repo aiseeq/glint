@@ -568,7 +568,8 @@ func goCannotPanic(info *types.Info, node ast.Node) bool {
 			return true
 		}
 		for _, element := range x.Elts {
-			if !goComparesSafely(info.TypeOf(element.(*ast.KeyValueExpr).Key)) {
+			// A map literal gives every element a key.
+			if pair, ok := element.(*ast.KeyValueExpr); ok && !goComparesSafely(info.TypeOf(pair.Key)) {
 				return false
 			}
 		}
@@ -589,8 +590,13 @@ func goCannotPanic(info *types.Info, node ast.Node) bool {
 		}
 		return true
 	case *ast.SwitchStmt:
-		for _, clause := range x.Body.List {
-			for _, value := range clause.(*ast.CaseClause).List {
+		for _, stmt := range x.Body.List {
+			// The body of a switch holds its case clauses alone.
+			clause, ok := stmt.(*ast.CaseClause)
+			if !ok {
+				continue
+			}
+			for _, value := range clause.List {
 				if x.Tag != nil && !goOpCannotPanic(info, token.EQL, x.Tag, value) {
 					return false
 				}
@@ -970,7 +976,7 @@ func (w *goNearWalker) updateKind(kind string, target ast.Expr, stmt ast.Stmt, n
 			return false
 		}
 		stack = append(stack, node)
-		if id, ok := node.(*ast.Ident); ok && obj != nil && w.n.info.ObjectOf(id) == obj && !goFieldsApart(w.n.info, goSelected(stack), target) {
+		if id, ok := node.(*ast.Ident); ok && obj != nil && w.n.info.ObjectOf(id) == obj && !goFieldsApart(w.n.info, goSelected(id, stack), target) {
 			count++
 		}
 		return true
@@ -981,11 +987,11 @@ func (w *goNearWalker) updateKind(kind string, target ast.Expr, stmt ast.Stmt, n
 	return kind
 }
 
-// goSelected is the outermost selector that starts from the name on top of
-// stack: s.In.N for s. A name in parentheses, (s).N, stands for the whole
-// variable.
-func goSelected(stack []ast.Node) ast.Expr {
-	e := stack[len(stack)-1].(ast.Expr)
+// goSelected is the outermost selector that starts from id, the node on top
+// of stack: s.In.N for s. A name in parentheses, (s).N, stands for the
+// whole variable.
+func goSelected(id *ast.Ident, stack []ast.Node) ast.Expr {
+	var e ast.Expr = id
 	for k := len(stack) - 2; k >= 0; k-- {
 		switch x := stack[k].(type) {
 		case *ast.SelectorExpr:
@@ -1138,7 +1144,10 @@ func (w *goNearWalker) untouchedWhileNamed(assign *ast.AssignStmt, obj types.Obj
 		if w.bodyWrites == nil {
 			w.bodyWrites = goWrites(w.body)
 		}
-		written, named = w.bodyWrites, w.n.info.Selections[sel].Obj().(*types.Var)
+		// goReaches holds for a field through a pointer alone.
+		if field, ok := w.n.info.Selections[sel].Obj().(*types.Var); ok {
+			written, named = w.bodyWrites, field
+		}
 	}
 	free := true
 	ast.Inspect(w.body, func(node ast.Node) bool {
@@ -1749,8 +1758,8 @@ func newNearCandidate(fn libraryMatch, body nearBody) *nearCandidate {
 		set[i/matchWordBits] |= 1 << (i % matchWordBits)
 	}
 	shapes := make(map[uint64][]int, len(body.Roles))
-	for i, role := range body.Roles {
-		shapes[role.Shape] = append(shapes[role.Shape], i)
+	for i := range body.Roles {
+		shapes[body.Roles[i].Shape] = append(shapes[body.Roles[i].Shape], i)
 	}
 	return &nearCandidate{fn: fn, body: body, match: match, shapes: shapes, calls: strings.Join(body.Calls, "\x00"), ops: strings.Join(body.Ops, "\x00")}
 }
@@ -1847,18 +1856,19 @@ func subsetOf(sub, set []string) bool {
 func sameRoles(c *nearCandidate, body nearBody) bool {
 	roles := body.Roles
 	shapes := make(map[uint64][]int, len(roles))
-	for i, role := range roles {
-		shapes[role.Shape] = append(shapes[role.Shape], i)
+	for i := range roles {
+		shapes[roles[i].Shape] = append(shapes[roles[i].Shape], i)
 	}
 	m := &roleMapping{forward: map[int]int{}, back: map[int]int{}}
 	ownPartner, libPartner := unpaired(len(roles)), unpaired(len(c.body.Roles))
 	var shared []int
-	for i, role := range roles {
+	for i := range roles {
+		role := &roles[i]
 		lib := c.shapes[role.Shape]
 		switch {
 		case len(lib) == 0:
 		case len(lib) == 1 && len(shapes[role.Shape]) == 1:
-			if !m.unify(role, c.body.Roles[lib[0]]) {
+			if !m.unify(*role, c.body.Roles[lib[0]]) {
 				return false
 			}
 			ownPartner[i], libPartner[lib[0]] = lib[0], i
@@ -1928,10 +1938,10 @@ func keepsUnpairedFixed(roles, lib []nearRole, partner []int) bool {
 		}
 	}
 	last = -1
-	for j, role := range lib {
+	for j := range lib {
 		if paired[j] {
 			last = j
-		} else if role.Fixed {
+		} else if lib[j].Fixed {
 			gaps[last]--
 		}
 	}
@@ -1950,8 +1960,8 @@ func keepsUnpairedFixed(roles, lib []nearRole, partner []int) bool {
 // library function, which reads p.Name after it, reads the new one.
 func keepsOwnValues(roles []nearRole, partner []int) bool {
 	lastRead := make(map[int]int)
-	for k, role := range roles {
-		for _, v := range role.Locals {
+	for k := range roles {
+		for _, v := range roles[k].Locals {
 			lastRead[v] = k
 		}
 	}
@@ -2190,7 +2200,8 @@ func keepsJumps(roles []nearRole, partner []int) bool {
 			end[p] = max(end[p], end[i])
 		}
 	}
-	for j, role := range roles {
+	for j := range roles {
+		role := &roles[j]
 		if !role.Jump || partner[j] < 0 {
 			continue
 		}
