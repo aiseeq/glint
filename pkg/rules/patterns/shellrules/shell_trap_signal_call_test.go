@@ -1163,3 +1163,62 @@ while poll-once; do sleep 5; done
 		shellWanted(t, "shell-trap-signal-without-exit", name, source)
 	}
 }
+
+// The place surely run before a body runs does not depend on the order the
+// functions of a cycle of calls are walked in: inner runs only from outer,
+// which the top level calls after stop_term is defined, whether or not a
+// trap in outer is walked first.
+func TestShellTrapSignalWithoutExitCycleWalkOrder(t *testing.T) {
+	for name, source := range map[string]string{
+		"cycle_entered_at_caller_first.sh": `#!/bin/bash
+outer() { trap 'echo int' INT; trap - INT; inner; }
+inner() { trap 'echo bye' TERM; stop_term; while poll-once; do sleep 5; done; mid; }
+stop_term() { trap - TERM; }
+mid() { outer; }
+outer
+`,
+		"cycle_entered_at_callee.sh": `#!/bin/bash
+outer() { inner; }
+inner() { trap 'echo bye' TERM; stop_term; while poll-once; do sleep 5; done; mid; }
+stop_term() { trap - TERM; }
+mid() { outer; }
+outer
+`,
+		"earliest_way_back_kept.sh": `#!/bin/bash
+inner() { trap 'echo bye' TERM; stop_term; while poll-once; do sleep 5; done; } # want
+mid() { inner; }
+mid
+stop_term() { trap - TERM; }
+inner
+`,
+		"way_back_settled_at_its_least.sh": `#!/bin/bash
+inner() { trap 'echo bye' TERM; stop_term; while poll-once; do sleep 5; done; } # want
+mid() { inner; }
+early() { mid; }
+start() { early; late; }
+start
+stop_term() { trap - TERM; }
+late() { mid; }
+`,
+		"function_never_called_plainly.sh": `#!/bin/bash
+inner() { trap 'echo bye' TERM; stop_term; while poll-once; do sleep 5; done; } # want
+if inner; then :; fi
+stop_term() { trap - TERM; }
+`,
+		"empty_command_name_not_a_caller.sh": `#!/bin/bash
+inner() { trap 'echo bye' TERM; stop_term; while poll-once; do sleep 5; done; } # want
+inner
+stop_term() { trap - TERM; }
+'' 2>/dev/null
+`,
+		"cycle_call_before_definition.sh": `#!/bin/bash
+outer() { trap 'echo int' INT; trap - INT; inner; }
+inner() { trap 'echo bye' TERM; stop_term; while poll-once; do sleep 5; done; mid; } # want
+mid() { outer; }
+outer
+stop_term() { trap - TERM; }
+`,
+	} {
+		shellWanted(t, "shell-trap-signal-without-exit", name, source)
+	}
+}

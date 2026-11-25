@@ -27,7 +27,8 @@ type stmtPlace struct {
 // command being followed, the call at the top level that runs it as the
 // latest known, and span the definitions run for which what has been
 // followed so far holds; runs keeps the time for the body of each
-// function.
+// function, cycles the place a walk back through the callers may stop at
+// each function.
 type trapFlow struct {
 	order    []*syntax.Stmt
 	where    map[*syntax.Stmt]stmtPlace
@@ -41,6 +42,7 @@ type trapFlow struct {
 	time     uint
 	span     epochSpan
 	runs     map[string]uint
+	cycles   map[string]uint
 }
 
 // trapEntry is the effect of a call with the signals that keep the
@@ -77,6 +79,7 @@ func (s *scriptFuncs) flow(file *syntax.File) *trapFlow {
 		visiting: make(map[string]bool),
 		span:     anyEpoch,
 		runs:     make(map[string]uint),
+		cycles:   make(map[string]uint),
 	}
 	owner := make(map[syntax.Command]*syntax.Stmt)
 	bodyOf := make(map[*syntax.Stmt]string)
@@ -182,8 +185,9 @@ func (f *trapFlow) recordCall(stmt *syntax.Stmt) {
 	if !ok || stmt.Background || len(call.Args) == 0 {
 		return
 	}
-	name := wordLit(call.Args[0])
-	f.calls[name] = append(f.calls[name], stmt)
+	if name := wordLit(call.Args[0]); name != "" {
+		f.calls[name] = append(f.calls[name], stmt)
+	}
 }
 
 // followedByWork reports whether some sequence of statements that runs
@@ -281,7 +285,7 @@ func (f *trapFlow) trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool 
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && callName(call) == "return" {
 			return out.work
 		}
-		f.time = f.bodyRuns(f.where[stmt].fn, make(map[string]bool))
+		f.time = f.bodyRuns(f.where[stmt].fn)
 		out = out.seq(f.afterTrap(stmt, out.left))
 		if out.left == 0 {
 			return out.found
@@ -293,25 +297,76 @@ func (f *trapFlow) trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool 
 // bodyRuns is a place in the script that has surely run before the body
 // of fn runs: the earliest of its plain calls, each taken at the place
 // that has run before the body holding it. It is zero, nothing known,
-// for the top level, a function never called plainly and a cycle of calls.
-func (f *trapFlow) bodyRuns(fn string, seen map[string]bool) uint {
-	if fn == "" || seen[fn] {
-		return 0
-	}
+// for the top level and a function never called plainly, and a cycle of
+// calls knows only its own calls. Walked back through the callers, it is
+// the least, over the functions reached, of the latest call on the way and
+// the place the walk may stop there, so it does not depend on which
+// function of a cycle is walked first.
+func (f *trapFlow) bodyRuns(fn string) uint {
 	if at, ok := f.runs[fn]; ok {
 		return at
 	}
-	seen[fn] = true
-	var at uint
-	for i, call := range f.calls[fn] {
-		site := max(call.Pos().Offset(), f.bodyRuns(f.where[call].fn, seen))
-		if i == 0 || site < at {
-			at = site
-		}
+	at := uint(math.MaxUint)
+	for caller, way := range f.callerWays(fn) {
+		at = min(at, max(way, f.stopAt(caller)))
 	}
-	delete(seen, fn)
 	f.runs[fn] = at
 	return at
+}
+
+// stopAt is the place a walk back through the callers may stop at fn:
+// zero at the top level, which no call names, and at a function never
+// called plainly, else the latest call on the cycle of calls back to fn
+// whose latest call is the earliest, MaxUint where no cycle comes back.
+func (f *trapFlow) stopAt(fn string) uint {
+	if len(f.calls[fn]) == 0 {
+		return 0
+	}
+	if at, ok := f.cycles[fn]; ok {
+		return at
+	}
+	at := uint(math.MaxUint)
+	for callee, way := range f.callerWays(fn) {
+		for _, call := range f.calls[callee] {
+			if f.where[call].fn == fn {
+				at = min(at, max(way, call.Pos().Offset()))
+			}
+		}
+	}
+	f.cycles[fn] = at
+	return at
+}
+
+// callerWays walks back from fn through the plain calls and gives, for
+// each function reached and the top level, the least over the ways back to
+// it of the latest call on the way.
+func (f *trapFlow) callerWays(fn string) map[string]uint {
+	ways := map[string]uint{fn: 0}
+	reached := []string{fn}
+	done := make(map[string]bool)
+	for {
+		next, found := "", false
+		for _, name := range reached {
+			if !done[name] && (!found || ways[name] < ways[next]) {
+				next, found = name, true
+			}
+		}
+		if !found {
+			return ways
+		}
+		done[next] = true
+		for _, call := range f.calls[next] {
+			caller := f.where[call].fn
+			way := max(ways[next], call.Pos().Offset())
+			old, ok := ways[caller]
+			if !ok {
+				reached = append(reached, caller)
+			}
+			if !ok || way < old {
+				ways[caller] = way
+			}
+		}
+	}
 }
 
 // exitsShell holds for exit and for exec of a command, which replaces the

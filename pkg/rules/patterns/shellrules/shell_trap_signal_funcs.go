@@ -95,7 +95,9 @@ func strippedCommand(args []*syntax.Word) []*syntax.Word {
 		if name != "builtin" && name != "command" {
 			break
 		}
-		for n++; name == "command" && n < len(args) && commandOption(wordLit(args[n])); n++ {
+		n++
+		for name == "command" && n < len(args) && commandOption(wordLit(args[n])) {
+			n++
 		}
 	}
 	return args[n:]
