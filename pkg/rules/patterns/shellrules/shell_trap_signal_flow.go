@@ -1,6 +1,10 @@
 package shellrules
 
-import "mvdan.cc/sh/v3/syntax"
+import (
+	"math"
+
+	"mvdan.cc/sh/v3/syntax"
+)
 
 // stmtPlace is where a statement stands: its list and index, the compound
 // statement whose following statements run when the list ends (an if or a
@@ -14,15 +18,66 @@ type stmtPlace struct {
 }
 
 // trapFlow knows, for each statement in a statement list of the script,
-// which statements can run after it.
+// which statements can run after it, and what a call of a function of the
+// script does to a trap: funcs tells which function a call runs, blocked
+// holds those whose body is not followed, status finds the status a
+// command goes on with and exits whether a handler exits. memo keeps the
+// effects of the calls of each function, visiting the calls being
+// followed; time is a place in the script that has surely run before the
+// command being followed, the call at the top level that runs it as the
+// latest known, and span the definitions run for which what has been
+// followed so far holds; runs keeps the time for the body of each
+// function.
 type trapFlow struct {
-	order []*syntax.Stmt
-	where map[*syntax.Stmt]stmtPlace
-	calls map[string][]*syntax.Stmt
+	order    []*syntax.Stmt
+	where    map[*syntax.Stmt]stmtPlace
+	calls    map[string][]*syntax.Stmt
+	funcs    *scriptFuncs
+	blocked  map[string]bool
+	status   *exitScan
+	exits    *exitScan
+	memo     map[string][]trapEntry
+	visiting map[string]bool
+	time     uint
+	span     epochSpan
+	runs     map[string]uint
 }
 
-func newTrapFlow(file *syntax.File) *trapFlow {
-	f := &trapFlow{where: make(map[*syntax.Stmt]stmtPlace), calls: make(map[string][]*syntax.Stmt)}
+// trapEntry is the effect of a call with the signals that keep the
+// handler before it, while the number of definitions at the top level run
+// is in span.
+type trapEntry struct {
+	signals uint8
+	span    epochSpan
+	effect  trapEffect
+}
+
+// epochSpan is a range [from, to) of numbers of definitions at the top
+// level run.
+type epochSpan struct{ from, to int }
+
+var anyEpoch = epochSpan{from: 0, to: math.MaxInt}
+
+func (e epochSpan) meet(o epochSpan) epochSpan {
+	return epochSpan{from: max(e.from, o.from), to: min(e.to, o.to)}
+}
+
+func (e epochSpan) holds(epoch int) bool { return e.from <= epoch && epoch < e.to }
+
+// flow follows the statements of the script whose functions s knows.
+func (s *scriptFuncs) flow(file *syntax.File) *trapFlow {
+	f := &trapFlow{
+		where:    make(map[*syntax.Stmt]stmtPlace),
+		calls:    make(map[string][]*syntax.Stmt),
+		funcs:    s,
+		blocked:  make(map[string]bool),
+		status:   s.statusScan(),
+		exits:    s.handlerExits(),
+		memo:     make(map[string][]trapEntry),
+		visiting: make(map[string]bool),
+		span:     anyEpoch,
+		runs:     make(map[string]uint),
+	}
 	owner := make(map[syntax.Command]*syntax.Stmt)
 	bodyOf := make(map[*syntax.Stmt]string)
 	ifUp := make(map[*syntax.IfClause]*syntax.Stmt)
@@ -82,7 +137,23 @@ func newTrapFlow(file *syntax.File) *trapFlow {
 		}
 		return true
 	})
+	for name, fn := range s.decls {
+		f.blocked[name] = returnsEarly(fn.decl.Body) || riskyRedirect(fn.decl.Body.Redirs)
+	}
 	return f
+}
+
+// returnsEarly finds a return other than the last command of a function
+// body: the paths through the body after it do not run.
+func returnsEarly(body *syntax.Stmt) bool {
+	last := body
+	if block, ok := body.Cmd.(*syntax.Block); ok && len(block.Stmts) > 0 {
+		last = block.Stmts[len(block.Stmts)-1]
+	}
+	return foregroundWalk(body, func(n syntax.Node) bool {
+		call, ok := n.(*syntax.CallExpr)
+		return ok && callName(call) == "return" && syntax.Command(call) != last.Cmd
+	})
 }
 
 // childStmts is the statement list of a subshell or a substitution.
@@ -119,7 +190,7 @@ func (f *trapFlow) recordCall(stmt *syntax.Stmt) {
 // after the trap does work while the handler is still set.
 func (f *trapFlow) followedByWork(stmt *syntax.Stmt, signals uint8) bool {
 	for _, tail := range f.continuations(stmt, make(map[string]bool)) {
-		if trapFollowedByWork(tail, signals) {
+		if f.trapFollowedByWork(tail, signals) {
 			return true
 		}
 	}
@@ -197,10 +268,11 @@ func callName(call *syntax.CallExpr) string {
 // replacement is long-lived; other work counts on a path where the handler
 // remains active afterwards or that ends with exit, return or exec of a
 // command.
-func trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool {
+func (f *trapFlow) trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool {
 	if waitThenCleanup(stmts) {
 		return false
 	}
+	defer func() { f.time = 0 }()
 	out := trapEffect{left: signals}
 	for _, stmt := range stmts {
 		if stmt.Background {
@@ -209,12 +281,37 @@ func trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool {
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && callName(call) == "return" {
 			return out.work
 		}
-		out = out.seq(afterTrap(stmt, out.left))
+		f.time = f.bodyRuns(f.where[stmt].fn, make(map[string]bool))
+		out = out.seq(f.afterTrap(stmt, out.left))
 		if out.left == 0 {
 			return out.found
 		}
 	}
 	return out.work
+}
+
+// bodyRuns is a place in the script that has surely run before the body
+// of fn runs: the earliest of its plain calls, each taken at the place
+// that has run before the body holding it. It is zero, nothing known,
+// for the top level, a function never called plainly and a cycle of calls.
+func (f *trapFlow) bodyRuns(fn string, seen map[string]bool) uint {
+	if fn == "" || seen[fn] {
+		return 0
+	}
+	if at, ok := f.runs[fn]; ok {
+		return at
+	}
+	seen[fn] = true
+	var at uint
+	for i, call := range f.calls[fn] {
+		site := max(call.Pos().Offset(), f.bodyRuns(f.where[call].fn, seen))
+		if i == 0 || site < at {
+			at = site
+		}
+	}
+	delete(seen, fn)
+	f.runs[fn] = at
+	return at
 }
 
 // exitsShell holds for exit and for exec of a command, which replaces the
@@ -274,38 +371,71 @@ type trapEffect struct {
 // condition of an if, the left of && and || and every branch of an if or a
 // case, a trap replaces the handler for the commands after it; the right of
 // && and || and a branch replace nothing for what follows, since they may
-// not run. exit and exec of a command end their path. A subshell, a
-// pipeline and a background command neither replace nor end anything in
-// the script. A return in a branch is taken to go on, as the caller does.
-func afterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
+// not run, unless the status of the left is known to run them. exit and
+// exec of a command end their path. A call of a function of the script
+// does what its body does, unless the script is opaque. Nothing in a
+// subshell, a pipeline or a background command replaces a trap or ends the
+// script. A return in a branch goes on, as the caller does.
+func (f *trapFlow) afterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
 	if stmt.Background {
 		return trapEffect{left: signals}
 	}
 	switch x := stmt.Cmd.(type) {
 	case *syntax.CallExpr:
-		if later, ok := signalTrapCall(x); ok {
-			return trapEffect{left: signals &^ later.signals}
-		}
-		if exitsShell(x) {
-			return trapEffect{exits: true}
+		if effect, ok := f.callEffect(stmt, x, signals); ok {
+			return effect
 		}
 	case *syntax.WhileClause, *syntax.ForClause:
 		return trapEffect{found: true}
 	case *syntax.Block:
-		return listAfterTrap(x.Stmts, signals)
+		return f.listAfterTrap(x.Stmts, signals)
 	case *syntax.IfClause:
-		return ifAfterTrap(x, signals)
+		return f.ifAfterTrap(x, signals)
 	case *syntax.CaseClause:
-		return caseAfterTrap(x, signals)
+		return f.caseAfterTrap(x, signals)
 	case *syntax.BinaryCmd:
 		if x.Op == syntax.AndStmt || x.Op == syntax.OrStmt {
-			return binaryAfterTrap(x, signals)
+			return f.binaryAfterTrap(x, signals)
 		}
 	}
-	if runsLoop(stmt) {
-		return trapEffect{found: true}
+	return otherAfterTrap(stmt, signals)
+}
+
+// otherAfterTrap is the effect of a command the walk does not look into:
+// a loop in it runs with the handler on, other work counts.
+func otherAfterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
+	effect := trapEffect{found: runsLoop(stmt)}
+	if !effect.found {
+		effect.work, effect.left = doesWork(stmt), signals
 	}
-	return trapEffect{work: doesWork(stmt), left: signals}
+	return effect
+}
+
+// callEffect: a trap replaces the handler for its signals, exit and exec
+// of a command end the path, and a call of a function of the script is
+// followed.
+func (f *trapFlow) callEffect(stmt *syntax.Stmt, call *syntax.CallExpr, signals uint8) (trapEffect, bool) {
+	if later, ok := signalTrapCall(call); ok {
+		return trapEffect{left: signals &^ later.signals}, true
+	}
+	if exitsShell(call) {
+		return trapEffect{exits: true}, true
+	}
+	return f.callAfterTrap(stmt, call, signals)
+}
+
+// sees holds where a call at a place sees a definition, and narrows span
+// to the definitions run that give the same answer.
+func (f *trapFlow) sees(fn scriptFunc, call uint) bool {
+	seen := f.funcs.seen(fn, max(f.time, call), call)
+	if fn.top && fn.decl.Pos().Offset() >= call {
+		if seen {
+			f.span.from = max(f.span.from, fn.index+1)
+		} else {
+			f.span.to = min(f.span.to, fn.index+1)
+		}
+	}
+	return seen
 }
 
 // seq follows a path that did e and then next. The work of a path is
@@ -332,10 +462,57 @@ func (e trapEffect) orPath(o trapEffect) trapEffect {
 	}
 }
 
-func listAfterTrap(stmts []*syntax.Stmt, signals uint8) trapEffect {
+// callAfterTrap follows a call of a function of the script through its
+// body, so a trap it replaces and an exit it runs on every path hold for
+// the commands after the call. A call through command or builtin skips
+// the function; a call or a definition with a redirection that may not
+// open may not run it; a function already being followed is not followed
+// again; in an opaque script none is, as in main. Inside a
+// function followed, the functions defined are those run before the call
+// at the top level that runs it. The effect of a call holds for the span
+// of definitions run in which its body sees the same functions, and is
+// kept for that span.
+func (f *trapFlow) callAfterTrap(stmt *syntax.Stmt, call *syntax.CallExpr, signals uint8) (trapEffect, bool) {
+	if f.funcs.opaque || len(call.Args) == 0 || riskyRedirect(stmt.Redirs) {
+		return trapEffect{}, false
+	}
+	name := wordLit(call.Args[0])
+	at := call.Pos().Offset()
+	fn, ok := f.funcs.decls[name]
+	if !ok || f.blocked[name] || f.visiting[name] || !f.sees(fn, at) {
+		return trapEffect{}, false
+	}
+	time := max(f.time, at)
+	entry, ok := f.entry(name, signals, f.funcs.epoch(time))
+	if !ok {
+		outer, outerTime := f.span, f.time
+		f.span, f.time = anyEpoch, time
+		f.visiting[name] = true
+		effect := f.afterTrap(fn.decl.Body, signals)
+		delete(f.visiting, name)
+		entry = trapEntry{signals: signals, span: f.span, effect: effect}
+		f.memo[name] = append(f.memo[name], entry)
+		f.span, f.time = outer, outerTime
+	}
+	f.span = f.span.meet(entry.span)
+	return entry.effect, true
+}
+
+// entry is the effect kept for a call of name with signals while epoch
+// definitions have run.
+func (f *trapFlow) entry(name string, signals uint8, epoch int) (trapEntry, bool) {
+	for _, entry := range f.memo[name] {
+		if entry.signals == signals && entry.span.holds(epoch) {
+			return entry, true
+		}
+	}
+	return trapEntry{}, false
+}
+
+func (f *trapFlow) listAfterTrap(stmts []*syntax.Stmt, signals uint8) trapEffect {
 	out := trapEffect{left: signals}
 	for _, stmt := range stmts {
-		out = out.seq(afterTrap(stmt, out.left))
+		out = out.seq(f.afterTrap(stmt, out.left))
 		if out.left == 0 {
 			break
 		}
@@ -343,40 +520,58 @@ func listAfterTrap(stmts []*syntax.Stmt, signals uint8) trapEffect {
 	return out
 }
 
-func binaryAfterTrap(x *syntax.BinaryCmd, signals uint8) trapEffect {
-	left := afterTrap(x.X, signals)
+// binaryAfterTrap: the right side runs on every path that goes on from
+// the left where the status of the left always chooses it, as in
+// true && trap - TERM, and on none where it never does; a left that may
+// return or that the status walk cannot follow leaves both, and so does
+// any left in an opaque script, as in main.
+func (f *trapFlow) binaryAfterTrap(x *syntax.BinaryCmd, signals uint8) trapEffect {
+	left := f.afterTrap(x.X, signals)
 	if left.left == 0 {
 		return left
 	}
-	return left.orPath(left.seq(afterTrap(x.Y, left.left)))
+	right := left.seq(f.afterTrap(x.Y, left.left))
+	status := f.status.stmt(x.X)
+	runs, skips := status.ok, status.failed
+	if x.Op == syntax.OrStmt {
+		runs, skips = skips, runs
+	}
+	switch {
+	case f.funcs.opaque, status.unknown || status.ret:
+	case !skips:
+		return right
+	case !runs:
+		return left
+	}
+	return left.orPath(right)
 }
 
-func ifAfterTrap(x *syntax.IfClause, signals uint8) trapEffect {
-	cond := listAfterTrap(x.Cond, signals)
+func (f *trapFlow) ifAfterTrap(x *syntax.IfClause, signals uint8) trapEffect {
+	cond := f.listAfterTrap(x.Cond, signals)
 	if cond.left == 0 {
 		return cond
 	}
-	then := cond.seq(listAfterTrap(x.Then, cond.left))
+	then := cond.seq(f.listAfterTrap(x.Then, cond.left))
 	switch {
 	case x.Else == nil:
 		return then.orPath(cond)
 	case len(x.Else.Cond) == 0:
-		return then.orPath(cond.seq(listAfterTrap(x.Else.Then, cond.left)))
+		return then.orPath(cond.seq(f.listAfterTrap(x.Else.Then, cond.left)))
 	}
-	return then.orPath(cond.seq(ifAfterTrap(x.Else, cond.left)))
+	return then.orPath(cond.seq(f.ifAfterTrap(x.Else, cond.left)))
 }
 
 // caseAfterTrap: the word, with a command substitution in it, runs before
 // any item; without a default item a word may match no item and keep every
 // signal.
-func caseAfterTrap(x *syntax.CaseClause, signals uint8) trapEffect {
+func (f *trapFlow) caseAfterTrap(x *syntax.CaseClause, signals uint8) trapEffect {
 	if runsLoop(x.Word) {
 		return trapEffect{found: true}
 	}
 	word := trapEffect{work: doesWork(x.Word), left: signals}
 	out, hasDefault := trapEffect{}, false
 	for _, item := range x.Items {
-		out = out.orPath(word.seq(listAfterTrap(item.Stmts, signals)))
+		out = out.orPath(word.seq(f.listAfterTrap(item.Stmts, signals)))
 		for _, pattern := range item.Patterns {
 			hasDefault = hasDefault || wordLit(pattern) == "*"
 		}
