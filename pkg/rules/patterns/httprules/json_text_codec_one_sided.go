@@ -61,7 +61,9 @@ func (r *JSONTextCodecOneSidedRule) AnalyzeGoProject(ctx *core.GoProjectContext)
 	eachProductionGoFile(ctx, func(info *types.Info, file *ast.File) {
 		ast.Inspect(file, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
-				trip.jsonCall(info, call, map[*types.TypeName]bool{})
+				encoded, target := jsonCall(info, call)
+				jsonTypes(info.TypeOf(encoded), trip.marshalled, 0)
+				jsonTypes(info.TypeOf(target), trip.unmarshalled, 0)
 			}
 			return true
 		})
