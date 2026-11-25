@@ -234,7 +234,8 @@ func TestRawProcessKillTypesNeededTestsAndReadsScope(t *testing.T) {
 		"stop/stop.go":        "package stop\nimport \"os\"\nfunc Find() *os.Process { return nil }\n",
 		"stop/stop_test.go":   "package stop\nimport \"testing\"\nfunc TestStop(t *testing.T) { _ = Find().Kill() }\n",
 	})
-	typed := typeSignalFiles(project)
+	typed, err := typeSignalFiles(project)
+	require.NoError(t, err)
 	byName := make(map[string]*core.FileContext)
 	for _, file := range project.Files {
 		byName[filepath.Base(file.Path)] = file
@@ -244,7 +245,7 @@ func TestRawProcessKillTypesNeededTestsAndReadsScope(t *testing.T) {
 
 	project.SetReportFiles([]*core.FileContext{byName["stop_test.go"]})
 	var seen []string
-	_, err := analyzeSignalProject(project, func(file *core.FileContext, _ *signalPackage) []*core.Violation {
+	_, err = analyzeSignalProject(project, func(file *core.FileContext, _ *signalPackage) []*core.Violation {
 		seen = append(seen, filepath.Base(file.Path))
 		return nil
 	})

@@ -139,8 +139,13 @@ func (s signalSite) implicitTarget() bool {
 	if s.kind == processSignalMethod {
 		return pidsFrom(s.receiver, s.info, s.parent.Handles)
 	}
-	target := func(e ast.Expr) bool { return isTarget(e, s.info, s.parent) }
-	return len(s.args) > 0 && (target(s.args[0]) || s.kind == processSignalTgkill && len(s.args) > 1 && target(s.args[1]))
+	if s.kind == processSignalTgkill {
+		// tgkill answers EINVAL to a group or thread id of 0 or below: only
+		// the parent is its target.
+		parent := func(e ast.Expr) bool { return isParentTarget(e, s.info, s.parent) }
+		return len(s.args) > 0 && parent(s.args[0]) || len(s.args) > 1 && parent(s.args[1])
+	}
+	return len(s.args) > 0 && isTarget(s.args[0], s.info, s.parent)
 }
 
 func (s signalSite) toSelf() bool {
@@ -162,7 +167,6 @@ type signalPackage struct {
 	self      processAliases
 	parent    processAliases
 	functions map[types.Object]*types.Func
-	built     bool // a package the core loaded, not one typed with its tests
 }
 
 func newSignalPackage(path string, info *types.Info, files ...*ast.File) *signalPackage {
@@ -193,9 +197,6 @@ type signalProject struct {
 	packages  []*signalPackage
 	once      sync.Once
 	functions map[types.Object]*types.Func
-	// byName holds the package-level aliases of the built packages by
-	// qualifiedName: what another module's build sees.
-	byName map[string]*types.Func
 }
 
 func (s *signalProject) add(pkg *signalPackage) *signalPackage {
@@ -207,39 +208,12 @@ func (s *signalProject) add(pkg *signalPackage) *signalPackage {
 func (s *signalProject) functionAliases() map[types.Object]*types.Func {
 	s.once.Do(func() {
 		s.functions = make(map[types.Object]*types.Func)
-		s.byName = make(map[string]*types.Func)
 		for _, pkg := range s.packages {
 			pkg.packageAliases()
 			maps.Copy(s.functions, pkg.functions)
-			for obj, fn := range pkg.functions {
-				if pkg.built {
-					s.byName[qualifiedName(obj)] = fn
-				}
-			}
 		}
 	})
 	return s.functions
-}
-
-// qualifiedName names a package-level variable the same in every load of its
-// package.
-func qualifiedName(obj types.Object) string { return obj.Pkg().Path() + "." + obj.Name() }
-
-// aliasOf is the signal function the variable obj holds: an alias of the
-// scope, else a package-level alias of another package of the run. Each
-// module of a go.work run is loaded apart, so a module sees a package of
-// another one through objects of its own, matched by qualifiedName. A
-// package typed with its tests decides its own variables: a test may
-// reassign one.
-func (p *signalPackage) aliasOf(obj types.Object, functions map[types.Object]*types.Func) *types.Func {
-	if fn := functions[obj]; fn != nil || p.project == nil {
-		return fn
-	}
-	v, ok := obj.(*types.Var)
-	if !ok || v.Parent() != v.Pkg().Scope() || v.Pkg().Path() == p.path {
-		return nil
-	}
-	return p.project.byName[qualifiedName(v)]
 }
 
 // namesAny reports a name of one of the aliases in content.
@@ -340,7 +314,7 @@ func scopeSignalSites(scope ast.Node, file *ast.File, pkg *signalPackage) []sign
 			}
 		}
 		if kind == processSignalNone {
-			kind = processSignalFunction(pkg.aliasOf(patternkit.NamedObject(info, call.Fun), functions))
+			kind = processSignalFunction(functions[patternkit.NamedObject(info, call.Fun)])
 		}
 		if kind == processSignalNone {
 			kind = processSignalByName(unresolvedImportName(call.Fun, file, info, "syscall", "golang.org/x/sys/unix"))

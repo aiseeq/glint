@@ -49,7 +49,8 @@ func keep(*func(int, syscall.Signal) error) {}
 
 // A raw kill or tgkill system call is the same signal as syscall.Kill or
 // Tgkill with the arguments after the trap; the kernel reads the target, a
-// uintptr, as a signed pid, so ^uintptr(0) is -1.
+// uintptr, as a signed pid, so ^uintptr(0) is -1. tgkill answers EINVAL to a
+// group or thread id of 0 or below: only the parent is its implicit target.
 func TestSignalRawSystemCall(t *testing.T) {
 	source := `package sample
 import (
@@ -64,7 +65,7 @@ func stop(pid, tid uintptr, trap uintptr) {
 	_, _, _ = syscall.RawSyscall(syscall.SYS_KILL, 0, 9, 0) // signal
 	_, _, _ = syscall.Syscall6(syscall.SYS_KILL, uintptr(os.Getppid()), 15, 0, 0, 0, 0) // signal
 	_, _, _ = syscall.RawSyscall6(syscall.SYS_TGKILL, pid, tid, 15, 0, 0, 0) // raw
-	_, _, _ = syscall.Syscall(syscall.SYS_TGKILL, 0xFFFFFFFF, tid, 15) // signal
+	_, _, _ = syscall.Syscall(syscall.SYS_TGKILL, 0xFFFFFFFF, tid, 15) // raw
 	_, _, _ = unix.Syscall(unix.SYS_KILL, pid, 15, 0) // raw
 	_, _, _ = syscall.Syscall(syscall.SYS_KILL, uintptr(os.Getpid()), 15, 0)
 	_, _, _ = syscall.Syscall(syscall.SYS_KILL, pid, 0, 0)
@@ -80,19 +81,21 @@ func stop(pid, tid uintptr, trap uintptr) {
 	_, _ = syscall.Getpgid(syscall.SYS_KILL)
 	_, _, _ = syscall.Syscall(SYS_KILL, pid, 15, 0)
 	_, _, _ = syscall.Syscall(syscall.SYS_TGKILL, pid, tid, 0)
-	_, _, _ = syscall.Syscall(syscall.SYS_TGKILL, pid, 0, 15) // signal
+	_, _, _ = syscall.Syscall(syscall.SYS_TGKILL, pid, 0, 15) // raw
+	_, _, _ = syscall.Syscall(syscall.SYS_TGKILL, uintptr(os.Getppid()), tid, 15) // signal
 }
 const SYS_KILL = 39
 func Syscall(trap, a, b, c uintptr) error { return nil }
 `
 	file, pkg := rawProcessTypedFile(t, "syscall.go", "example.com/sample", source)
-	assert.Equal(t, []int{10, 11, 12, 14, 30}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
-	assert.Equal(t, []int{9, 13, 15}, rulestest.ViolationLines(newRawProcessKillRule().analyzeGo(file, pkg)))
+	assert.Equal(t, []int{10, 11, 12, 31}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+	assert.Equal(t, []int{9, 13, 14, 15, 30}, rulestest.ViolationLines(newRawProcessKillRule().analyzeGo(file, pkg)))
 }
 
-// The target is implicit by its value, not by how it is written: a constant
-// of -1 or 0 however it is spelled, a negative group number, and the
-// caller's own process group negated.
+// The target of kill is implicit by its value, not by how it is written: a
+// constant of -1 or 0 however it is spelled, a negative group number but
+// math.MinInt32 as pid_t (ESRCH), and the caller's own process group negated.
+// Tgkill answers EINVAL to such ids: only the parent is its target.
 func TestSignalImplicitTargetByValue(t *testing.T) {
 	source := `package sample
 import (
@@ -118,7 +121,7 @@ func stop(cmd *exec.Cmd, pid, pgid int) {
 	_ = syscall.Kill(-int(must(syscall.Getpgid(os.Getpid()))), syscall.SIGTERM)
 	leader, _ := syscall.Getpgid(os.Getpid())
 	_ = syscall.Kill(-leader, syscall.SIGTERM) // signal
-	_ = syscall.Tgkill(everyone, pid, syscall.SIGTERM) // signal
+	_ = syscall.Tgkill(everyone, pid, syscall.SIGTERM) // raw
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) // raw
 	_ = syscall.Kill(-pgid, syscall.SIGTERM) // raw
 	other, _ := syscall.Getpgid(pid)
@@ -140,21 +143,28 @@ func stop(cmd *exec.Cmd, pid, pgid int) {
 	count := func() int { return 1 }
 	n := count()
 	_ = n
+	_ = syscall.Kill(-2147483648, syscall.SIGTERM) // raw
+	_ = syscall.Kill(1<<31, syscall.SIGTERM) // raw
+	_ = syscall.Tgkill(os.Getppid(), pid, syscall.SIGTERM) // signal
+	_ = syscall.Tgkill(pid, os.Getppid(), syscall.SIGTERM) // signal
+	_ = syscall.Tgkill(-own, pid, syscall.SIGTERM) // raw
+	_ = syscall.Kill(-2147483647, syscall.SIGTERM) // signal
 }
 func must(v int, _ error) int { return v }
 func Getpgrp() int { return 7 }
 `
 	file, pkg := rawProcessTypedFile(t, "value.go", "example.com/sample", source)
-	assert.Equal(t, []int{13, 14, 15, 16, 17, 19, 21, 24, 25, 38, 40}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
-	assert.Equal(t, []int{22, 26, 27, 29, 30, 31, 39, 41, 43}, rulestest.ViolationLines(newRawProcessKillRule().analyzeGo(file, pkg)))
+	assert.Equal(t, []int{13, 14, 15, 16, 17, 19, 21, 24, 38, 40, 49, 50, 52}, rulestest.ViolationLines(newSignalImplicitTargetRule().goTypedFile(file, pkg)))
+	assert.Equal(t, []int{22, 25, 26, 27, 29, 30, 31, 39, 41, 43, 47, 48, 51}, rulestest.ViolationLines(newRawProcessKillRule().analyzeGo(file, pkg)))
 	// Both rules read the package's aliases at once: a function's own
 	// aliases stay out of them.
 	assert.Empty(t, pkg.parent.Groups)
 }
 
-// Every module of a go.work run is loaded on its own, so another module sees
-// a package of the run through its own objects: an alias is matched by the
-// package path and name it is declared under.
+// Every module of a go.work run is loaded on its own and sees another module
+// only through export data: an alias declared there is not followed, so a run
+// over a file, a directory or the whole workspace finds the same. Within a
+// module an alias of another package is followed.
 func TestSignalAliasFromAnotherModuleOfTheRun(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
@@ -183,7 +193,7 @@ func TestSignalAliasFromAnotherModuleOfTheRun(t *testing.T) {
 	t.Setenv("GOWORK", filepath.Join(root, "go.work"))
 	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"app/main.go:10", "app/reuse.go:5"}, rulestest.ViolationPlaces(rulestest.RunRuleOnProject(t, newSignalImplicitTargetRule(), project)))
+	assert.Equal(t, []string{"app/reuse.go:5"}, rulestest.ViolationPlaces(rulestest.RunRuleOnProject(t, newSignalImplicitTargetRule(), project)))
 }
 
 // A Go file under testdata is built by no package: it is typed like a test
@@ -209,6 +219,23 @@ func TestSignalTestdataFileSameInProjectAndFileRun(t *testing.T) {
 	assert.Empty(t, rulestest.RunRuleOnProject(t, newRawProcessKillRule(), single))
 }
 
+// A Go file of no module, which the core loads no project of, has no
+// testdata directory of its own: a directory named testdata above it makes it
+// no test file.
+func TestSignalFileOfNoModuleUnderTestdata(t *testing.T) {
+	top := t.TempDir()
+	path := filepath.Join(top, "testdata", "loose.go")
+	content := "package loose\n\nimport \"syscall\"\n\nfunc stop() { _ = syscall.Kill(-1, syscall.SIGTERM) }\n"
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	_, found, err := core.NearestGoModule(filepath.Dir(path))
+	require.NoError(t, err)
+	require.False(t, found)
+	testdata, err := inModuleTestdata(path)
+	require.NoError(t, err)
+	assert.False(t, testdata)
+}
+
 // A test file that only makes a raw kill system call is typed with its
 // package; a call the type check cannot make sense of is no own group.
 func TestSignalRawSystemCallInTestFiles(t *testing.T) {
@@ -227,7 +254,7 @@ func TestRaw(t *testing.T) {
 }
 `,
 		"sub/sub.go":     "package sub\n\nfunc Noop() {}\n",
-		"sub/tg_test.go": "package sub\n\nimport (\n\t\"syscall\"\n\t\"testing\"\n)\n\nfunc TestTg(t *testing.T) {\n\t_, _, _ = syscall.Syscall(syscall.SYS_TGKILL, 0, 1, 15)\n}\n",
+		"sub/tg_test.go": "package sub\n\nimport (\n\t\"syscall\"\n\t\"testing\"\n)\n\nfunc TestTg(t *testing.T) {\n\t_, _, _ = syscall.Syscall(syscall.SYS_TGKILL, uintptr(syscall.Getppid()), 1, 15)\n}\n",
 		"broken_test.go": `package lib
 
 import (
@@ -249,16 +276,47 @@ func TestBroken(t *testing.T) {
 	assert.Equal(t, []string{"broken_test.go:10", "broken_test.go:11", "broken_test.go:12", "broken_test.go:9"}, rulestest.ViolationPlaces(rulestest.RunRuleOnFiles(t, newRawProcessKillRule(), files)))
 }
 
-// A package the core loaded keeps its own types under a testdata directory
-// too: only a file no package builds is typed as a test file.
-func TestSignalLoadedPackageUnderTestdataKeepsItsTypes(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "testdata", "fixture")
-	files := map[string]string{"stop.go": "package fixture\n\nimport \"syscall\"\n\nfunc stop() { _ = syscall.Kill(-1, syscall.SIGTERM) }\n"}
+// The testdata a file is under is a directory of its own module: a project
+// that itself lies in a testdata directory keeps the types of its packages,
+// and a file its build leaves out stays out, in a run over the project and
+// over the file alike.
+func TestSignalModuleUnderTestdataDirectory(t *testing.T) {
+	top := t.TempDir()
+	root := filepath.Join(top, "testdata", "fixture")
+	files := map[string]string{
+		"stop.go":          "package fixture\n\nimport \"syscall\"\n\nfunc stop() { _ = syscall.Kill(-1, syscall.SIGTERM) }\n",
+		"ignored.go":       "//go:build ignore\n\npackage main\n\nimport \"syscall\"\n\nfunc main() { _ = syscall.Kill(-1, syscall.SIGTERM) }\n",
+		"sub/sub.go":       "package sub\n\nfunc Noop() {}\n",
+		"sub/sub_other.go": "//go:build windows\n\npackage sub\n\nimport \"syscall\"\n\nfunc stop() { _ = syscall.Kill(-1, syscall.SIGTERM) }\n",
+	}
 	contexts := rulestest.ModuleIn(t, root, files)
 	project, err := core.LoadGoProject(root, contexts, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
 	require.NoError(t, err)
-	typed := typeSignalFiles(project)
-	require.Len(t, project.Files, 1)
-	assert.True(t, typed[project.Files[0]].built)
+	typed, err := typeSignalFiles(project)
+	require.NoError(t, err)
+	for _, file := range project.Files {
+		if filepath.Base(file.Path) == "stop.go" {
+			assert.Same(t, file.GoTypesInfo, typed[file].info)
+		}
+	}
 	assert.Equal(t, []string{"stop.go:5"}, rulestest.ViolationPlaces(rulestest.RunRuleOnProject(t, newSignalImplicitTargetRule(), project)))
+	var above []*core.FileContext
+	for _, file := range contexts {
+		content, err := os.ReadFile(file.Path)
+		require.NoError(t, err)
+		ctx, err := core.NewFileContextChecked(file.Path, top, content, core.DefaultConfig())
+		require.NoError(t, err)
+		above = append(above, ctx)
+	}
+	outer, err := core.LoadGoProject(top, above, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"testdata/fixture/stop.go:5"}, rulestest.ViolationPlaces(rulestest.RunRuleOnProject(t, newSignalImplicitTargetRule(), outer)))
+	for _, name := range []string{"ignored.go", "sub/sub_other.go"} {
+		path := filepath.Join(root, name)
+		file, err := core.NewFileContextChecked(path, filepath.Dir(path), []byte(files[name]), core.DefaultConfig())
+		require.NoError(t, err)
+		single, err := core.LoadGoProject(filepath.Dir(path), []*core.FileContext{file}, core.GoProjectOptions{ListPackages: rulestest.ListPackages})
+		require.NoError(t, err)
+		assert.Empty(t, rulestest.RunRuleOnProject(t, newSignalImplicitTargetRule(), single), name)
+	}
 }

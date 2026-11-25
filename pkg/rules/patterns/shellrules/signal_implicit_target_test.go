@@ -782,6 +782,8 @@ func send() {
 	assert.Contains(t, violations[0].Suggestion, "cmd.Process")
 }
 
+// tgkill answers EINVAL to a group or thread id of 0 or below and signals
+// nobody: only the parent, in either id, is its implicit target.
 func TestSignalImplicitTargetTgkillSecondTargetAndPackageLiteral(t *testing.T) {
 	source := `package sample
 import (
@@ -789,17 +791,18 @@ import (
 	"syscall"
 )
 func send(pid, tid int) {
-	_ = syscall.Tgkill(pid, 0, syscall.SIGTERM) // want
+	_ = syscall.Tgkill(pid, 0, syscall.SIGTERM)
 	_ = syscall.Tgkill(os.Getppid(), tid, syscall.SIGTERM) // want
-	_ = syscall.Tgkill(os.Getpid(), 0, syscall.SIGTERM) // want
+	_ = syscall.Tgkill(os.Getpid(), 0, syscall.SIGTERM)
 }
 var sendGroup = func() {
-	_ = syscall.Tgkill(0, 21, syscall.SIGTERM) // want
+	_ = syscall.Tgkill(0, 21, syscall.SIGTERM)
+	_ = syscall.Tgkill(21, os.Getppid(), syscall.SIGTERM) // want
 }
 `
 	file, pkg := rawProcessTypedFile(t, "tgkill.go", "example.com/sample", source)
 	findings := newSignalImplicitTargetRule().goTypedFile(file, pkg)
-	assert.Equal(t, []int{7, 8, 9, 12}, rulestest.ViolationLines(findings))
+	assert.Equal(t, []int{8, 13}, rulestest.ViolationLines(findings))
 }
 
 func TestSignalImplicitTargetSkipsTypedCallsWithoutTypes(t *testing.T) {

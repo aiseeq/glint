@@ -7,6 +7,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"math"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -785,15 +786,21 @@ func pidsFrom(e ast.Expr, i *types.Info, p map[types.Object]bool) bool {
 	return ok && p[infoObject(i, id)]
 }
 
-// isTarget reports an implicit target: the parent, a constant pid of -1 or 0
-// or any negative group however it is written, or the caller's own process
-// group negated.
+// isParentTarget reports the parent's PID or an alias of it.
+func isParentTarget(e ast.Expr, i *types.Info, parent processAliases) bool {
+	return isParentProcessID(e, i) || pidsFrom(e, i, parent.PIDs)
+}
+
+// isTarget reports an implicit target of kill: the parent, a constant pid of
+// -1 or 0 or any negative group however it is written, or the caller's own
+// process group negated. kill answers ESRCH to math.MinInt32, which negates
+// to no group.
 func isTarget(e ast.Expr, i *types.Info, parent processAliases) bool {
-	if isParentProcessID(e, i) || pidsFrom(e, i, parent.PIDs) {
+	if isParentTarget(e, i, parent) {
 		return true
 	}
 	if value, known := pidValue(e, i); known {
-		return value <= 0
+		return value <= 0 && value != math.MinInt32
 	}
 	u, ok := unconverted(e, i).(*ast.UnaryExpr)
 	return ok && u.Op == token.SUB && (isOwnProcessGroup(u.X, i) || pidsFrom(u.X, i, parent.Groups))

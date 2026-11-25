@@ -668,7 +668,7 @@ func goModuleDirs(root string, goFiles []*FileContext, tolerate bool) ([]string,
 		if err != nil {
 			return nil, nil, err
 		}
-		moduleDir, found, err := nearestGoModule(filepath.Dir(path))
+		moduleDir, found, err := NearestGoModule(filepath.Dir(path))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -709,7 +709,7 @@ func FilesOfRunModules(root string, run, all []*FileContext, tolerate bool) ([]*
 		if err != nil {
 			return nil, err
 		}
-		moduleDir, found, err := nearestGoModule(filepath.Dir(path))
+		moduleDir, found, err := NearestGoModule(filepath.Dir(path))
 		if err != nil {
 			return nil, err
 		}
@@ -720,11 +720,11 @@ func FilesOfRunModules(root string, run, all []*FileContext, tolerate bool) ([]*
 	return kept, nil
 }
 
-// nearestGoModule walks up from a file's directory until it finds the go.mod
+// NearestGoModule walks up from a file's directory until it finds the go.mod
 // that owns it. The search deliberately ignores the root of the run: scoping a
 // run to a subdirectory (`glint check ./internal`) is normal, and the module
 // declaring those packages almost always sits above that subdirectory.
-func nearestGoModule(start string) (string, bool, error) {
+func NearestGoModule(start string) (string, bool, error) {
 	for dir := start; ; dir = filepath.Dir(dir) {
 		info, err := os.Stat(filepath.Join(dir, "go.mod"))
 		if err == nil {

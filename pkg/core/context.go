@@ -245,6 +245,14 @@ func isCIConfigPath(path string) bool {
 // /builds/test/ is not test code as a whole. A Go file named test_*.go is
 // compiled into its package like any other and is not a test.
 func (ctx *FileContext) IsTestFile() bool {
+	return ctx.IsTestFileBesidesTestdata() || strings.Contains(ctx.relDir(), "/testdata/")
+}
+
+// IsTestFileBesidesTestdata is IsTestFile without the testdata directories of
+// the project: the go command builds no file of a testdata directory of the
+// file's own module, which a directory above the module or the root of the
+// run does not decide.
+func (ctx *FileContext) IsTestFileBesidesTestdata() bool {
 	name := filepath.Base(ctx.Path)
 
 	if strings.HasSuffix(name, "_test.go") || strings.HasSuffix(name, "_test.sh") {
@@ -254,13 +262,18 @@ func (ctx *FileContext) IsTestFile() bool {
 		return true
 	}
 
-	dir := "/" + filepath.ToSlash(filepath.Dir(ctx.RelPath)) + "/"
-	for _, marker := range []string{"/test/", "/tests/", "/__tests__/", "/testdata/"} {
+	dir := ctx.relDir()
+	for _, marker := range []string{"/test/", "/tests/", "/__tests__/"} {
 		if strings.Contains(dir, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// relDir is the project-relative directory of the file between slashes.
+func (ctx *FileContext) relDir() string {
+	return "/" + filepath.ToSlash(filepath.Dir(ctx.RelPath)) + "/"
 }
 
 // IsTestHelperDir reports whether dir holds a Go test-helper package, the idiom
