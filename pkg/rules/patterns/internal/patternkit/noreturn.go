@@ -39,6 +39,22 @@ var noReturnTestingMethods = map[string]bool{
 	"Skip": true, "Skipf": true, "SkipNow": true,
 }
 
+// TestingMethodNoReturn reports a method of a test handle that stops the
+// test goroutine: Fatal, FailNow, Skip and their forms.
+func TestingMethodNoReturn(name string) bool {
+	return noReturnTestingMethods[name]
+}
+
+// TestingHandleType reports the name of a type of the testing package a
+// test, benchmark or fuzz target gets as its handle: T, B, F or TB.
+func TestingHandleType(name string) bool {
+	switch name {
+	case "T", "B", "F", "TB":
+		return true
+	}
+	return false
+}
+
 // callNoReturn classifies a call that never returns to its caller.
 //
 // With type information the callee is resolved through its object: the

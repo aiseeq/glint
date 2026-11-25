@@ -756,11 +756,7 @@ func testingHandleValue(body *ast.BlockStmt, x *ast.Ident, info *types.Info) boo
 	if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != "testing" {
 		return false
 	}
-	switch named.Obj().Name() {
-	case "T", "B", "F", "TB":
-		return true
-	}
-	return false
+	return patternkit.TestingHandleType(named.Obj().Name())
 }
 
 // redeclaresHandle reports whether, where use stands, the test has bound the

@@ -14,6 +14,18 @@ func AssignsName(assign *ast.AssignStmt, name string) bool {
 	return false
 }
 
+// AssignsNameIn reports an assignment to the name anywhere in a node.
+func AssignsNameIn(node ast.Node, name string) bool {
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if assign, ok := n.(*ast.AssignStmt); ok && AssignsName(assign, name) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
 // AssignedCall returns the call on the right-hand side of an assignment.
 func AssignedCall(assign *ast.AssignStmt) *ast.CallExpr {
 	if len(assign.Rhs) != 1 {

@@ -26,7 +26,14 @@ type selfExecIndex struct {
 	pkgNames map[string]string
 	pkgOfDir map[string]string
 	objects  map[*selfExecBody]*types.Func
-	roots    []*selfExecBody
+	pkgTypes map[string]*types.Package
+	// rootsOf holds the functions go test runs, by the directory of their
+	// test binary; kinds their kind and mains the TestMain of a directory.
+	rootsOf map[string][]*selfExecBody
+	kinds   map[*selfExecBody]goTestKind
+	mains   map[string]*selfExecBody
+	// typing holds the names whose type is being told, against a cycle.
+	typing map[*ast.Ident]bool
 }
 
 // selfExecTestPkg is the test package of a directory: the functions,
@@ -36,6 +43,11 @@ type selfExecTestPkg struct {
 	funcs     map[string][]*selfExecBody
 	methods   map[string][]*selfExecBody
 	types     map[string]bool
+	// consts holds the values of the constants of the test files, vars the
+	// names of their package variables.
+	consts map[string]ast.Expr
+	vars   map[string]bool
+	idx    *selfExecIndex
 }
 
 // internal reports a test package compiled with the package it tests.
@@ -48,6 +60,11 @@ func newSelfExecIndex(a *selfExecAnalysis) *selfExecIndex {
 		pkgNames: map[string]string{},
 		pkgOfDir: map[string]string{},
 		objects:  map[*selfExecBody]*types.Func{},
+		pkgTypes: map[string]*types.Package{},
+		rootsOf:  map[string][]*selfExecBody{},
+		kinds:    map[*selfExecBody]goTestKind{},
+		mains:    map[string]*selfExecBody{},
+		typing:   map[*ast.Ident]bool{},
 	}
 	idx.addTyped(a)
 	idx.addTests(a)
@@ -61,6 +78,7 @@ func (idx *selfExecIndex) addTyped(a *selfExecAnalysis) {
 		}
 		pkg := pkgCtx.Package
 		idx.pkgNames[pkg.PkgPath] = pkg.Name
+		idx.pkgTypes[pkg.PkgPath] = pkg.Types
 		for _, file := range pkg.GoFiles {
 			idx.pkgOfDir[filepath.Dir(file)] = pkg.PkgPath
 		}
@@ -136,12 +154,11 @@ func (idx *selfExecIndex) addTests(a *selfExecAnalysis) {
 	for _, file := range files {
 		key := [2]string{filepath.Dir(file.Path), file.GoAST.Name.Name}
 		if pkgs[key] == nil {
-			pkgs[key] = &selfExecTestPkg{dir: key[0], name: key[1], funcs: map[string][]*selfExecBody{}, methods: map[string][]*selfExecBody{}, types: map[string]bool{}}
+			pkgs[key] = &selfExecTestPkg{dir: key[0], name: key[1], funcs: map[string][]*selfExecBody{}, methods: map[string][]*selfExecBody{},
+				types: map[string]bool{}, consts: map[string]ast.Expr{}, vars: map[string]bool{}, idx: idx}
 		}
 		idx.addTestFile(a, file.GoAST, pkgs[key])
 	}
-	protected := map[string]bool{}
-	var roots []*selfExecBody
 	for _, file := range files {
 		tp := pkgs[[2]string{filepath.Dir(file.Path), file.GoAST.Name.Name}]
 		testingPkgs := testingImportNames(file.GoAST)
@@ -151,26 +168,30 @@ func (idx *selfExecIndex) addTests(a *selfExecAnalysis) {
 					continue
 				}
 				kind := goTestFuncKind(root.decl, testingPkgs)
-				if kind == goTestMain && selfExecDispatches(root, tp) {
-					protected[tp.dir] = true
+				if kind == goNotTest && selfExecRunExample(file.GoAST, root.decl) {
+					kind = goTestCase
 				}
-				if kind != goNotTest || selfExecRunExample(file.GoAST, root.decl) {
-					roots = append(roots, root)
+				if kind == goNotTest {
+					continue
+				}
+				idx.kinds[root] = kind
+				idx.rootsOf[tp.dir] = append(idx.rootsOf[tp.dir], root)
+				if kind == goTestMain {
+					idx.mains[tp.dir] = root
 				}
 			}
 		}
 	}
-	for _, root := range roots {
-		if !protected[root.tests.dir] {
-			idx.roots = append(idx.roots, root)
-		}
+	for dir, roots := range idx.rootsOf {
+		slices.SortFunc(roots, func(x, y *selfExecBody) int {
+			return cmp.Or(cmp.Compare(x.file.Name.Pos(), y.file.Name.Pos()), cmp.Compare(x.decl.Pos(), y.decl.Pos()))
+		})
+		idx.rootsOf[dir] = roots
 	}
-	slices.SortFunc(idx.roots, func(x, y *selfExecBody) int {
-		return cmp.Or(cmp.Compare(x.tests.dir, y.tests.dir), cmp.Compare(x.decl.Pos(), y.decl.Pos()))
-	})
 }
 
 func (idx *selfExecIndex) addTestFile(a *selfExecAnalysis, file *ast.File, tp *selfExecTestPkg) {
+	level := &selfExecBody{file: file, tests: tp, pkgName: strings.TrimSuffix(tp.name, "_test"), facts: &selfExecFacts{}, testLevel: true}
 	for _, decl := range file.Decls {
 		switch node := decl.(type) {
 		case *ast.FuncDecl:
@@ -186,10 +207,34 @@ func (idx *selfExecIndex) addTestFile(a *selfExecAnalysis, file *ast.File, tp *s
 				tp.funcs[node.Name.Name] = append(tp.funcs[node.Name.Name], b)
 			}
 		case *ast.GenDecl:
-			for _, spec := range node.Specs {
-				if ts, ok := spec.(*ast.TypeSpec); ok {
-					tp.types[ts.Name.Name] = true
+			idx.addTestDecl(tp, level, node)
+		}
+	}
+	if len(level.facts.assigns) > 0 {
+		a.pkgLevel = append(a.pkgLevel, level)
+	}
+}
+
+// addTestDecl records the types, the string constants and the package
+// variables of a test file.
+func (idx *selfExecIndex) addTestDecl(tp *selfExecTestPkg, level *selfExecBody, decl *ast.GenDecl) {
+	for _, spec := range decl.Specs {
+		switch node := spec.(type) {
+		case *ast.TypeSpec:
+			tp.types[node.Name.Name] = true
+		case *ast.ValueSpec:
+			keys := make([]any, len(node.Names))
+			for i, name := range node.Names {
+				keys[i] = name.Name
+				switch {
+				case decl.Tok == token.CONST && i < len(node.Values):
+					tp.consts[name.Name] = node.Values[i]
+				case decl.Tok == token.VAR:
+					tp.vars[name.Name] = true
 				}
+			}
+			if decl.Tok == token.VAR && len(node.Values) > 0 {
+				level.facts.assigns = append(level.facts.assigns, selfExecAssign{lhs: keys, rhs: node.Values})
 			}
 		}
 	}
@@ -213,29 +258,8 @@ func selfExecRunExample(file *ast.File, fn *ast.FuncDecl) bool {
 	return false
 }
 
-// selfExecDispatches reports a TestMain that answers a child of the test
-// binary before m.Run: a statement that reads the arguments or the
-// environment, directly or through a function of the test files, and exits
-// or returns on one of its branches.
-func selfExecDispatches(main *selfExecBody, tp *selfExecTestPkg) bool {
-	m := ""
-	if params := main.decl.Type.Params.List; len(params) == 1 && len(params[0].Names) == 1 {
-		m = params[0].Names[0].Name
-	}
-	for _, stmt := range main.decl.Body.List {
-		if selfExecRunsSuite(stmt, m) {
-			return false
-		}
-		header, branches := selfExecGuardParts(stmt)
-		if len(header) > 0 && selfExecReadsChildMarker(main.file, header, tp, map[*ast.FuncDecl]bool{}) && selfExecTerminates(main.file, branches) {
-			return true
-		}
-	}
-	return false
-}
-
 // selfExecRunsSuite reports a statement that names m.Run.
-func selfExecRunsSuite(stmt ast.Stmt, m string) bool {
+func selfExecRunsSuite(stmt ast.Node, m string) bool {
 	found := false
 	ast.Inspect(stmt, func(n ast.Node) bool {
 		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Run" {
@@ -245,116 +269,6 @@ func selfExecRunsSuite(stmt ast.Stmt, m string) bool {
 		}
 		return !found
 	})
-	return found
-}
-
-// selfExecGuardParts splits a branching statement into the parts that decide
-// the branch and the branches.
-func selfExecGuardParts(stmt ast.Stmt) (header, branches []ast.Node) {
-	switch node := stmt.(type) {
-	case *ast.IfStmt:
-		header = append(selfExecInit(node.Init), node.Cond)
-		branches = []ast.Node{node.Body}
-		if node.Else != nil {
-			branches = append(branches, node.Else)
-		}
-	case *ast.RangeStmt:
-		return []ast.Node{node.X}, []ast.Node{node.Body}
-	case *ast.ForStmt:
-		header = selfExecInit(node.Init)
-		if node.Cond != nil {
-			header = append(header, node.Cond)
-		}
-		return header, []ast.Node{node.Body}
-	case *ast.SwitchStmt:
-		header = selfExecInit(node.Init)
-		if node.Tag != nil {
-			header = append(header, node.Tag)
-		}
-		for _, item := range node.Body.List {
-			clause, ok := item.(*ast.CaseClause)
-			if !ok {
-				continue
-			}
-			for _, expr := range clause.List {
-				header = append(header, expr)
-			}
-			for _, body := range clause.Body {
-				branches = append(branches, body)
-			}
-		}
-	}
-	return header, branches
-}
-
-// selfExecInit returns the init statement of a branching statement as a list.
-func selfExecInit(init ast.Stmt) []ast.Node {
-	if init == nil {
-		return nil
-	}
-	return []ast.Node{init}
-}
-
-// selfExecChildMarkers lists what tells a child of the test binary: its
-// arguments and its environment.
-var selfExecChildMarkers = map[string]map[string]bool{
-	"os":   {"Args": true, "Getenv": true, "LookupEnv": true, "Environ": true},
-	"flag": {"Arg": true, "Args": true, "NArg": true},
-}
-
-func selfExecReadsChildMarker(file *ast.File, nodes []ast.Node, tp *selfExecTestPkg, seen map[*ast.FuncDecl]bool) bool {
-	found := false
-	for _, node := range nodes {
-		ast.Inspect(node, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.SelectorExpr:
-				for pkg, names := range selfExecChildMarkers {
-					if names[x.Sel.Name] && selfExecMember(file, nil, x, pkg) {
-						found = true
-					}
-				}
-			case *ast.CallExpr:
-				if id, ok := x.Fun.(*ast.Ident); ok {
-					found = found || selfExecHelperReads(id.Name, tp, seen)
-				}
-			}
-			return !found
-		})
-	}
-	return found
-}
-
-// selfExecHelperReads reports a function of the test files that reads the
-// arguments or the environment.
-func selfExecHelperReads(name string, tp *selfExecTestPkg, seen map[*ast.FuncDecl]bool) bool {
-	for _, helper := range tp.funcs[name] {
-		if seen[helper.decl] {
-			continue
-		}
-		seen[helper.decl] = true
-		if selfExecReadsChildMarker(helper.file, []ast.Node{helper.decl.Body}, tp, seen) {
-			return true
-		}
-	}
-	return false
-}
-
-// selfExecTerminates reports branches that exit or return.
-func selfExecTerminates(file *ast.File, branches []ast.Node) bool {
-	found := false
-	for _, branch := range branches {
-		ast.Inspect(branch, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.FuncLit:
-				return false
-			case *ast.ReturnStmt:
-				found = true
-			case *ast.ExprStmt:
-				found = found || patternkit.StmtNoReturn(x, nil, file) != patternkit.CallReturns
-			}
-			return !found
-		})
-	}
 	return found
 }
 
@@ -385,7 +299,7 @@ func (idx *selfExecIndex) resolveTest(b *selfExecBody, call *ast.CallExpr) []*se
 	tp := b.tests
 	switch fun := ast.Unparen(call.Fun).(type) {
 	case *ast.Ident:
-		if b.declares(fun.Name) {
+		if b.declaresAt(fun.Name, fun.Pos()) {
 			return nil
 		}
 		callees := slices.Clone(tp.funcs[fun.Name])
@@ -394,7 +308,7 @@ func (idx *selfExecIndex) resolveTest(b *selfExecBody, call *ast.CallExpr) []*se
 		}
 		return callees
 	case *ast.SelectorExpr:
-		if q, ok := fun.X.(*ast.Ident); ok && !b.declares(q.Name) {
+		if q, ok := fun.X.(*ast.Ident); ok && !b.declaresAt(q.Name, q.Pos()) {
 			if importPath, ok := idx.importPath(b.file, q.Name); ok {
 				return idx.funcs[importPath][fun.Sel.Name]
 			}
@@ -404,55 +318,112 @@ func (idx *selfExecIndex) resolveTest(b *selfExecBody, call *ast.CallExpr) []*se
 	return nil
 }
 
-// declares reports whether a test file body declares a name - a parameter,
-// a result, a variable, a function literal's parameter - that shadows a
-// function or an import of the same name anywhere in the body.
-func (b *selfExecBody) declares(name string) bool {
-	if b.locals == nil {
-		b.locals = map[string]bool{}
-		fields := func(list *ast.FieldList) {
-			if list == nil {
-				return
-			}
-			for _, field := range list.List {
-				for _, id := range field.Names {
-					b.locals[id.Name] = true
-				}
+// selfExecLocal is a name a test file body declares, with the declaration -
+// a field, a value spec, an assignment or a range statement - and the span
+// of its scope.
+type selfExecLocal struct {
+	name     string
+	decl     ast.Node
+	from, to token.Pos
+	// konst marks a constant.
+	konst bool
+}
+
+// declaresAt reports whether a test file body declares a name - a
+// parameter, a result, a variable, a function literal's parameter - whose
+// scope holds the position: there it shadows a function, an import or a
+// package variable of the same name.
+func (b *selfExecBody) declaresAt(name string, pos token.Pos) bool {
+	return b.localAt(name, pos) != nil
+}
+
+// localAt returns the innermost declaration of a name whose scope holds the
+// position, nil when the name is not local there.
+func (b *selfExecBody) localAt(name string, pos token.Pos) *selfExecLocal {
+	// The package variables of a test file have no function around them.
+	if b.decl == nil {
+		return nil
+	}
+	var found *selfExecLocal
+	for i := range b.scopes() {
+		local := &b.locals[i]
+		if local.name == name && local.from <= pos && pos < local.to && (found == nil || local.from > found.from) {
+			found = local
+		}
+	}
+	return found
+}
+
+// scopes lists the declarations of a test file body with their scopes,
+// found on first use: a variable is in scope from the end of its
+// declaration to the end of the innermost block or statement around it.
+func (b *selfExecBody) scopes() []selfExecLocal {
+	if b.locals != nil {
+		return b.locals
+	}
+	b.locals = []selfExecLocal{}
+	if b.decl == nil {
+		return b.locals
+	}
+	fields := func(list *ast.FieldList, scope ast.Node) {
+		if list == nil || scope == nil {
+			return
+		}
+		for _, field := range list.List {
+			for _, id := range field.Names {
+				b.locals = append(b.locals, selfExecLocal{name: id.Name, decl: field, from: scope.Pos(), to: scope.End()})
 			}
 		}
-		fields(b.decl.Recv)
-		fields(b.decl.Type.Params)
-		fields(b.decl.Type.Results)
-		ast.Inspect(b.decl.Body, func(n ast.Node) bool {
-			switch node := n.(type) {
-			case *ast.AssignStmt:
-				if node.Tok == token.DEFINE {
-					for _, lhs := range node.Lhs {
-						if id, ok := lhs.(*ast.Ident); ok {
-							b.locals[id.Name] = true
-						}
-					}
-				}
-			case *ast.RangeStmt:
-				if node.Tok == token.DEFINE {
-					for _, expr := range []ast.Expr{node.Key, node.Value} {
-						if id, ok := expr.(*ast.Ident); ok {
-							b.locals[id.Name] = true
-						}
-					}
-				}
-			case *ast.ValueSpec:
-				for _, id := range node.Names {
-					b.locals[id.Name] = true
-				}
-			case *ast.FuncType:
-				fields(node.Params)
-				fields(node.Results)
-			}
-			return true
-		})
 	}
-	return b.locals[name]
+	fields(b.decl.Recv, b.decl.Body)
+	fields(b.decl.Type.Params, b.decl.Body)
+	fields(b.decl.Type.Results, b.decl.Body)
+	var stack []ast.Node
+	scopeEnd := func() token.Pos {
+		for i := len(stack) - 1; i >= 0; i-- {
+			switch stack[i].(type) {
+			case *ast.BlockStmt, *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt,
+				*ast.TypeSwitchStmt, *ast.CaseClause, *ast.CommClause:
+				return stack[i].End()
+			}
+		}
+		return b.decl.Body.End()
+	}
+	ast.Inspect(b.decl.Body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if node.Tok == token.DEFINE {
+				for _, lhs := range node.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						b.locals = append(b.locals, selfExecLocal{name: id.Name, decl: node, from: node.End(), to: scopeEnd()})
+					}
+				}
+			}
+		case *ast.RangeStmt:
+			if node.Tok == token.DEFINE {
+				for _, expr := range []ast.Expr{node.Key, node.Value} {
+					if id, ok := expr.(*ast.Ident); ok {
+						b.locals = append(b.locals, selfExecLocal{name: id.Name, decl: node, from: node.Body.Pos(), to: node.Body.End()})
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			decl, _ := stack[len(stack)-1].(*ast.GenDecl)
+			for _, id := range node.Names {
+				b.locals = append(b.locals, selfExecLocal{name: id.Name, decl: node, from: node.End(), to: scopeEnd(), konst: decl != nil && decl.Tok == token.CONST})
+			}
+		case *ast.FuncLit:
+			fields(node.Type.Params, node.Body)
+			fields(node.Type.Results, node.Body)
+		}
+		stack = append(stack, n)
+		return true
+	})
+	return b.locals
 }
 
 // importPath resolves a qualifier through the imports of a file; a module
@@ -529,30 +500,36 @@ func selfExecOfType(methods []*selfExecBody, typ string) []*selfExecBody {
 
 // receiverType tells the type of a receiver expression of a test file from
 // the declaration of the variable or the value it is built from.
+//
+// A name is resolved by the declaration in scope at its use, and a use is
+// followed once at a time: the value a declaration is built from cannot
+// lead back to the same use, and the guard keeps a mistake there from
+// recursing without end.
 func (idx *selfExecIndex) receiverType(b *selfExecBody, x ast.Expr) selfExecRecv {
 	id, ok := ast.Unparen(x).(*ast.Ident)
 	if !ok {
 		return idx.valueType(b, x)
 	}
-	recv := selfExecRecv{}
-	found := false
-	ast.Inspect(b.decl, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-		switch node := n.(type) {
-		case *ast.Field:
-			if slices.ContainsFunc(node.Names, func(name *ast.Ident) bool { return name.Name == id.Name }) {
-				recv, found = idx.typeExprType(b, node.Type), true
-			}
-		case *ast.ValueSpec:
-			recv, found = idx.specType(b, node, id.Name)
-		case *ast.AssignStmt:
-			recv, found = idx.assignType(b, node, id.Name)
-		}
-		return !found
-	})
-	return recv
+	if idx.typing[id] {
+		return selfExecRecv{}
+	}
+	idx.typing[id] = true
+	defer delete(idx.typing, id)
+	local := b.localAt(id.Name, id.Pos())
+	if local == nil {
+		return selfExecRecv{}
+	}
+	switch node := local.decl.(type) {
+	case *ast.Field:
+		return idx.typeExprType(b, node.Type)
+	case *ast.ValueSpec:
+		recv, _ := idx.specType(b, node, id.Name)
+		return recv
+	case *ast.AssignStmt:
+		recv, _ := idx.assignType(b, node, id.Name)
+		return recv
+	}
+	return selfExecRecv{}
 }
 
 func (idx *selfExecIndex) specType(b *selfExecBody, spec *ast.ValueSpec, name string) (selfExecRecv, bool) {
@@ -675,132 +652,119 @@ func (idx *selfExecIndex) typeExprType(b *selfExecBody, expr ast.Expr) selfExecR
 	return selfExecRecv{kind: recvOutside}
 }
 
-// reached follows the calls from the tests of the module and returns the
-// starts of the own executable on the way, each with the shortest chain
-// from the first test that reaches it. A start of the own executable as the
-// fallback of environment variables counts only from the tests that set
-// none of them: the others start the binary the variable names.
-func (a *selfExecAnalysis) reached() []selfExecFinding {
-	findings, fallbacks := a.findingsFrom(a.index.roots, func(point selfExecPoint) bool { return len(point.env) == 0 })
-	for _, key := range slices.Sorted(maps.Keys(fallbacks)) {
-		env := strings.Split(key, "\x00")
-		var roots []*selfExecBody
-		for _, root := range a.index.roots {
-			if !a.setsAnyEnv(root, env) {
-				roots = append(roots, root)
-			}
-		}
-		found, _ := a.findingsFrom(roots, func(point selfExecPoint) bool { return strings.Join(point.env, "\x00") == key })
-		findings = append(findings, found...)
+// reached follows the calls from the tests of the module, the test binary
+// of each directory apart, and returns the starts of the own executable on
+// the way that nothing proves safe, each with the chain from the test.
+func (a *selfExecAnalysis) reached() []*selfExecFinding {
+	a.relevantBodies()
+	for _, dir := range slices.Sorted(maps.Keys(a.index.rootsOf)) {
+		a.explore(dir, a.index.rootsOf[dir], "", a.labelSet(a.mainSets(dir)))
 	}
-	return findings
+	return a.findings
 }
 
-// findingsFrom returns the starts the roots reach that accept takes, and
-// the environment variables of every start reached as their fallback.
-func (a *selfExecAnalysis) findingsFrom(roots []*selfExecBody, accept func(selfExecPoint) bool) ([]selfExecFinding, map[string]bool) {
-	order, parent := a.reach(roots)
-	var findings []selfExecFinding
-	fallbacks := map[string]bool{}
-	seen := map[ast.Node]bool{}
-	for _, node := range order {
-		skipped := a.skipped(node)
-		for _, point := range a.points(node.body) {
-			if seen[point.call] || skipped(point.call) {
-				continue
-			}
-			if len(point.env) > 0 {
-				fallbacks[strings.Join(point.env, "\x00")] = true
-			}
-			if accept(point) {
-				seen[point.call] = true
-				findings = append(findings, selfExecFinding{point: point, chain: selfExecChain(node, parent)})
-			}
-		}
-	}
-	return findings, fallbacks
+const (
+	selfExecRunning = iota + 1
+	selfExecDone
+)
+
+// selfExecHelperKey is a helper start checked in a run of a test binary.
+type selfExecHelperKey struct {
+	call ast.Node
+	dir  string
+	run  string
 }
 
-// reach returns the bodies the roots reach in breadth-first order, each
-// with the names the calls give it (selfExecNode), and the node each was
-// first reached from.
-func (a *selfExecAnalysis) reach(roots []*selfExecBody) ([]selfExecNode, map[selfExecNode]selfExecNode) {
+// explore follows the calls from roots in a run of the test binary of a
+// directory, with the labels set on the way, and checks each start it
+// meets.
+func (a *selfExecAnalysis) explore(dir string, roots []*selfExecBody, mode, covered string) {
 	parent := map[selfExecNode]selfExecNode{}
 	seen := map[selfExecNode]bool{}
-	contexts := map[*selfExecBody]int{}
+	type context struct {
+		body *selfExecBody
+		mode string
+	}
+	contexts := map[context]int{}
 	var queue []selfExecNode
 	for _, root := range roots {
-		node := selfExecNode{body: root}
-		if !seen[node] {
+		node := selfExecNode{body: root, mode: mode, covered: covered}
+		if a.relevant[root] && !seen[node] {
 			seen[node] = true
 			queue = append(queue, node)
 		}
 	}
-	var order []selfExecNode
 	for len(queue) > 0 {
 		node := queue[0]
 		queue = queue[1:]
-		order = append(order, node)
 		skipped := a.skipped(node)
+		for _, point := range a.points(node.body) {
+			if !skipped(point.call) {
+				a.check(dir, node, point, parent)
+			}
+		}
 		for _, call := range a.facts(node.body).calls {
 			if skipped(call) {
 				continue
 			}
 			for _, callee := range a.resolve(node.body, call) {
-				next := selfExecNode{body: callee, names: a.calleeNames(node, call, callee)}
-				if next.names != "" && !seen[next] && contexts[callee] >= selfExecMaxContexts {
+				if !a.relevant[callee] {
+					continue
+				}
+				next := selfExecNode{body: callee, names: a.calleeNames(node, call, callee), mode: a.guardedRun(node.body, node.mode, call.Pos()), covered: a.coveredAt(node, call.Pos())}
+				at := context{callee, next.mode}
+				if !seen[next] && contexts[at] >= selfExecMaxContexts {
 					next.names = ""
+				}
+				if !seen[next] && contexts[at] >= 4*selfExecMaxContexts {
+					next.covered = ""
 				}
 				if !seen[next] {
 					seen[next], parent[next] = true, node
-					contexts[callee]++
+					contexts[at]++
 					queue = append(queue, next)
 				}
 			}
 		}
 	}
-	return order, parent
 }
 
-// setsAnyEnv reports whether a test sets one of the environment variables.
-func (a *selfExecAnalysis) setsAnyEnv(root *selfExecBody, env []string) bool {
-	sets := a.envSetBy(root)
-	return slices.ContainsFunc(env, func(name string) bool { return sets[name] })
-}
-
-// envSetBy returns the environment variables a test body sets to a value
-// other than "": t.Setenv or os.Setenv, in the body or in a function of the
-// test files it calls.
-func (a *selfExecAnalysis) envSetBy(b *selfExecBody) map[string]bool {
-	if sets, ok := a.setsEnv[b]; ok {
-		return sets
+// check reports a start a node reaches unless it is proven safe there: the
+// path sets what it falls back from, the TestMain answers the child it
+// starts, or it starts a helper whose child does not start it again.
+func (a *selfExecAnalysis) check(dir string, node selfExecNode, point *selfExecPoint, parent map[selfExecNode]selfExecNode) {
+	if a.reported[point.call] {
+		return
 	}
-	sets := map[string]bool{}
-	a.setsEnv[b] = sets
-	for _, call := range a.facts(b).calls {
-		if name, ok := selfExecSetenv(b, call); ok {
-			sets[name] = true
-		}
-		for _, callee := range a.resolve(b, call) {
-			if callee.tests != nil {
-				maps.Copy(sets, a.envSetBy(callee))
-			}
+	if len(point.env) > 0 {
+		covered := strings.Split(a.coveredAt(node, point.call.Pos()), "\x00")
+		if slices.ContainsFunc(point.env, func(label string) bool { return slices.Contains(covered, label) }) {
+			return
 		}
 	}
-	return sets
-}
-
-// selfExecSetenv returns the variable a Setenv call sets to a value other
-// than "".
-func selfExecSetenv(b *selfExecBody, call *ast.CallExpr) (string, bool) {
-	sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "Setenv" || len(call.Args) != 2 {
-		return "", false
+	unbind := a.bind(node.body, selfExecNames(node.names))
+	run := a.childRun(a.run(node.mode), point)
+	pattern, known, helper := a.helperPattern(point)
+	unbind()
+	if a.answered(dir, run) {
+		return
 	}
-	if value, ok := selfExecString(b, call.Args[1]); ok && value == "" {
-		return "", false
+	if helper {
+		key := selfExecHelperKey{point.call, dir, run.key()}
+		switch a.helpers[key] {
+		case selfExecDone:
+			return
+		case 0:
+			a.helpers[key] = selfExecRunning
+			covered := a.labelSet(selfExecUnion(a.mainSets(dir), selfExecRunSets(run)))
+			a.explore(dir, a.childRoots(dir, pattern, known), run.key(), covered)
+			a.helpers[key] = selfExecDone
+			return
+		}
+		// Reached again in its own child: each child starts the next.
 	}
-	return selfExecString(b, call.Args[0])
+	a.reported[point.call] = true
+	a.findings = append(a.findings, &selfExecFinding{point: point, chain: selfExecChain(node, parent)})
 }
 
 func selfExecChain(node selfExecNode, parent map[selfExecNode]selfExecNode) []string {

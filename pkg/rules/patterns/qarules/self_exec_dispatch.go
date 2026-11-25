@@ -20,16 +20,20 @@ import (
 // os.Args and calls main, which passes os.Args[1:] to the dispatcher.
 const selfExecArgsKey = "os.Args[1]"
 
-// selfExecMaxContexts bounds the sets of names a body is followed with;
-// past it the body is followed with none, as every case may run.
-const selfExecMaxContexts = 8
+// selfExecMaxContexts bounds the sets of names a body is followed with in
+// one run; past it the body is followed with none, as every case may run.
+const selfExecMaxContexts = 16
 
 // selfExecNode is a body reached with the constant names its parameters
 // hold: "key=value" pairs joined by NUL, sorted, where the key is the index
-// of a parameter ("1") or of its first element ("1[0]").
+// of a parameter ("1") or of its first element ("1[0]"); in a run of the
+// test binary (mode, "" for the one go test starts), with the labels the
+// path has set (covered, joined by NUL).
 type selfExecNode struct {
-	body  *selfExecBody
-	names string
+	body    *selfExecBody
+	names   string
+	mode    string
+	covered string
 }
 
 // selfExecSwitch is a switch of a body on a name: a constant or a key of the
@@ -75,6 +79,16 @@ func (a *selfExecAnalysis) dispatch() *selfExecDispatch {
 				for _, callee := range a.resolve(b, call) {
 					changed = a.needFor(d, b, call, callee) || changed
 				}
+			}
+		}
+	}
+	// A start gives its child what the parameters of its body hold: the
+	// constants of the calls of the body, not followed further up, where
+	// each test would make a context of its own.
+	for _, b := range a.bodies {
+		if len(a.points(b)) > 0 {
+			for _, key := range selfExecStringParams(b) {
+				d.need(b, key)
 			}
 		}
 	}
@@ -193,10 +207,11 @@ func selfExecSetArgs(b *selfExecBody) (ast.Expr, bool) {
 }
 
 // skipped returns a test of the calls a body with its names does not make:
-// those in a case of a switch on a known name that is not the case of it.
+// those in a case of a switch on a known name that is not the case of it,
+// and in a test file the branches the run rules out.
 func (a *selfExecAnalysis) skipped(node selfExecNode) func(ast.Node) bool {
 	switches := a.dispatch().switches[node.body]
-	spans := a.childBranches(node.body)
+	spans := slices.Clone(a.modeSpans(node.body, node.mode, node.names))
 	if len(spans) == 0 && node.names == "" && !slices.ContainsFunc(switches, func(s selfExecSwitch) bool { return s.key == "" }) {
 		return func(ast.Node) bool { return false }
 	}
@@ -215,26 +230,9 @@ func (a *selfExecAnalysis) skipped(node selfExecNode) func(ast.Node) bool {
 	}
 }
 
-// childBranches returns the spans of the child branches of a helper-process
-// test: a statement that reads the environment or the arguments and exits
-// or returns, in a test that starts itself with -test.run. The branch runs
-// in the helper, and the helper process is not a start of the suite.
-func (a *selfExecAnalysis) childBranches(b *selfExecBody) [][2]token.Pos {
-	if b.tests == nil || !a.facts(b).helper {
-		return nil
-	}
-	var spans [][2]token.Pos
-	for _, stmt := range b.decl.Body.List {
-		header, branches := selfExecGuardParts(stmt)
-		if len(header) > 0 && selfExecReadsChildMarker(b.file, header, b.tests, map[*ast.FuncDecl]bool{}) && selfExecTerminates(b.file, branches) {
-			spans = append(spans, [2]token.Pos{stmt.Pos(), stmt.End()})
-		}
-	}
-	return spans
-}
-
 // otherCases returns the spans of the clauses of a switch that run for none
-// of the values; none when a case is not a constant.
+// of the values - a clause a run clause falls through to runs too; none
+// when a case is not a constant.
 func (a *selfExecAnalysis) otherCases(b *selfExecBody, known map[string][]string, stmt *ast.SwitchStmt, values []string) [][2]token.Pos {
 	matched := map[*ast.CaseClause]bool{}
 	unmatched := slices.Clone(values)
@@ -255,13 +253,22 @@ func (a *selfExecAnalysis) otherCases(b *selfExecBody, known map[string][]string
 		}
 	}
 	var spans [][2]token.Pos
+	runs := false
 	for _, item := range stmt.Body.List {
 		clause, _ := item.(*ast.CaseClause)
-		if !matched[clause] && (clause.List != nil || len(unmatched) == 0) {
+		runs = runs || matched[clause] || (clause.List == nil && len(unmatched) > 0)
+		if !runs {
 			spans = append(spans, [2]token.Pos{clause.Pos(), clause.End()})
 		}
+		runs = runs && selfExecFallsThrough(clause)
 	}
 	return spans
+}
+
+// selfExecFallsThrough reports a clause that ends in fallthrough.
+func selfExecFallsThrough(clause *ast.CaseClause) bool {
+	_, falls := selfExecNoFallthrough(clause)
+	return !falls
 }
 
 // constant returns the strings an expression - or its first element - may
@@ -270,6 +277,20 @@ func (a *selfExecAnalysis) constant(b *selfExecBody, known map[string][]string, 
 	values, key, ok := a.symbol(b, expr, first, 0)
 	if !ok || key == "" {
 		return values, ok
+	}
+	// A body that sets os.Args names what it set, not what its callers did;
+	// set from os.Args itself, it names nothing the analysis knows.
+	if elt, sets := selfExecSetArgs(b); key == selfExecArgsKey && sets {
+		if elt == nil {
+			return nil, false
+		}
+		values, key, ok = a.symbol(b, elt, false, 0)
+		if !ok || key == "" {
+			return values, ok
+		}
+		if key == selfExecArgsKey {
+			return nil, false
+		}
 	}
 	values, ok = known[key]
 	return values, ok
@@ -402,6 +423,9 @@ func (a *selfExecAnalysis) resultSymbol(b *selfExecBody, lit *ast.FuncLit, first
 // with the variable as its value.
 func selfExecRangeOver(b *selfExecBody, key any) *ast.CompositeLit {
 	var found *ast.CompositeLit
+	if b.decl == nil {
+		return nil
+	}
 	ast.Inspect(b.decl.Body, func(n ast.Node) bool {
 		if rng, ok := n.(*ast.RangeStmt); ok && rng.Value != nil && b.key(rng.Value) == key {
 			found, _ = ast.Unparen(rng.X).(*ast.CompositeLit)
@@ -445,6 +469,10 @@ func selfExecEmptySlice(expr ast.Expr) bool {
 // a slice variable: an assignment to an element at an index other than a
 // constant above zero.
 func selfExecHeadWritten(b *selfExecBody, key any) bool {
+	// The functions that may write a package variable are not known here.
+	if b.decl == nil {
+		return true
+	}
 	written := false
 	ast.Inspect(b.decl.Body, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
@@ -470,17 +498,28 @@ func selfExecHeadWritten(b *selfExecBody, key any) bool {
 // body and the number of its assignments; the value is nil when the
 // assignment takes a later result of a call.
 func (a *selfExecAnalysis) assignedOnce(b *selfExecBody, key any) (ast.Expr, int) {
-	var value ast.Expr
-	count := 0
+	assign, i, count := a.assignedAt(b, key)
+	if count == 0 {
+		return nil, 0
+	}
+	return selfExecAssigned(assign, i), count
+}
+
+// assignedAt returns the last assignment of a variable in a body, the
+// index of the variable in it and the number of the assignments; an append
+// to the variable itself is not counted.
+func (a *selfExecAnalysis) assignedAt(b *selfExecBody, key any) (selfExecAssign, int, int) {
+	var found selfExecAssign
+	index, count := 0, 0
 	for _, assign := range a.facts(b).assigns {
 		for i, target := range assign.lhs {
 			if target == key && !selfExecAppendsTo(b, assign, i, key) {
-				value = selfExecAssigned(assign, i)
+				found, index = assign, i
 				count++
 			}
 		}
 	}
-	return value, count
+	return found, index, count
 }
 
 // selfExecAppendsTo reports an assignment that appends to the variable it

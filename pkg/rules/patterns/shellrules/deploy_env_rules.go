@@ -447,25 +447,9 @@ func markGuardedRead(stmt *ast.IfStmt, defaulted map[*ast.CallExpr]bool) {
 	if !ok || !patternkit.ComparesWithEmpty(cond, name.Name) {
 		return
 	}
-	if cond.Op == token.NEQ || assignsTo(stmt.Body, name.Name) {
+	if cond.Op == token.NEQ || patternkit.AssignsNameIn(stmt.Body, name.Name) {
 		defaulted[call] = true
 	}
-}
-
-// assignsTo reports an assignment to the name in the block.
-func assignsTo(block *ast.BlockStmt, name string) bool {
-	found := false
-	ast.Inspect(block, func(n ast.Node) bool {
-		if assign, ok := n.(*ast.AssignStmt); ok {
-			for _, lhs := range assign.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && id.Name == name {
-					found = true
-				}
-			}
-		}
-		return !found
-	})
-	return found
 }
 
 // markDefaultedReads marks the env reads among the arguments of a fallback

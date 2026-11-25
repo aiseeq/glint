@@ -318,24 +318,11 @@ func TestRunsHelper(t *testing.T) {
 }
 
 // The helper process through TestMain: the test binary answers the child by
-// its environment or its positional argument before m.Run, so a self-launch
-// the tests reach never runs the suite again.
+// the positional argument the start passes before m.Run, so the start never
+// runs the suite again. A TestMain that answers an environment variable the
+// start does not set answers another child, not this one.
 func TestSelfExecInTestRule_TestMainDispatch(t *testing.T) {
 	for name, testMain := range map[string]string{
-		"env": `package cachesweep
-
-import (
-	"os"
-	"testing"
-)
-
-func TestMain(m *testing.M) {
-	if os.Getenv("SWEEP_CHILD") == "1" {
-		os.Exit(0)
-	}
-	os.Exit(m.Run())
-}
-`,
 		"helper": `package cachesweep
 
 import (
@@ -381,6 +368,24 @@ func TestMain(m *testing.M) {
 			"internal/cachesweep/main_test.go":  testMain,
 		})), name)
 	}
+	assert.Equal(t, []string{"internal/cachesweep/sweep.go:18"}, selfExecPlaces(t, selfExecFiles(map[string]string{
+		"internal/cachesweep/sweep.go":      selfExecSweep,
+		"internal/cachesweep/sweep_test.go": selfExecSweepTest,
+		"internal/cachesweep/main_test.go": `package cachesweep
+
+import (
+	"os"
+	"testing"
+)
+
+func TestMain(m *testing.M) {
+	if os.Getenv("SWEEP_CHILD") == "1" {
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+`,
+	})), "env")
 }
 
 // Another binary - a tool on PATH or a sibling of the own executable - is
@@ -941,8 +946,9 @@ func TestMainExitCode(t *testing.T) {
 	other := strings.Replace(test, "\tcmd := exec.Command", "\tif t.Name() == \"\" {\n\t\t_ = Run([]string{\"relaunch\"})\n\t\treturn\n\t}\n\tcmd := exec.Command", 1)
 	assert.Equal(t, []string{"tool/tool.go:27"}, selfExecPlaces(t, map[string]string{"tool/tool.go": selfExecMultiCall, "tool/tool_test.go": other}))
 
+	// The child that does not return goes on to start the next child.
 	open := strings.Replace(test, "\t\t_ = Run(os.Args[1:])\n\t\treturn\n", "\t\t_ = Run([]string{\"relaunch\"})\n", 1)
-	assert.Equal(t, []string{"tool/tool.go:27"}, selfExecPlaces(t, map[string]string{"tool/tool.go": selfExecMultiCall, "tool/tool_test.go": open}))
+	assert.Equal(t, []string{"tool/tool.go:27", "tool/tool_test.go:14"}, selfExecPlaces(t, map[string]string{"tool/tool.go": selfExecMultiCall, "tool/tool_test.go": open}))
 }
 
 // A helper child that sets os.Args and calls main names the function of a
