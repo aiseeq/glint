@@ -268,10 +268,11 @@ type selfExecFinding struct {
 	point *selfExecPoint
 	chain []string
 	// answer is the branch that answers the child without ending it;
-	// pinned the tests -test.run=pattern runs in the child.
+	// pattern the -test.run the launch pins the child with.
 	answer  *selfExecAnswer
 	pattern string
-	pinned  []string
+	// reads marks a test binary that reads what the launch passes.
+	reads bool
 	// beforeAnswer marks a child the TestMain or an init answers after it
 	// reaches the launch.
 	beforeAnswer bool

@@ -1,6 +1,8 @@
 package qarules
 
 import (
+	"maps"
+	"strings"
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
@@ -93,8 +95,8 @@ func TestRelayLoop(t *testing.T) {
 }
 `)
 	assert.Equal(t, "TestRelayLoop starts its own test binary: TestRelayLoop passes the process's own executable to exec.Command, reached through TestRelayLoop"+
-		" — -test.run=^TestRelayLoop$ runs only TestRelayLoop in the child, nothing there answers the child, so it reaches this launch again, and each copy starts the next", message)
-	assert.Equal(t, "Answer the child in TestRelayLoop before the launch: set a variable in the command's Env and end the test with os.Exit or a return when it is set, or start a TestHelperProcess that does not launch", suggestion)
+		" — -test.run=^TestRelayLoop$ runs TestRelayLoop in the child, and nothing in the test binary reads what the launch passes: TestRelayLoop reaches this launch again, and each copy starts the next", message)
+	assert.Equal(t, "Answer the child before the launch: set a variable in the command's Env and end the test with os.Exit or a return when it is set, or start a TestHelperProcess that does not launch", suggestion)
 }
 
 // A launch with no -test.run and no answer keeps the message of a run of
@@ -147,8 +149,7 @@ func TestRelayInit(t *testing.T) {
 }
 
 // The branch is in the test, the launch in a helper of another file: the
-// message places the branch by its file and names the test; the condition
-// reads the variable through a local.
+// message places the branch by its file and names the test.
 func TestSelfExecInTestRule_MessageBranchInCallerOfLauncher(t *testing.T) {
 	violations := rulestest.RunRuleOnFiles(t, NewSelfExecInTestRule(), map[string]string{
 		"relay/relay.go": "package relay\n",
@@ -160,8 +161,7 @@ import (
 )
 
 func TestRelayVia(t *testing.T) {
-	mode := os.Getenv("RELAY_VIA")
-	if mode == "1" {
+	if os.Getenv("RELAY_VIA") == "1" {
 		t.Log("child")
 	}
 	launchRelay()
@@ -182,8 +182,8 @@ func launchRelay() {
 `,
 	})
 	require.Equal(t, []string{"relay/launch_test.go:9"}, rulestest.ViolationPlaces(violations))
-	assert.Contains(t, violations[0].Message, " — the branch on RELAY_VIA at relay/relay_test.go:10 of TestRelayVia answers the child but does not end the test")
-	assert.Equal(t, "End the branch on RELAY_VIA at relay/relay_test.go:10 with os.Exit or a return, so the child never reaches the launch", violations[0].Suggestion)
+	assert.Contains(t, violations[0].Message, " — the branch on RELAY_VIA at relay/relay_test.go:9 of TestRelayVia answers the child but does not end the test")
+	assert.Equal(t, "End the branch on RELAY_VIA at relay/relay_test.go:9 with os.Exit or a return, so the child never reaches the launch", violations[0].Suggestion)
 }
 
 // A switch on the variable in the launcher, which is no test: only os.Exit
@@ -244,7 +244,8 @@ func TestRelayOnce(t *testing.T) {
 	assert.Contains(t, message, " — under go test that binary runs every test again, and each copy starts the next")
 }
 
-// A pattern that names more than one test lists them.
+// A pattern that names more than one test, in a binary that reads nothing
+// the launch passes: the message names the test that starts the child.
 func TestSelfExecInTestRule_MessagePinnedRunOfTwoTests(t *testing.T) {
 	message, suggestion := selfExecMessage(t, `package relay
 
@@ -262,8 +263,8 @@ func TestRelayPair(t *testing.T) {
 
 func TestRelayPairSlow(t *testing.T) {}
 `)
-	assert.Contains(t, message, " — -test.run=^TestRelayPair runs only TestRelayPair, TestRelayPairSlow in the child, nothing there answers the child")
-	assert.Contains(t, suggestion, "Answer the child in TestRelayPair, TestRelayPairSlow before the launch")
+	assert.Contains(t, message, " — -test.run=^TestRelayPair runs TestRelayPair in the child, and nothing in the test binary reads what the launch passes")
+	assert.Contains(t, suggestion, "set a variable in the command's Env")
 }
 
 // TestMain starts the child before the branch that answers it: the child
@@ -294,8 +295,7 @@ func TestRelayNone(t *testing.T) {}
 }
 
 // A branch after the call that leads to the launch, or after m.Run, is no
-// answer: the child reaches the launch before it; nor is a branch every run
-// takes.
+// answer the child surely passes: the message is the neutral one.
 func TestSelfExecInTestRule_MessageBranchAfterTheWay(t *testing.T) {
 	message, _ := selfExecMessage(t, `package relay
 
@@ -329,7 +329,7 @@ func TestRelayAfter(t *testing.T) {
 	}
 }
 `)
-	assert.Contains(t, message, " — -test.run=^TestRelayAfter$ runs only TestRelayAfter in the child, nothing there answers the child")
+	assert.Contains(t, message, " — -test.run=^TestRelayAfter$ runs TestRelayAfter in the child, and it reaches this launch again, and each copy starts the next")
 }
 
 // A -test.run pattern the analysis does not know pins nothing it can name.
@@ -343,7 +343,7 @@ import (
 )
 
 func TestRelayAny(t *testing.T) {
-	_ = exec.Command(os.Args[0], "-test.run="+os.Getenv("RELAY_PATTERN")).Run()
+	_ = exec.Command(os.Args[0], "-test.run=^TestRelayAny"+os.Getenv("RELAY_PATTERN")).Run()
 }
 `)
 	assert.Contains(t, message, " — under go test that binary runs every test again, and each copy starts the next")
@@ -400,4 +400,349 @@ func TestMain(m *testing.M) {
 func TestRelayHead(t *testing.T) {}
 `)
 	assert.Contains(t, message, " — the branch on RELAY_HEAD at line 10 answers the child but does not exit: the child goes on and reaches this launch again")
+}
+
+// selfExecRelayTest wraps a body of declarations into a test file of the
+// relay package that imports os, os/exec and testing.
+func selfExecRelayTest(decls string) string {
+	return `package relay
+
+import (
+	"log"
+	"os"
+	"os/exec"
+	"testing"
+)
+
+var _ = log.Print
+
+` + decls
+}
+
+// The message names no cause it does not prove: an answer off the way to
+// the launch, one in a function literal, one after the launch, a branch the
+// child may leave, or more than one place that reads what the launch passes
+// leave the neutral message of the test -test.run runs; a child that
+// reaches the launch on its way to its answer is told so first.
+func TestSelfExecInTestRule_MessageClaimsOnlyWhatItProves(t *testing.T) {
+	const neutral = "Answer the child and end the test before the launch: a branch on what the launch passes that returns or calls os.Exit, or a TestHelperProcess that does not launch"
+	cases := map[string]struct {
+		files              map[string]string
+		reason, suggestion string
+	}{
+		"answer in a helper called before the launch": {
+			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func maybeServe() {
+	if os.Getenv("RELAY_HELPER") == "1" {
+		println("serve")
+	}
+}
+
+func TestChild(t *testing.T) {
+	maybeServe()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`)},
+			reason:     "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
+		"answer in a helper of another file whose return ends only the helper": {
+			files: map[string]string{
+				"relay/helper_test.go": `package relay
+
+import "os"
+
+func maybeServe() {
+	if os.Getenv("RELAY_HELPER") == "1" {
+		println("serve")
+		return
+	}
+}
+`,
+				"relay/relay_test.go": selfExecRelayTest(`func TestChild(t *testing.T) {
+	maybeServe()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`)},
+			reason:     "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
+		"answer in a function literal of t.Run": {
+			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func TestOuter(t *testing.T) {
+	t.Run("inner", func(t *testing.T) {
+		if os.Getenv("RELAY_HELPER") == "1" {
+			println("serve")
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestOuter$/^inner$")
+		cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+		_ = cmd.Run()
+	})
+}
+`)},
+			reason:     "-test.run=^TestOuter$/^inner$ runs TestOuter in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
+		"answer after the launch": {
+			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func TestChild(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+	if os.Getenv("RELAY_HELPER") == "1" {
+		os.Exit(0)
+	}
+}
+`)},
+			reason:     "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
+		"a pattern that also runs the test that answers": {
+			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func TestRelayLaunch(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRelay")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+
+func TestRelayServe(t *testing.T) {
+	if os.Getenv("RELAY_HELPER") != "1" {
+		return
+	}
+	os.Exit(0)
+}
+`)},
+			reason:     "-test.run=^TestRelay runs TestRelayLaunch in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
+		"a branch of an init beside a helper -test.run does not pick": {
+			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func init() {
+	if os.Getenv("RELAY_HELPER") != "" {
+		log.SetFlags(0)
+	}
+}
+
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("RELAY_HELPER") != "1" {
+		return
+	}
+	os.Exit(0)
+}
+
+func TestUse(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestUse$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`)},
+			reason:     "-test.run=^TestUse$ runs TestUse in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
+		"a branch beside a helper that exits": {
+			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func exitIfChild() {
+	if os.Getenv("RELAY_HELPER") == "1" {
+		os.Exit(0)
+	}
+}
+
+func TestChild(t *testing.T) {
+	if os.Getenv("RELAY_HELPER") == "1" {
+		t.Log("child")
+	}
+	exitIfChild()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`)},
+			reason:     "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
+		"a branch that calls a function of the module that exits": {
+			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func stopRelay() { os.Exit(0) }
+
+func TestChild(t *testing.T) {
+	if os.Getenv("RELAY_HELPER") == "1" {
+		stopRelay()
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`)},
+			reason:     "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
+		"a branch that calls a function value": {
+			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func TestChild(t *testing.T) {
+	stop := os.Exit
+	if os.Getenv("RELAY_HELPER") == "1" {
+		stop(0)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`)},
+			reason:     "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next",
+			suggestion: neutral,
+		},
+		"an init branch that only sets up, and a TestMain that starts the child before its answer": {
+			files: map[string]string{"relay/relay_test.go": selfExecRelayTest(`func init() {
+	if os.Getenv("RELAY_CHILD") != "" {
+		log.SetFlags(0)
+	}
+}
+
+func TestMain(m *testing.M) {
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), "RELAY_CHILD=1")
+	_ = cmd.Start()
+	if os.Getenv("RELAY_CHILD") != "" {
+		os.Exit(0)
+	}
+	code := m.Run()
+	_ = cmd.Wait()
+	os.Exit(code)
+}
+
+func TestNothing(t *testing.T) {}
+`)},
+			reason:     "the child reaches this launch again on its way to the branch of TestMain or an init that answers it, and each copy starts the next",
+			suggestion: "Answer the child before the launch: move the branch that answers it above the start, or start the child from a test",
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			files := map[string]string{"relay/relay.go": "package relay\n"}
+			maps.Copy(files, c.files)
+			violations := rulestest.RunRuleOnFiles(t, NewSelfExecInTestRule(), files)
+			require.Len(t, violations, 1)
+			_, reason, _ := strings.Cut(violations[0].Message, " — ")
+			assert.Equal(t, c.reason, reason)
+			assert.Equal(t, c.suggestion, violations[0].Suggestion)
+		})
+	}
+}
+
+// A branch every run takes is no answer: the one that answers the child is
+// named past it.
+func TestSelfExecInTestRule_MessageBranchEveryRunTakes(t *testing.T) {
+	message, _ := selfExecMessage(t, selfExecRelayTest(`func TestRelayChild(t *testing.T) {
+	if testing.Testing() {
+		t.Log("under go test")
+	}
+	if os.Getenv("RELAY_HELPER") == "1" {
+		t.Log("child")
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRelayChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`))
+	assert.Contains(t, message, " — the branch on RELAY_HELPER at line 16 answers the child but does not end the test")
+}
+
+// selfExecRelayChild is a test that answers its child by RELAY_HELPER at
+// line 13 without an end, with more declarations after it.
+func selfExecRelayChild(branch, more string) string {
+	return selfExecRelayTest(`func TestChild(t *testing.T) {
+	if os.Getenv("RELAY_HELPER") == "1" {
+` + branch + `
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+` + more)
+}
+
+// A branch is named only where nothing in it may end the child and nothing
+// else in the test binary reads what the launch passes: a read anywhere -
+// in the package, in a test file, in a package the tests call, through
+// LookupEnv, a name it cannot tell, os.Args or the flag package - leaves the
+// neutral message. A read of a variable the launch does not pass does not.
+func TestSelfExecInTestRule_MessageNamesTheOneReadThatCannotEnd(t *testing.T) {
+	const (
+		neutral    = "-test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again, and each copy starts the next"
+		named      = "the branch on RELAY_HELPER at line 13 answers the child but does not end the test: the child goes on and reaches this launch again, and each copy starts the next"
+		namedLater = "End the branch on RELAY_HELPER at line 13 with os.Exit or a return, so the child never reaches the launch"
+	)
+	cases := map[string]struct {
+		files  map[string]string
+		reason string
+	}{
+		"a branch that may return": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tif testing.Short() {\n\t\t\treturn\n\t\t}", "")}, reason: neutral},
+		"a branch that may skip the test": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tif testing.Short() {\n\t\t\tt.Skip()\n\t\t}", "")}, reason: neutral},
+		"a branch that may exit": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tif testing.Short() {\n\t\t\tos.Exit(0)\n\t\t}", "")}, reason: neutral},
+		"a read in a package the tests call": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", ""),
+			"relay/use_test.go":   "package relay\n\nimport \"example.com/rulestest/mode\"\n\nfunc useMode() bool { return mode.Child() }\n",
+			"mode/mode.go":        "package mode\n\nimport \"os\"\n\nfunc Child() bool { return os.Getenv(\"RELAY_HELPER\") == \"1\" }\n",
+		}, reason: neutral},
+		"a read in the package under test": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", ""),
+			"relay/relay.go":      "package relay\n\nimport \"os\"\n\nfunc Child() bool { return os.Getenv(\"RELAY_HELPER\") == \"1\" }\n",
+		}, reason: neutral},
+		"a package variable of a test file": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nvar child = os.Getenv(\"RELAY_HELPER\")\n"),
+		}, reason: neutral},
+		"a read through LookupEnv": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc child() bool {\n\t_, set := os.LookupEnv(\"RELAY_HELPER\")\n\treturn set\n}\n"),
+		}, reason: neutral},
+		"a read of a name it cannot tell": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc envOf(name string) string { return os.Getenv(name) }\n"),
+		}, reason: neutral},
+		"a read of the arguments": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc argc() int { return len(os.Args) }\n"),
+		}, reason: neutral},
+		"a read of the flags": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", ""),
+			"relay/main_test.go":  "package relay\n\nimport (\n\t\"flag\"\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) {\n\tflag.Parse()\n\tos.Exit(m.Run())\n}\n",
+		}, reason: neutral},
+		"a read of a variable the launch does not pass": {files: map[string]string{
+			"relay/relay_test.go": selfExecRelayChild("\t\tt.Log(\"child\")", "\nfunc home() string { return os.Getenv(\"RELAY_HOME\") }\n"),
+		}, reason: named},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			files := map[string]string{"relay/relay.go": "package relay\n"}
+			maps.Copy(files, c.files)
+			violations := rulestest.RunRuleOnFiles(t, NewSelfExecInTestRule(), files)
+			require.Len(t, violations, 1)
+			_, reason, _ := strings.Cut(violations[0].Message, " — ")
+			assert.Equal(t, c.reason, reason)
+			if c.reason == named {
+				assert.Equal(t, namedLater, violations[0].Suggestion)
+			}
+		})
+	}
+}
+
+// A function value the package code calls in the branch may end the child.
+func TestSelfExecInTestRule_MessageFuncValueInPackageCode(t *testing.T) {
+	violations := rulestest.RunRuleOnFiles(t, NewSelfExecInTestRule(), map[string]string{
+		"relay/relay.go": `package relay
+
+import (
+	"os"
+	"os/exec"
+)
+
+func Launch(stop func()) {
+	if os.Getenv("RELAY_HELPER") == "1" {
+		stop()
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestChild$")
+	cmd.Env = append(os.Environ(), "RELAY_HELPER=1")
+	_ = cmd.Run()
+}
+`,
+		"relay/relay_test.go": "package relay\n\nimport \"testing\"\n\nfunc TestChild(t *testing.T) { Launch(func() {}) }\n",
+	})
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, " — -test.run=^TestChild$ runs TestChild in the child, and it reaches this launch again")
 }
