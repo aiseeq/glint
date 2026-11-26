@@ -184,7 +184,9 @@ tasks:
     run:
       # Only the repository's files: ignored trees (agent worktrees, tmp) are
       # someone else's work in progress.
-      - sh: 'test -z "$(git ls-files -co --exclude-standard -- "*.go" | xargs -r gofmt -l)" || { echo "Code is not formatted. Run graft fmt"; exit 1; }'
+      # The list first, on its own: in a pipe a failed git ls-files gave an
+      # empty list, and the check passed.
+      - sh: 'files=$(git ls-files -co --exclude-standard -- "*.go") && out=$(printf "%s\n" "$files" | xargs -r gofmt -l) && test -z "$out" || { echo "$out"; echo "Code is not formatted or the files could not be listed. Run graft fmt"; exit 1; }'
   vet:
     desc: go vet
     cache:
