@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +15,109 @@ import (
 type rangeFlowResult struct {
 	executes bool
 	unknown  bool
+}
+
+// rangeTracked is what holds the table string while a body is read. In a
+// method body the string reaches the command only through a field of that
+// method's receiver set from the string, so a selector of a field lying in
+// the receiver's value is looked up in fields, the receiver's own, and
+// nowhere else; any other name — a variable, a field of another value, a
+// field reached through a pointer, which every copy shares — is looked up
+// in objects.
+type rangeTracked struct {
+	objects  map[types.Object]bool
+	receiver types.Object
+	fields   map[types.Object]bool
+	// own holds the names of the selectors of the method body that select a
+	// field lying in receiver's value; the function literals in the body
+	// read it too.
+	own map[*ast.Ident]bool
+}
+
+func newRangeTracked(objects map[types.Object]bool) *rangeTracked {
+	return &rangeTracked{objects: objects}
+}
+
+func newReceiverTracked(objects map[types.Object]bool, method rangeSubtestBody, fields map[types.Object]bool, info *types.Info) *rangeTracked {
+	return &rangeTracked{objects: objects, receiver: method.receiver, fields: fields, own: receiverFieldSelectors(method.body, method.receiver, info)}
+}
+
+func (t *rangeTracked) has(id *ast.Ident, info *types.Info) bool {
+	object := info.Uses[id]
+	if t.own[id] {
+		return t.fields[object]
+	}
+	return t.objects[object]
+}
+
+// add records that the assignment target named by id holds the string and
+// reports whether that is new.
+func (t *rangeTracked) add(id *ast.Ident, object types.Object) bool {
+	set := t.objects
+	if t.own[id] {
+		set = t.fields
+	}
+	if set[object] {
+		return false
+	}
+	set[object] = true
+	return true
+}
+
+// receiverFieldSelectors returns the names of the selectors in scope that
+// select a field lying in the receiver's value itself (k.f, k.in.f). A
+// field reached through a pointer — a pointer field, an embedded *T — is
+// shared with every copy of the receiver, so its selector is left to
+// objects like any other value's.
+func receiverFieldSelectors(scope ast.Node, receiver types.Object, info *types.Info) map[*ast.Ident]bool {
+	own := make(map[*ast.Ident]bool)
+	ast.Inspect(scope, func(n ast.Node) bool {
+		if selector, ok := n.(*ast.SelectorExpr); ok && receiverValueField(selector, receiver, info) {
+			own[selector.Sel] = true
+		}
+		return true
+	})
+	return own
+}
+
+// receiverValueField reports whether a chain of selectors starts from
+// receiver and dereferences no pointer on the way past the receiver itself.
+func receiverValueField(selector *ast.SelectorExpr, receiver types.Object, info *types.Info) bool {
+	for {
+		selection := info.Selections[selector]
+		if selection == nil {
+			return false
+		}
+		base := ast.Unparen(selector.X)
+		id, ok := base.(*ast.Ident)
+		atReceiver := ok && info.Uses[id] == receiver
+		if throughPointer(selection, !atReceiver) {
+			return false
+		}
+		if atReceiver {
+			return true
+		}
+		inner, ok := base.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		selector = inner
+	}
+}
+
+// throughPointer reports whether reaching what selection selects
+// dereferences a pointer: the value it is selected from, when that counts,
+// or an embedded *T on the way.
+func throughPointer(selection *types.Selection, countBase bool) bool {
+	from := selection.Recv()
+	if pointer, ok := from.Underlying().(*types.Pointer); ok {
+		if countBase {
+			return true
+		}
+		from = pointer.Elem()
+	}
+	_, _, indirect := types.LookupFieldOrMethod(from, true, selection.Obj().Pkg(), selection.Obj().Name())
+	return indirect
 }
 
 // hasSignalStringRange makes test-only package helpers available to the
@@ -85,7 +189,7 @@ func rangeStringLiterals(file *ast.File, info *types.Info, pkg *signalPackage) (
 			return true
 		}
 		scope := rangeEnclosingScope(file, loop)
-		flow := analyzeRangeObject(scope, map[types.Object]bool{object: true}, info, pkg, 0, make(map[*types.Func]bool))
+		flow := analyzeRangeObject(scope, newRangeTracked(map[types.Object]bool{object: true}), info, pkg, 0, make(map[*types.Func]bool))
 		for _, element := range values.Elts {
 			ast.Inspect(element, func(child ast.Node) bool {
 				literal, ok := child.(*ast.BasicLit)
@@ -108,7 +212,7 @@ func rangeStringLiterals(file *ast.File, info *types.Info, pkg *signalPackage) (
 	return data, executed
 }
 
-func analyzeRangeObject(scope ast.Node, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool) rangeFlowResult {
+func analyzeRangeObject(scope ast.Node, tracked *rangeTracked, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool) rangeFlowResult {
 	if depth >= 8 {
 		return rangeFlowResult{unknown: true}
 	}
@@ -118,8 +222,16 @@ func analyzeRangeObject(scope ast.Node, tracked map[types.Object]bool, info *typ
 	return result
 }
 
-func propagateRangeObjects(scope ast.Node, tracked map[types.Object]bool, info *types.Info) map[*ast.Ident]bool {
+func propagateRangeObjects(scope ast.Node, tracked *rangeTracked, info *types.Info) map[*ast.Ident]bool {
 	propagated := make(map[*ast.Ident]bool)
+	markSource := func(rhs ast.Expr) {
+		ast.Inspect(rhs, func(child ast.Node) bool {
+			if use, ok := child.(*ast.Ident); ok && tracked.has(use, info) {
+				propagated[use] = true
+			}
+			return true
+		})
+	}
 	for changed := true; changed; {
 		changed = false
 		ast.Inspect(scope, func(n ast.Node) bool {
@@ -130,31 +242,27 @@ func propagateRangeObjects(scope ast.Node, tracked map[types.Object]bool, info *
 						continue
 					}
 					for _, lhs := range n.Lhs {
-						var obj types.Object
+						var target *ast.Ident
 						switch lhs := ast.Unparen(lhs).(type) {
 						case *ast.Ident:
 							if lhs.Name != "_" {
-								obj = info.ObjectOf(lhs)
+								target = lhs
 							}
 						case *ast.SelectorExpr:
-							obj = info.Uses[lhs.Sel]
+							target = lhs.Sel
 							propagated[lhs.Sel] = true
 						}
+						if target == nil {
+							continue
+						}
+						obj := info.ObjectOf(target)
 						if obj == nil {
 							continue
 						}
-						if obj != nil && !tracked[obj] {
-							tracked[obj] = true
+						if tracked.add(target, obj) {
 							changed = true
 						}
-						if obj != nil && tracked[obj] {
-							ast.Inspect(rhs, func(child ast.Node) bool {
-								if use, ok := child.(*ast.Ident); ok && tracked[info.Uses[use]] {
-									propagated[use] = true
-								}
-								return true
-							})
-						}
+						markSource(rhs)
 					}
 				}
 			case *ast.ValueSpec:
@@ -164,18 +272,13 @@ func propagateRangeObjects(scope ast.Node, tracked map[types.Object]bool, info *
 					}
 					for _, lhs := range n.Names {
 						obj := info.ObjectOf(lhs)
-						if obj != nil && !tracked[obj] {
-							tracked[obj] = true
+						if obj == nil {
+							continue
+						}
+						if tracked.add(lhs, obj) {
 							changed = true
 						}
-						if obj != nil && tracked[obj] {
-							ast.Inspect(rhs, func(child ast.Node) bool {
-								if use, ok := child.(*ast.Ident); ok && tracked[info.Uses[use]] {
-									propagated[use] = true
-								}
-								return true
-							})
-						}
+						markSource(rhs)
 					}
 				}
 			}
@@ -185,7 +288,7 @@ func propagateRangeObjects(scope ast.Node, tracked map[types.Object]bool, info *
 	return propagated
 }
 
-func analyzeRangeCalls(scope ast.Node, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool) (rangeFlowResult, map[*ast.Ident]bool) {
+func analyzeRangeCalls(scope ast.Node, tracked *rangeTracked, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool) (rangeFlowResult, map[*ast.Ident]bool) {
 	result := rangeFlowResult{}
 	handled := make(map[*ast.Ident]bool)
 	ast.Inspect(scope, func(n ast.Node) bool {
@@ -198,7 +301,7 @@ func analyzeRangeCalls(scope ast.Node, tracked map[types.Object]bool, info *type
 	return result, handled
 }
 
-func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool, handled map[*ast.Ident]bool, result *rangeFlowResult) {
+func analyzeRangeCall(call *ast.CallExpr, tracked *rangeTracked, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool, handled map[*ast.Ident]bool, result *rangeFlowResult) {
 	var dependent []int
 	for i, arg := range call.Args {
 		if rangeExprDepends(arg, tracked, info) {
@@ -209,28 +312,9 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 		markRangeUses(call.Args[i], tracked, info, handled)
 	}
 	if isSubtest(call, info) {
-		body, receiverFields, receiverBodies, resolved := resolveRangeSubtestBody(call, tracked, info, pkg)
+		bodies, fields, resolved := resolveRangeSubtestBody(call, tracked, info, pkg)
 		if resolved {
-			bodyTracked := make(map[types.Object]bool, len(tracked)+len(receiverFields))
-			for object := range tracked {
-				bodyTracked[object] = true
-			}
-			for object := range receiverFields {
-				bodyTracked[object] = true
-			}
-			markRangeUses(body, tracked, info, handled)
-			nested := analyzeRangeObject(body, bodyTracked, info, pkg, depth+1, stack)
-			result.executes = result.executes || nested.executes
-			result.unknown = result.unknown || nested.unknown
-			for _, receiverBody := range receiverBodies {
-				if receiverBody == body {
-					continue
-				}
-				markRangeUses(receiverBody, tracked, info, handled)
-				nested = analyzeRangeObject(receiverBody, bodyTracked, info, pkg, depth+1, stack)
-				result.executes = result.executes || nested.executes
-				result.unknown = result.unknown || nested.unknown
-			}
+			analyzeRangeSubtestBodies(bodies, fields, tracked, info, pkg, depth, stack, handled, result)
 			return
 		}
 	}
@@ -258,54 +342,107 @@ func analyzeRangeCall(call *ast.CallExpr, tracked map[types.Object]bool, info *t
 	result.unknown = true
 }
 
+// rangeSubtestBody is a body a subtest runs: a function literal, the method
+// a method value names or a method that one calls on its receiver.
+type rangeSubtestBody struct {
+	body ast.Node
+	// receiver is nil for a function literal.
+	receiver types.Object
+	// pointer tells that the method shares its receiver with its caller; a
+	// value receiver is a copy of the caller's.
+	pointer bool
+	// caller is the index of the body that calls the method, -1 for the
+	// subtest body itself.
+	caller int
+}
+
 // resolveRangeSubtestBody follows only bodies whose source is unambiguous:
 // a function literal assigned once in this function, or a method value for a
-// method declared in this package. Other function values remain unknown.
-func resolveRangeSubtestBody(call *ast.CallExpr, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage) (ast.Node, map[types.Object]bool, []ast.Node, bool) {
+// method declared in this package, with the methods it calls on its
+// receiver. For a method value it also returns the fields of the receiver
+// that hold the table string; for a function literal they are nil.
+func resolveRangeSubtestBody(call *ast.CallExpr, tracked *rangeTracked, info *types.Info, pkg *signalPackage) ([]rangeSubtestBody, map[types.Object]bool, bool) {
 	if len(call.Args) < 2 {
-		return nil, nil, nil, false
+		return nil, nil, false
 	}
 	bodyExpr := ast.Unparen(call.Args[1])
 	switch body := bodyExpr.(type) {
 	case *ast.FuncLit:
-		return body.Body, nil, nil, true
+		return []rangeSubtestBody{{body: body.Body, caller: -1}}, nil, true
 	case *ast.Ident:
 		if body.Name == "_" {
-			return nil, nil, nil, false
+			return nil, nil, false
 		}
 		object := info.Uses[body]
 		if object == nil {
-			return nil, nil, nil, false
+			return nil, nil, false
 		}
 		function, unique := uniqueRangeFuncValue(call, object, info, pkg)
 		if !unique || function == nil {
-			return nil, nil, nil, false
+			return nil, nil, false
 		}
-		return function.Body, nil, nil, true
+		return []rangeSubtestBody{{body: function.Body, caller: -1}}, nil, true
 	case *ast.SelectorExpr:
 		selection := info.Selections[body]
 		if selection == nil || selection.Kind() != types.MethodVal {
-			return nil, nil, nil, false
+			return nil, nil, false
 		}
 		method, _ := selection.Obj().(*types.Func)
 		if method == nil || method.Pkg() == nil || method.Pkg().Path() != pkg.path {
-			return nil, nil, nil, false
+			return nil, nil, false
 		}
 		decl := rangeFunctionDecl(method, pkg, info)
-		if decl == nil || decl.Body == nil || decl.Recv == nil || len(decl.Recv.List) == 0 || len(decl.Recv.List[0].Names) == 0 {
-			return nil, nil, nil, false
+		if decl == nil {
+			return nil, nil, false
 		}
 		fields := rangeMethodValueFields(body.X, tracked, info, pkg)
 		if len(fields) == 0 {
-			return nil, nil, nil, false
+			return nil, nil, false
 		}
-		receiverBodies, safe := receiverOnlyReadsFields(decl, info, pkg, fields)
+		bodies, safe := receiverOnlyReadsFields(decl, info, pkg, fields)
 		if !safe {
-			return nil, nil, nil, false
+			return nil, nil, false
 		}
-		return decl.Body, fields, receiverBodies, true
+		return bodies, fields, true
 	default:
-		return nil, nil, nil, false
+		return nil, nil, false
+	}
+}
+
+// analyzeRangeSubtestBodies reads the bodies a subtest runs. A function
+// literal sees the variables and the receiver fields of the body it is
+// written in. A method sees the fields of its own receiver: the subtest's
+// method those the method value was made with, a method it calls on a pointer
+// receiver the very fields of its caller, and one on a value receiver a copy
+// of them, so what a method sets in its copy stays out of its caller and of
+// the caller's other calls. What lies behind a pointer is not copied; it is
+// looked up in objects, which all the bodies share.
+func analyzeRangeSubtestBodies(bodies []rangeSubtestBody, fields map[types.Object]bool, tracked *rangeTracked, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool, handled map[*ast.Ident]bool, result *rangeFlowResult) {
+	objects := maps.Clone(tracked.objects)
+	states := make([]*rangeTracked, len(bodies))
+	for i, sub := range bodies {
+		switch {
+		case fields == nil:
+			// A function literal reads the receiver of the body it is
+			// written in.
+			copied := *tracked
+			copied.objects = objects
+			states[i] = &copied
+		case sub.caller < 0:
+			// A field of whichever value the caller set from the string
+			// may be one of the receiver's.
+			held := maps.Clone(fields)
+			maps.Copy(held, objects)
+			states[i] = newReceiverTracked(objects, sub, held, info)
+		case sub.pointer:
+			states[i] = newReceiverTracked(objects, sub, states[sub.caller].fields, info)
+		default:
+			states[i] = newReceiverTracked(objects, sub, maps.Clone(states[sub.caller].fields), info)
+		}
+		markRangeUses(sub.body, tracked, info, handled)
+		nested := analyzeRangeObject(sub.body, states[i], info, pkg, depth+1, stack)
+		result.executes = result.executes || nested.executes
+		result.unknown = result.unknown || nested.unknown
 	}
 }
 
@@ -364,7 +501,7 @@ func uniqueRangeFuncValue(call *ast.CallExpr, object types.Object, info *types.I
 	return value, writes == 1 && value != nil
 }
 
-func rangeMethodValueFields(receiver ast.Expr, tracked map[types.Object]bool, info *types.Info, pkg *signalPackage) map[types.Object]bool {
+func rangeMethodValueFields(receiver ast.Expr, tracked *rangeTracked, info *types.Info, pkg *signalPackage) map[types.Object]bool {
 	var literal *ast.CompositeLit
 	switch receiver := ast.Unparen(receiver).(type) {
 	case *ast.CompositeLit:
@@ -455,7 +592,7 @@ func analyzeProjectRangeCall(call *ast.CallExpr, dependent []int, fn *types.Func
 			result.unknown = true
 			continue
 		}
-		nested := analyzeRangeObject(decl.Body, map[types.Object]bool{param: true}, info, pkg, depth+1, nextStack)
+		nested := analyzeRangeObject(decl.Body, newRangeTracked(map[types.Object]bool{param: true}), info, pkg, depth+1, nextStack)
 		result.executes = result.executes || nested.executes
 		result.unknown = result.unknown || nested.unknown
 	}
@@ -493,10 +630,10 @@ func rangeSubtestBodyOpaque(call *ast.CallExpr, dependent []int) bool {
 	return false
 }
 
-func markUnknownRangeUses(scope ast.Node, tracked map[types.Object]bool, propagated map[*ast.Ident]bool, handled map[*ast.Ident]bool, info *types.Info, result *rangeFlowResult) {
+func markUnknownRangeUses(scope ast.Node, tracked *rangeTracked, propagated map[*ast.Ident]bool, handled map[*ast.Ident]bool, info *types.Info, result *rangeFlowResult) {
 	ast.Inspect(scope, func(n ast.Node) bool {
 		id, ok := n.(*ast.Ident)
-		if !ok || !tracked[info.Uses[id]] || propagated[id] || handled[id] {
+		if !ok || !tracked.has(id, info) || propagated[id] || handled[id] {
 			return true
 		}
 		if rangeIdentInEquality(id, scope, tracked, info) {
@@ -712,27 +849,25 @@ func rangeCallFunc(call *ast.CallExpr, info *types.Info) *types.Func {
 	return fn
 }
 
-func rangeExprDepends(expr ast.Node, tracked map[types.Object]bool, info *types.Info) bool {
-	depends := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.Ident:
-			if tracked[info.Uses[n]] {
-				depends = true
-			}
-		case *ast.SelectorExpr:
-			if tracked[info.Uses[n.Sel]] {
-				depends = true
-			}
-		}
-		return !depends
-	})
-	return depends
+func rangeExprDepends(expr ast.Node, tracked *rangeTracked, info *types.Info) bool {
+	return anyIdent(expr, func(id *ast.Ident) bool { return tracked.has(id, info) })
 }
 
-func markRangeUses(expr ast.Node, tracked map[types.Object]bool, info *types.Info, handled map[*ast.Ident]bool) {
+// anyIdent reports whether an identifier under node matches.
+func anyIdent(node ast.Node, match func(*ast.Ident) bool) bool {
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && match(id) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+func markRangeUses(expr ast.Node, tracked *rangeTracked, info *types.Info, handled map[*ast.Ident]bool) {
 	ast.Inspect(expr, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && tracked[info.Uses[id]] {
+		if id, ok := n.(*ast.Ident); ok && tracked.has(id, info) {
 			handled[id] = true
 		}
 		return true
@@ -820,7 +955,7 @@ func rangeFunctionDecl(fn *types.Func, pkg *signalPackage, info *types.Info) *as
 	return nil
 }
 
-func rangeIdentInEquality(id *ast.Ident, scope ast.Node, tracked map[types.Object]bool, info *types.Info) bool {
+func rangeIdentInEquality(id *ast.Ident, scope ast.Node, tracked *rangeTracked, info *types.Info) bool {
 	found := false
 	ast.Inspect(scope, func(n ast.Node) bool {
 		binary, ok := n.(*ast.BinaryExpr)
@@ -828,7 +963,7 @@ func rangeIdentInEquality(id *ast.Ident, scope ast.Node, tracked map[types.Objec
 			return true
 		}
 		ast.Inspect(binary, func(child ast.Node) bool {
-			if child == id && tracked[info.Uses[id]] {
+			if child == id && tracked.has(id, info) {
 				found = true
 			}
 			return !found
@@ -839,16 +974,17 @@ func rangeIdentInEquality(id *ast.Ident, scope ast.Node, tracked map[types.Objec
 }
 
 // receiverOnlyReadsFields reports whether a method and methods it directly
-// calls on the same receiver type use that receiver only to read fields. It
-// also returns their bodies so the range analysis can inspect each one.
-func receiverOnlyReadsFields(decl *ast.FuncDecl, info *types.Info, pkg *signalPackage, fields map[types.Object]bool) ([]ast.Node, bool) {
-	var bodies []ast.Node
-	ok := receiverMethodOnlyReadsFields(decl, info, pkg, fields, make(map[*types.Func]bool), &bodies)
+// calls on the same receiver type use that receiver only to read and set
+// fields. It also returns their bodies, each with its caller, so the range
+// analysis can inspect each one.
+func receiverOnlyReadsFields(decl *ast.FuncDecl, info *types.Info, pkg *signalPackage, fields map[types.Object]bool) ([]rangeSubtestBody, bool) {
+	var bodies []rangeSubtestBody
+	ok := receiverMethodOnlyReadsFields(decl, -1, info, pkg, fields, make(map[*types.Func]bool), &bodies)
 	return bodies, ok
 }
 
-func receiverMethodOnlyReadsFields(decl *ast.FuncDecl, info *types.Info, pkg *signalPackage, fields map[types.Object]bool, visited map[*types.Func]bool, bodies *[]ast.Node) bool {
-	if decl == nil || decl.Body == nil || decl.Recv == nil || len(decl.Recv.List) == 0 || len(decl.Recv.List[0].Names) == 0 {
+func receiverMethodOnlyReadsFields(decl *ast.FuncDecl, caller int, info *types.Info, pkg *signalPackage, fields map[types.Object]bool, visited map[*types.Func]bool, bodies *[]rangeSubtestBody) bool {
+	if decl == nil || decl.Body == nil || decl.Recv == nil || len(decl.Recv.List) == 0 {
 		return false
 	}
 	fn, _ := info.Defs[decl.Name].(*types.Func)
@@ -856,12 +992,23 @@ func receiverMethodOnlyReadsFields(decl *ast.FuncDecl, info *types.Info, pkg *si
 		return fn != nil
 	}
 	visited[fn] = true
-	*bodies = append(*bodies, decl.Body)
-	receiver := info.Defs[decl.Recv.List[0].Names[0]]
 	receiverType := info.TypeOf(decl.Recv.List[0].Type)
-	if receiver == nil || receiverType == nil {
+	if receiverType == nil {
 		return false
 	}
+	names := decl.Recv.List[0].Names
+	if len(names) == 0 {
+		// A receiver without a name is read nowhere in the body, so no field
+		// of it reaches the method.
+		return true
+	}
+	receiver := info.Defs[names[0]]
+	if receiver == nil {
+		return false
+	}
+	_, pointer := receiverType.(*types.Pointer)
+	self := len(*bodies)
+	*bodies = append(*bodies, rangeSubtestBody{body: decl.Body, receiver: receiver, pointer: pointer, caller: caller})
 
 	called := make(map[*ast.SelectorExpr]bool)
 	ast.Inspect(decl.Body, func(n ast.Node) bool {
@@ -883,7 +1030,7 @@ func receiverMethodOnlyReadsFields(decl *ast.FuncDecl, info *types.Info, pkg *si
 		switch n := n.(type) {
 		case *ast.SelectorExpr:
 			var handled bool
-			only, handled = receiverSelectorOnlyReadsFields(n, receiver, receiverType, called[n], info, pkg, fields, visited, bodies)
+			only, handled = receiverSelectorOnlyReadsFields(n, receiver, receiverType, called[n], self, info, pkg, fields, visited, bodies)
 			return !handled
 		case *ast.Ident:
 			if info.Uses[n] == receiver {
@@ -895,7 +1042,7 @@ func receiverMethodOnlyReadsFields(decl *ast.FuncDecl, info *types.Info, pkg *si
 	return only
 }
 
-func receiverSelectorOnlyReadsFields(selector *ast.SelectorExpr, receiver types.Object, receiverType types.Type, called bool, info *types.Info, pkg *signalPackage, fields map[types.Object]bool, visited map[*types.Func]bool, bodies *[]ast.Node) (bool, bool) {
+func receiverSelectorOnlyReadsFields(selector *ast.SelectorExpr, receiver types.Object, receiverType types.Type, called bool, caller int, info *types.Info, pkg *signalPackage, fields map[types.Object]bool, visited map[*types.Func]bool, bodies *[]rangeSubtestBody) (bool, bool) {
 	id, ok := ast.Unparen(selector.X).(*ast.Ident)
 	if !ok || info.Uses[id] != receiver {
 		return true, false
@@ -916,5 +1063,5 @@ func receiverSelectorOnlyReadsFields(selector *ast.SelectorExpr, receiver types.
 		return false, true
 	}
 	callee := rangeFunctionDecl(method, pkg, info)
-	return callee != nil && receiverMethodOnlyReadsFields(callee, info, pkg, fields, visited, bodies), true
+	return callee != nil && receiverMethodOnlyReadsFields(callee, caller, info, pkg, fields, visited, bodies), true
 }
