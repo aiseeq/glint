@@ -1,6 +1,7 @@
 package frontendrules
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -164,14 +165,13 @@ func writeTestExecutable(path string, contents []byte) error {
 	defer syscall.ForkLock.RUnlock()
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
 	if err != nil {
-		return err
+		return fmt.Errorf("create test executable: %w", err)
 	}
 	if _, err := f.Write(contents); err != nil {
-		_ = f.Close()
-		return err
+		return errors.Join(fmt.Errorf("write test executable: %w", err), f.Close())
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return fmt.Errorf("close test executable: %w", err)
 	}
 	return nil
 }
