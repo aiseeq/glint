@@ -401,8 +401,8 @@ func capturedProducerPipesForUnit(r *shellRule, src *patternkit.ShellSource, uni
 		if facts.hasSpan(facts.declarations, int(a.Pos().Offset())) {
 			continue
 		}
-		if !(facts.inCondition(int(a.Pos().Offset())) || assignmentStatusChecked(unit.Text, int(a.End().Offset()), a.Name.Value)) ||
-			facts.inHeredoc(start) || facts.pipefailAt(start) {
+		checked := facts.inCondition(int(a.Pos().Offset())) || assignmentStatusChecked(unit.Text, int(a.End().Offset()), a.Name.Value)
+		if !checked || facts.inHeredoc(start) || facts.pipefailAt(start) {
 			continue
 		}
 		bodySegments := patternkit.Segments(body)
