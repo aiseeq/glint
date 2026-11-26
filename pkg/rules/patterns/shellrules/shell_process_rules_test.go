@@ -1,14 +1,18 @@
 package shellrules
 
 import (
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // Repro from a real project: every worker of a parallel series built the bot
@@ -460,6 +464,208 @@ for t in a b; do
 	trap 'rm -f "$t"' EXIT &
 	coproc { trap 'rm -f "$t"' EXIT; }
 done
+`)
+}
+
+// The signals and the action of a trap are the words trap gets: bash expands
+// braces before the quotes and the variables are read, so trap … {EXIT,INT}
+// sets EXIT, and the words may hold the action and the name as well. A brace
+// that is quoted, unclosed or holds no list stays in the word and names no
+// signal, and an unquoted empty element is no word.
+func TestShellTrapInLoopBraces(t *testing.T) {
+	shellWanted(t, "shell-trap-in-loop", "braces.sh", `#!/bin/bash
+for t in a b; do
+	trap 'rm -f "$t"' {EXIT,INT} # want
+	trap 'rm -f "$t"' {INT,EXIT} # want
+	trap 'rm -f "$t"' {INT,{TERM,EXIT}} # want
+	trap 'rm -f "$t"' {EXIT,} # want
+	trap 'rm -f "$t"' {,EXIT} # want
+	trap 'rm -f "$t"' E{X,Y}IT # want
+	trap 'rm -f "$t"' {E,e}{X,x}IT # want
+	trap 'rm -f "$t"' {0,2} # want
+	trap 'rm -f "$t"' {0..3} # want
+	trap 'rm -f "$t"' {3..0} # want
+	trap 'rm -f "$t"' {00..02} # want
+	trap 'rm -f "$t"' {EXIT,$sig} # want
+	trap 'rm -f "$t"' {"$sig",EXIT} # want
+	trap 'rm -f "$t"' {'INT',"EXIT"} # want
+	trap 'rm -f "$t"' INT {TERM,EXIT} # want
+	trap {'rm -f "$t"',EXIT} # want
+	trap {INT,EXIT} # want
+	trap {,EXIT} # want
+	trap {'',EXIT} # want
+	trap {-,INT,EXIT} # want
+	trap {0,INT} # want
+	trap -- {'rm -f "$t"',EXIT} # want
+	trap {--,'rm -f "$t"',EXIT} # want
+	{trap,'rm -f "$t"',EXIT} # want
+	builtin {trap,'rm -f "$t"',EXIT} # want
+	{builtin,trap} 'rm -f "$t"' INT EXIT # want
+	trap 'rm -f "$t"' {1..20000} EXIT # want
+done
+for t in a b; do
+	trap 'rm -f "$t"' {INT,TERM}
+	trap 'rm -f "$t"' {INT,}
+	trap 'rm -f "$t"' {1..3}
+	trap 'rm -f "$t"' {EXIT}
+	trap 'rm -f "$t"' {{EXIT,INT}}
+	trap 'rm -f "$t"' {"$sig",INT}
+	trap 'rm -f "$t"' {E"$sig",INT}
+	trap 'rm -f "$t"' "{EXIT,INT}"
+	trap 'rm -f "$t"' '{EXIT,INT}'
+	trap 'rm -f "$t"' {"EXIT,INT"}
+	trap 'rm -f "$t"' \{EXIT,INT}
+	trap 'rm -f "$t"' {EXIT\,INT}
+	trap 'rm -f "$t"' {EXIT,INT
+	trap 'rm -f "$t"' {EXIT, INT}
+	trap 'rm -f "$t"' {a,{EXIT}
+	trap {'rm -f "$t"',INT}
+	trap {EXIT,INT}
+	{echo,trap} 'rm -f "$t"' EXIT
+	trap EXIT trap
+	trap EXIT {trap,INT}
+	trap 'rm -f "$t"' {1..999999999}
+done
+`)
+}
+
+// The braces of one command are expanded within maxBraces, maxBraceText,
+// maxBraceWords and maxBraceParts: what passes a bound is not built, and the word is one of
+// unknown value.
+func TestShellTrapInLoopBraceBounds(t *testing.T) {
+	long := strings.Repeat
+	var names strings.Builder
+	for _, n := range []string{"HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV",
+		"USR2", "PIPE", "ALRM", "TERM", "STKFLT", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU",
+		"XFSZ", "VTALRM", "PROF", "WINCH", "IO", "PWR", "SYS", "RTMIN", "RTMAX"} {
+		names.WriteString("SIG" + n + ",")
+	}
+	for i := 1; i <= 14; i++ {
+		names.WriteString("SIGRTMIN+" + strconv.Itoa(i) + ",SIGRTMAX-" + strconv.Itoa(i) + ",")
+	}
+	for _, tc := range []struct {
+		name, command string
+		sets          bool
+	}{
+		{"long range", `trap '' {1..999999999}`, false},
+		{"long range and EXIT", `trap '' {1..999999999} EXIT`, true},
+		{"range to the last int64", `trap '' {1..9223372036854775807}`, false},
+		{"range of two to the last int64", `trap '' {9223372036854775806..9223372036854775807}`, false},
+		{"step over the last int64", `trap '' {1..9223372036854775807..9223372036854775807}`, false},
+		{"step the expander does not negate", `trap '' {0..1..-9223372036854775808}`, false},
+		{"2^8 words", `trap '' ` + long("{a,b}", 8), false},
+		{"2^64 words", `trap '' ` + long("{a,b}", 64), false},
+		{"2^64 words and EXIT", `trap '' ` + long("{a,b}", 64) + ` EXIT`, true},
+		{"2^100000 words", `trap '' ` + long("{a,b}", 100_000), false},
+		{"lists in lists", `trap '' ` + long("{a,", 1000) + "b" + long("}", 1000), false},
+		{"product of ranges", `trap '' {1..9999}{1..9999}`, false},
+		{"product of ranges and EXIT", `trap '' {1..9999}{1..9999} EXIT`, true},
+		{"product of eight ranges", `trap '' ` + long("{1..9999}", 8), false},
+		{"many ranges", `trap '' ` + long("{1..9999} ", 1000), false},
+		{"long list", `trap '' {a` + long(",a", 100_000) + "}", false},
+		{"open braces", `trap '' ` + long("{", 8000), false},
+		{"closed braces without a list", `trap '' ` + long("{", 8000) + "a" + long("}", 8000), false},
+		{"ranges of one", `trap '' ` + long("{1..1}", 8000), false},
+		{"range times ranges of one", `trap '' {1..128}` + long("{1..1}", 80), false},
+		{"many variables", `trap '' {a,b}{a,b}{a,b}{a,b}` + long("$a", 100_000), false},
+		{"the costliest within the bounds", `trap '' {1..128}` + long("{1..1}", 7) + long("$a", 900), false},
+		{"name of many words", `{1..999999999} trap '' EXIT`, false},
+
+		{"as many words as the bound", `trap '' {0..127}`, true},
+		{"one word more", `trap '' {0..128}`, false},
+		{"words of two lists", `trap '' {1..100} {0..27}`, true},
+		{"one word more in two lists", `trap '' {1..100} {0..28}`, false},
+		{"a list past the bound leaves the next", `trap '' {1..9999} {EXIT,INT}`, true},
+		{"braces to the bound", `trap '' ` + long("{1..1} ", 7) + "{0..0}", true},
+		{"one brace more", `trap '' ` + long("{1..1} ", 8) + "{0..0}", false},
+		{"one brace more in a word", `trap '' ` + long("{0..0}", 9), false},
+		{"braces in quotes are not bound", `trap '` + long("{", 100) + `' "` + long("{", 100) + `" {EXIT,INT}`, true},
+		{"as much text as the bound", `trap '' {EXIT,` + long("x", maxBraceText-8) + "}", true},
+		{"one byte more", `trap '' {EXIT,` + long("x", maxBraceText-7) + "}", false},
+		{"one part more", `trap '' {EXIT,` + long("x", maxBraceText-10) + "}$x$y", false},
+		{"text of two lists", `trap '' {HUP,` + long("x", maxBraceText-20) + "} {EXIT,xxxxx}", true},
+		{"one byte more in two lists", `trap '' {HUP,` + long("x", maxBraceText-20) + "} {EXIT,xxxxxx}", false},
+		{"text without braces is not bound", `trap ` + long("x", 2*maxBraceText) + " {EXIT,INT}", true},
+		{"all signals by name", `trap '' {` + names.String() + "DEBUG,ERR,RETURN,EXIT}", true},
+		{"all signals by number", `trap '' {64..0}`, true},
+		{"an unknown word is no option", `trap -{` + long(",", 200) + "} EXIT", true},
+		{"an unknown word is an operand", `trap {1..9999} EXIT`, true},
+		{"an unknown word is an action", `trap {1..9999} INT`, false},
+		{"EXIT alone after an unknown word", `trap EXIT {1..9999}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file, err := syntax.NewParser().Parse(strings.NewReader(tc.command), "")
+			require.NoError(t, err)
+			call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+			require.True(t, ok)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			start := time.Now()
+			reader := trapReader{braces: true}
+			sets := trapSetsExit(reader, call)
+			took := time.Since(start)
+			runtime.ReadMemStats(&after)
+			assert.Equal(t, tc.sets, sets)
+			assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(48<<20), "bytes allocated")
+			assert.Less(t, took, time.Second)
+			built := 0
+			reader.built = func(*syntax.Word) { built++ }
+			trapSetsExit(reader, call)
+			assert.LessOrEqual(t, built, maxBraceWords, "words built")
+		})
+	}
+}
+
+// A first operand of a dash and more is options, and trap with options prints
+// or fails: whichever the letters and however they are put together, it sets
+// nothing. A lone dash resets, and the words after -- are operands.
+func TestShellTrapInLoopOptions(t *testing.T) {
+	shellWanted(t, "shell-trap-in-loop", "options.sh", `#!/bin/bash
+for t in a b; do
+	trap -p EXIT
+	trap -P EXIT
+	trap -l EXIT
+	trap -lp EXIT
+	trap -pl EXIT
+	trap -pP EXIT
+	trap -pp EXIT
+	trap -p -l EXIT
+	trap -p -- EXIT
+	trap -p 'rm -f "$t"' EXIT
+	trap -lp 'rm -f "$t"' EXIT
+	trap '-lp' EXIT
+	trap -"lp" EXIT
+	trap -x EXIT
+	trap --help EXIT
+	trap -{l,p} EXIT
+	trap {-p,EXIT}
+	trap {,-p} EXIT
+	trap -p {EXIT,INT}
+	trap -l
+done
+for t in a b; do
+	trap -- -p EXIT # want
+	trap -- -lp EXIT # want
+	trap -- -- EXIT # want
+	trap -- - EXIT # want
+	trap - EXIT # want
+	trap - -p EXIT # want
+	trap '' EXIT # want
+	trap 'rm -f "$t"' -p EXIT # want
+	trap +p EXIT # want
+done
+`)
+	// A script the parser rejects is read by its steps.
+	shellWanted(t, "shell-trap-in-loop", "steps.sh", `#!/bin/bash
+for t in a b; do
+	trap -lp EXIT
+	trap -p EXIT
+	trap 'rm -f "$t"' EXIT # want
+	trap 'rm -f "$t"' {EXIT,INT} # want
+	trap - EXIT # want
+	trap -- -lp EXIT # want
+done
+if
 `)
 }
 
