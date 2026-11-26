@@ -871,8 +871,10 @@ func TestTscIncrementalCorruptBuildInfo(t *testing.T) {
 	assert.Equal(t, fullTscAnswer(t, root), incrementalTscAnswer(t, root))
 }
 
+// Sequential with a cache of its own: it counts the buildinfo files in the cache directory.
 func TestTscIncrementalWorktreesApart(t *testing.T) {
-	t.Parallel()
+	cache := t.TempDir()
+	rulestest.IsolateUserCache(t, cache)
 	tsc := globalTsc7(t)
 	files := map[string]string{
 		"tsconfig.json": strictTSConfig,
@@ -885,6 +887,18 @@ func TestTscIncrementalWorktreesApart(t *testing.T) {
 	assert.Empty(t, tscFindings(t, right))
 	assert.Equal(t, fullTscAnswer(t, left), incrementalTscAnswer(t, left))
 	assert.Equal(t, fullTscAnswer(t, right), incrementalTscAnswer(t, right))
+	// A second tsconfig of the same tree runs the same tsc.
+	patterntest.WriteProjectFile(t, left, "tsconfig.other.json", strictTSConfig)
+	rule := NewTscRule()
+	global, err := rule.globalTscBase()
+	require.NoError(t, err)
+	_, err = runTscProgram(&tscProgram{config: filepath.Join(left, "tsconfig.other.json"), tsc: filepath.Join(left, "node_modules", ".bin", "tsc")}, global)
+	require.NoError(t, err)
+	// Two trees with the same files and two tsconfigs of one tree keep a
+	// buildinfo each: a shared one would make every run of either start cold.
+	buildInfos, err := filepath.Glob(filepath.Join(cache, "glint", "tools", "tsc", "[^.]*.tsbuildinfo"))
+	require.NoError(t, err)
+	assert.Len(t, buildInfos, 3, "each tree and each tsconfig must have a buildinfo of its own")
 }
 
 const strictTSConfig = `{
