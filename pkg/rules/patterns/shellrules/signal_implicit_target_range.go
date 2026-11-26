@@ -19,15 +19,18 @@ type rangeFlowResult struct {
 
 // rangeTracked is what holds the table string while a body is read. In a
 // method body the string reaches the command only through a field of that
-// method's receiver set from the string, so a selector of the receiver's field
-// is looked up in fields, the receiver's own, and nowhere else; any other
-// name — a variable, a field of another value — is looked up in objects.
+// method's receiver set from the string, so a selector of a field lying in
+// the receiver's value is looked up in fields, the receiver's own, and
+// nowhere else; any other name — a variable, a field of another value, a
+// field reached through a pointer, which every copy shares — is looked up
+// in objects.
 type rangeTracked struct {
 	objects  map[types.Object]bool
 	receiver types.Object
 	fields   map[types.Object]bool
 	// own holds the names of the selectors of the method body that select a
-	// field of receiver; the function literals in the body read it too.
+	// field lying in receiver's value; the function literals in the body
+	// read it too.
 	own map[*ast.Ident]bool
 }
 
@@ -62,11 +65,14 @@ func (t *rangeTracked) add(id *ast.Ident, object types.Object) bool {
 }
 
 // receiverFieldSelectors returns the names of the selectors in scope that
-// select something of receiver, directly or through its fields (k.f, k.in.f).
+// select a field lying in the receiver's value itself (k.f, k.in.f). A
+// field reached through a pointer — a pointer field, an embedded *T — is
+// shared with every copy of the receiver, so its selector is left to
+// objects like any other value's.
 func receiverFieldSelectors(scope ast.Node, receiver types.Object, info *types.Info) map[*ast.Ident]bool {
 	own := make(map[*ast.Ident]bool)
 	ast.Inspect(scope, func(n ast.Node) bool {
-		if selector, ok := n.(*ast.SelectorExpr); ok && selectorBase(selector, info) == receiver {
+		if selector, ok := n.(*ast.SelectorExpr); ok && receiverValueField(selector, receiver, info) {
 			own[selector.Sel] = true
 		}
 		return true
@@ -74,19 +80,44 @@ func receiverFieldSelectors(scope ast.Node, receiver types.Object, info *types.I
 	return own
 }
 
-// selectorBase returns the variable a chain of selectors starts from, nil
-// when it starts from another expression.
-func selectorBase(selector *ast.SelectorExpr, info *types.Info) types.Object {
+// receiverValueField reports whether a chain of selectors starts from
+// receiver and dereferences no pointer on the way past the receiver itself.
+func receiverValueField(selector *ast.SelectorExpr, receiver types.Object, info *types.Info) bool {
 	for {
-		switch base := ast.Unparen(selector.X).(type) {
-		case *ast.Ident:
-			return info.Uses[base]
-		case *ast.SelectorExpr:
-			selector = base
-		default:
-			return nil
+		selection := info.Selections[selector]
+		if selection == nil {
+			return false
 		}
+		base := ast.Unparen(selector.X)
+		id, ok := base.(*ast.Ident)
+		atReceiver := ok && info.Uses[id] == receiver
+		if throughPointer(selection, !atReceiver) {
+			return false
+		}
+		if atReceiver {
+			return true
+		}
+		inner, ok := base.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		selector = inner
 	}
+}
+
+// throughPointer reports whether reaching what selection selects
+// dereferences a pointer: the value it is selected from, when that counts,
+// or an embedded *T on the way.
+func throughPointer(selection *types.Selection, countBase bool) bool {
+	from := selection.Recv()
+	if pointer, ok := from.Underlying().(*types.Pointer); ok {
+		if countBase {
+			return true
+		}
+		from = pointer.Elem()
+	}
+	_, _, indirect := types.LookupFieldOrMethod(from, true, selection.Obj().Pkg(), selection.Obj().Name())
+	return indirect
 }
 
 // hasSignalStringRange makes test-only package helpers available to the
@@ -384,7 +415,8 @@ func resolveRangeSubtestBody(call *ast.CallExpr, tracked *rangeTracked, info *ty
 // method those the method value was made with, a method it calls on a pointer
 // receiver the very fields of its caller, and one on a value receiver a copy
 // of them, so what a method sets in its copy stays out of its caller and of
-// the caller's other calls.
+// the caller's other calls. What lies behind a pointer is not copied; it is
+// looked up in objects, which all the bodies share.
 func analyzeRangeSubtestBodies(bodies []rangeSubtestBody, fields map[types.Object]bool, tracked *rangeTracked, info *types.Info, pkg *signalPackage, depth int, stack map[*types.Func]bool, handled map[*ast.Ident]bool, result *rangeFlowResult) {
 	objects := maps.Clone(tracked.objects)
 	states := make([]*rangeTracked, len(bodies))

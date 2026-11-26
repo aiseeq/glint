@@ -22,7 +22,9 @@ func receiverFieldsWant(source string) []int {
 // A method with a value receiver works on its own copy: a field it sets is
 // seen in its body and in the methods it calls on that copy, but not by its
 // caller or by a sibling the caller calls on its own copy. A pointer receiver
-// shares the value, so what one method sets the next one runs.
+// shares the value, so what one method sets the next one runs. The copy is
+// shallow: what a pointer field or an embedded *T points to every copy
+// shares, so a sibling runs what another copy set there.
 func TestSignalImplicitTargetValueReceiverWriteStaysInItsCopy(t *testing.T) {
 	source := `package sample
 import (
@@ -33,7 +35,26 @@ type stage struct{ script string }
 type job struct {
 	cmd, script string
 	in          stage
+	p           *stage
 }
+type base struct{ cmd string }
+type ejob struct {
+	src string
+	*base
+}
+func (k job) ptrFieldPrep(t *testing.T) { k.p.script = k.cmd }
+func (k job) ptrFieldAlias(t *testing.T) { p := k.p; p.script = k.cmd }
+func (k job) ptrFieldRun(t *testing.T) { _ = exec.Command("sh", "-c", k.p.script).Run() }
+func (k job) ptrFieldBoth(t *testing.T) { k.ptrFieldPrep(t); k.ptrFieldRun(t) }
+func (k job) ptrAliasBoth(t *testing.T) { k.ptrFieldAlias(t); k.ptrFieldRun(t) }
+func (k ejob) embPrep(t *testing.T) { k.cmd = k.src }
+func (k ejob) embRun(t *testing.T) { _ = exec.Command("sh", "-c", k.cmd).Run() }
+func (k ejob) embBoth(t *testing.T) { k.embPrep(t); k.embRun(t) }
+type wrap struct {
+	cmd string
+	stage
+}
+func (k *wrap) wrapOther(t *testing.T) { var x wrap; x.script = k.cmd; t.Log(x.script); _ = exec.Command("sh", "-c", k.script).Run() }
 func (k job) copyPrep(t *testing.T) { k.script = k.cmd; t.Log(k.script) }
 func (k job) copyRun(t *testing.T) { _ = exec.Command("sh", "-c", k.script).Run() }
 func (k job) copyBoth(t *testing.T) { k.copyPrep(t); k.copyRun(t) }
@@ -62,6 +83,7 @@ func (k job) relay(t *testing.T) {
 	_ = exec.Command("sh", "-c", out).Run()
 }
 func TestTable(t *testing.T) {
+	for _, s := range []string{"kill -9 $PPID"} { w := wrap{cmd: s}; t.Run("p", w.wrapOther) }
 	for _, s := range []string{"kill -9 $PPID"} { t.Run("a", job{cmd: s}.copyBoth) }
 	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("b", job{cmd: s}.copyBoth) }
 	for _, s := range []string{"kill -9 $PPID"} { t.Run("g", job{cmd: s}.nestedBoth) }
@@ -70,6 +92,9 @@ func TestTable(t *testing.T) {
 	for _, s := range []string{"kill -9 $PPID"} { t.Run("j", job{cmd: s}.inSubtest) } // WANT
 	for _, s := range []string{"kill -9 $PPID"} { t.Run("k", job{cmd: s}.relay) } // WANT
 	for _, s := range []string{"bash -c 'kill -9 $PPID'"} { t.Run("l", job{cmd: s}.sendInSubtest) } // WANT
+	for _, s := range []string{"kill -9 $PPID"} { t.Run("m", job{cmd: s, p: &stage{}}.ptrFieldBoth) } // WANT
+	for _, s := range []string{"kill -9 $PPID"} { t.Run("n", job{cmd: s, p: &stage{}}.ptrAliasBoth) } // WANT
+	for _, s := range []string{"kill -9 $PPID"} { t.Run("o", ejob{src: s, base: &base{}}.embBoth) } // WANT
 	for _, s := range []string{"kill -9 $PPID"} { t.Run("c", job{cmd: s}.ownWrite) } // WANT
 	for _, s := range []string{"kill -9 $PPID"} { t.Run("d", job{cmd: s}.writeThenCall) } // WANT
 	for _, s := range []string{"kill -9 $PPID"} { t.Run("e", job{cmd: s}.viaWriter) } // WANT
