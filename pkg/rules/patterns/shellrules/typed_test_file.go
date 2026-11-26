@@ -197,14 +197,7 @@ func typeSignalGroup(project *core.GoProjectContext, group *signalSourcePackage,
 }
 
 func hasSignalRefs(file *ast.File, names map[string]bool) bool {
-	found := false
-	ast.Inspect(file, func(node ast.Node) bool {
-		if id, ok := node.(*ast.Ident); ok && names[id.Name] {
-			found = true
-		}
-		return !found
-	})
-	return found
+	return anyIdent(file, func(id *ast.Ident) bool { return names[id.Name] })
 }
 
 // signalImporter imports a package the core loaded, else stdlib from export
