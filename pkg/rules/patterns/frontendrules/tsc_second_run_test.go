@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,7 +27,7 @@ for arg in "$@"; do
 done
 printf '%%b\n' %q
 `, version, log, source)
-	require.NoError(t, os.WriteFile(compiler, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(compiler, []byte(script)))
 	return compiler, log
 }
 
@@ -44,7 +43,6 @@ func secondRunCount(t *testing.T, log string) int {
 
 func checkSecondRun(t *testing.T, localVersion, globalVersion string, want int, testName string) {
 	t.Helper()
-	rulestest.IsolateUserCache(t, t.TempDir())
 	root := t.TempDir()
 	config := filepath.Join(root, "tsconfig.json")
 	source := filepath.Join(root, "main.ts")
@@ -61,13 +59,16 @@ func checkSecondRun(t *testing.T, localVersion, globalVersion string, want int, 
 }
 
 func TestTscSecondRunSameVersionSkip(t *testing.T) {
+	t.Parallel()
 	checkSecondRun(t, "7.0.2", "7.0.2", 1, t.Name())
 }
 
 func TestTscSecondRunTypeScript5KeepsTwoRuns(t *testing.T) {
+	t.Parallel()
 	checkSecondRun(t, "5.9.3", "7.0.2", 2, t.Name())
 }
 
 func TestTscSecondRunDifferentVersionKeepsTwoRuns(t *testing.T) {
+	t.Parallel()
 	checkSecondRun(t, "7.0.1", "7.0.2", 2, t.Name())
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -22,6 +23,27 @@ import (
 // launcher itself, as consumers do.
 func TestMain(m *testing.M) {
 	launcherPATH = os.Getenv("PATH")
+	if os.Getenv("GOCACHE") == "" {
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "frontendrules tests: locate the Go build cache:", err)
+			os.Exit(1)
+		}
+		if err := os.Setenv("GOCACHE", filepath.Join(cache, "go-build")); err != nil {
+			fmt.Fprintln(os.Stderr, "frontendrules tests: preserve the Go build cache:", err)
+			os.Exit(1)
+		}
+	}
+	cacheDir, err := os.MkdirTemp("", "glint-frontendrules-cache-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "frontendrules tests: create the tool cache:", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("XDG_CACHE_HOME", cacheDir); err != nil {
+		fmt.Fprintln(os.Stderr, "frontendrules tests: isolate the tool cache:", err)
+		_ = os.RemoveAll(cacheDir)
+		os.Exit(1)
+	}
 	dir, err := directGlobalTsc()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "frontendrules tests: the tsc on PATH stays:", err)
@@ -31,6 +53,9 @@ func TestMain(m *testing.M) {
 		if err := os.RemoveAll(dir); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
+	}
+	if err := os.RemoveAll(cacheDir); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 	}
 	os.Exit(code)
 }
@@ -112,7 +137,7 @@ func layOutGlobalTsc(dir, native, types string) error {
 			return fmt.Errorf("create %s: %w", d, err)
 		}
 	}
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec '"+native+"' \"$@\"\n"), 0o755); err != nil {
+	if err := writeTestExecutable(script, []byte("#!/bin/sh\nexec '"+native+"' \"$@\"\n")); err != nil {
 		return fmt.Errorf("write %s: %w", script, err)
 	}
 	if _, err := os.Stat(types); err == nil {
@@ -128,6 +153,25 @@ func layOutGlobalTsc(dir, native, types string) error {
 		if err := os.Chtimes(p, old, old); err != nil {
 			return fmt.Errorf("date back %s: %w", p, err)
 		}
+	}
+	return nil
+}
+
+// writeTestExecutable holds ForkLock while the executable is open for writing
+// so forkExec cannot inherit its descriptor and make exec fail with ETXTBSY (golang/go#22315).
+func writeTestExecutable(path string, contents []byte) error {
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(contents); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
 	}
 	return nil
 }

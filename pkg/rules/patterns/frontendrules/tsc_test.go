@@ -37,7 +37,6 @@ func globalTsc7(t *testing.T) string {
 // installs tsc as the project's own tsc in node_modules/.bin.
 func tscProject(t *testing.T, tsc string, files map[string]string) string {
 	t.Helper()
-	rulestest.IsolateUserCache(t, t.TempDir())
 	root := t.TempDir()
 	for name, content := range files {
 		patterntest.WriteProjectFile(t, root, name, content)
@@ -62,7 +61,7 @@ func countedTsc(t *testing.T, real string) (string, string) {
 	path := filepath.Join(t.TempDir(), "tsc")
 	log := filepath.Join(t.TempDir(), "runs")
 	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexec %q \"$@\"\n", log, real)
-	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(path, []byte(script)))
 	return path, log
 }
 
@@ -84,7 +83,7 @@ if [ ! -e %q ]; then
 fi
 exit "$status"
 `, log, real, real, marker, target, marker)
-	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(path, []byte(script)))
 	return path, log
 }
 
@@ -108,7 +107,7 @@ case "$*" in
   *) exec %q "$@" ;;
 esac
 `, log, real, marker, target, marker, real)
-	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(path, []byte(script)))
 	return path, log
 }
 
@@ -154,6 +153,7 @@ func countedTscProject(t *testing.T, files map[string]string) (string, string, s
 }
 
 func TestTscStatCacheSkipsLaunches(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "export const n: number = 1\n",
@@ -168,6 +168,7 @@ func TestTscStatCacheSkipsLaunches(t *testing.T) {
 }
 
 func TestTscStatCacheSameContentRewrites(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "export const n: number = 1\n",
@@ -202,7 +203,6 @@ func TestTscStatCacheSameContentRewrites(t *testing.T) {
 }
 
 func TestTscStatCacheResavesRefreshedHashMtime(t *testing.T) {
-	rulestest.IsolateUserCache(t, t.TempDir())
 	path := filepath.Join(t.TempDir(), "main.ts")
 	require.NoError(t, os.WriteFile(path, []byte("export {}\n"), 0o644))
 	old := time.Now().Add(-time.Minute)
@@ -242,6 +242,7 @@ func TestTscStatCacheResavesRefreshedHashMtime(t *testing.T) {
 }
 
 func TestTscFingerprintRefreshesSameContentStat(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "main.ts")
 	require.NoError(t, os.WriteFile(path, []byte("export {}\n"), 0o644))
 	old := time.Now().Add(-time.Minute)
@@ -265,6 +266,7 @@ func TestTscFingerprintRefreshesSameContentStat(t *testing.T) {
 }
 
 func TestTscFingerprintRefreshesUnchangedDirectoryEntries(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	file := filepath.Join(dir, "entry.ts")
 	require.NoError(t, os.WriteFile(file, []byte("export {}\n"), 0o644))
@@ -286,6 +288,7 @@ func TestTscFingerprintRefreshesUnchangedDirectoryEntries(t *testing.T) {
 }
 
 func TestTscFingerprintGainsDirectoryChangeTime(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	stamp, err := statPath(dir)
 	require.NoError(t, err)
@@ -303,6 +306,7 @@ func TestTscFingerprintGainsDirectoryChangeTime(t *testing.T) {
 }
 
 func TestTscFingerprintKeepsChmodDirectory(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "node_modules", "@demo")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "entry.ts"), []byte("export {}\n"), 0o644))
@@ -322,6 +326,7 @@ func TestTscFingerprintKeepsChmodDirectory(t *testing.T) {
 }
 
 func TestTscFingerprintOldStampDetectsRenameWithRestoredStat(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	oldPath := filepath.Join(dir, "added.tx")
 	require.NoError(t, os.WriteFile(oldPath, []byte("export const n = 1\n"), 0o644))
@@ -341,6 +346,7 @@ func TestTscFingerprintOldStampDetectsRenameWithRestoredStat(t *testing.T) {
 }
 
 func TestTscModuleScopeDirsSkipDanglingScopeLink(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	modules := filepath.Join(root, "node_modules")
 	require.NoError(t, os.MkdirAll(filepath.Join(modules, "@live"), 0o755))
@@ -353,6 +359,7 @@ func TestTscModuleScopeDirsSkipDanglingScopeLink(t *testing.T) {
 }
 
 func TestTscDirectoryEntriesDetectAdditionAndRemoval(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	stamp, err := statPath(dir)
 	require.NoError(t, err)
@@ -376,6 +383,7 @@ func TestTscDirectoryEntriesDetectAdditionAndRemoval(t *testing.T) {
 }
 
 func TestTscDirectoryEntriesDetectRenameWithRestoredStat(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	oldPath := filepath.Join(dir, "added.tx")
 	newPath := filepath.Join(dir, "added.ts")
@@ -399,6 +407,7 @@ func TestTscDirectoryEntriesDetectRenameWithRestoredStat(t *testing.T) {
 }
 
 func TestTscStatCacheNestedNodeModulesWorkspaceSymlinkRetargeted(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json":       `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,
 		"src/m0/main.ts":      "import { v } from '@demo/ui'; export const value: number = v\n",
@@ -422,6 +431,7 @@ func TestTscStatCacheNestedNodeModulesWorkspaceSymlinkRetargeted(t *testing.T) {
 }
 
 func TestTscStatCacheTracksNestedModulesInExcludedImportedDirectory(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json":       `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"],"exclude":["src/legacy"]}`,
 		"src/main.ts":         "import { v } from './legacy/x'; export const value: number = v\n",
@@ -446,6 +456,7 @@ func TestTscStatCacheTracksNestedModulesInExcludedImportedDirectory(t *testing.T
 }
 
 func TestTscStatCacheTracksNestedModulesBesideOutsideRootFile(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"app/tsconfig.json":   `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,
 		"app/src/main.ts":     "import { v } from '../../shared/x'; export const value: number = v\n",
@@ -470,6 +481,7 @@ func TestTscStatCacheTracksNestedModulesBesideOutsideRootFile(t *testing.T) {
 }
 
 func TestTscStatCacheTracksSymlinkedNestedNodeModules(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json":       `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,
 		"src/m0/main.ts":      "import { v } from '@demo/ui'; export const value: number = v\n",
@@ -494,6 +506,7 @@ func TestTscStatCacheTracksSymlinkedNestedNodeModules(t *testing.T) {
 }
 
 func TestTscStatCacheScopeDirectorySymlinkRetargeted(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json":       `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,
 		"src/main.ts":         "import { v } from '@demo/ui'; export const value: number = v\n",
@@ -519,6 +532,7 @@ func TestTscStatCacheScopeDirectorySymlinkRetargeted(t *testing.T) {
 }
 
 func TestTscStatCacheWorkspaceSymlinkRetargeted(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json":              "{\"compilerOptions\":{\"strict\":true,\"noEmit\":true},\"include\":[\"src\"]}",
 		"src/main.ts":                "import { v } from '@acme/ui'; export const value: string = v\n",
@@ -542,6 +556,7 @@ func TestTscStatCacheWorkspaceSymlinkRetargeted(t *testing.T) {
 }
 
 func TestTscStatCacheFileSymlinkRetargeted(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json": "{\"compilerOptions\":{\"strict\":true,\"noEmit\":true},\"include\":[\"src\"]}",
 		"src/main.ts":   "import { w } from './sym'; export const value: string = w\n",
@@ -568,6 +583,7 @@ func TestTscStatCacheFileSymlinkRetargeted(t *testing.T) {
 }
 
 func TestTscStatCacheEditedFile(t *testing.T) {
+	t.Parallel()
 	root, _, log := countedTscProject(t, map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "export const n: number = 1\n",
@@ -581,6 +597,7 @@ func TestTscStatCacheEditedFile(t *testing.T) {
 }
 
 func TestTscStatCacheAddedFile(t *testing.T) {
+	t.Parallel()
 	root, _, log := countedTscProject(t, map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "export const n: number = 1\n",
@@ -594,6 +611,7 @@ func TestTscStatCacheAddedFile(t *testing.T) {
 }
 
 func TestTscStatCacheTsconfigChange(t *testing.T) {
+	t.Parallel()
 	root, _, log := countedTscProject(t, map[string]string{
 		"base.json":     `{"compilerOptions":{"strict":true,"noEmit":true},"include":["src"]}`,
 		"tsconfig.json": `{"extends":"./base.json"}`,
@@ -608,6 +626,7 @@ func TestTscStatCacheTsconfigChange(t *testing.T) {
 }
 
 func TestTsconfigChainExtendsArray(t *testing.T) {
+	t.Parallel()
 	root := tscProject(t, "", map[string]string{
 		"tsconfig.json":   `{"extends":["./base-first.json","./base-last.json"]}`,
 		"base-first.json": `{"include":["from-first"]}`,
@@ -634,6 +653,7 @@ func TestTsconfigChainExtendsArray(t *testing.T) {
 }
 
 func TestTsconfigChainPackageExtends(t *testing.T) {
+	t.Parallel()
 	root := tscProject(t, "", map[string]string{
 		"tsconfig.json": `{"extends":"@configs/base"}`,
 		"node_modules/@configs/base/package.json":     `{"tsconfig":"./config/base.json"}`,
@@ -655,6 +675,7 @@ func TestTsconfigChainPackageExtends(t *testing.T) {
 }
 
 func TestTscStatCacheEditDuringRun(t *testing.T) {
+	t.Parallel()
 	real := globalTsc7(t)
 	root := tscProject(t, "", map[string]string{
 		"tsconfig.json": strictTSConfig,
@@ -675,6 +696,7 @@ func TestTscStatCacheEditDuringRun(t *testing.T) {
 }
 
 func TestTscStatCacheConfigEditDuringListing(t *testing.T) {
+	t.Parallel()
 	real := globalTsc7(t)
 	root := tscProject(t, "", map[string]string{
 		"tsconfig.json": strictTSConfig,
@@ -693,11 +715,11 @@ func TestTscStatCacheConfigEditDuringListing(t *testing.T) {
 }
 
 func TestTscStatCacheAddedTypesPackage(t *testing.T) {
+	t.Parallel()
 	real := globalTsc7(t)
 	base := t.TempDir()
 	root := filepath.Join(base, "project")
 	require.NoError(t, os.MkdirAll(root, 0o755))
-	rulestest.IsolateUserCache(t, t.TempDir())
 	patterntest.WriteProjectFile(t, root, "tsconfig.json", strictTSConfig)
 	patterntest.WriteProjectFile(t, root, "src/main.ts", "/// <reference path=\"../../node_modules/@types/existing/index.d.ts\" />\nexport const n: number = typedGlobal\n")
 	patterntest.WriteProjectFile(t, base, "node_modules/@types/existing/package.json", `{"name":"@types/existing","version":"1.0.0","types":"index.d.ts"}`)
@@ -776,6 +798,7 @@ func projectFiles(t *testing.T, root string) []string {
 }
 
 func TestTscIncrementalLeavesProjectClean(t *testing.T) {
+	t.Parallel()
 	tsc := globalTsc7(t)
 	root := tscProject(t, tsc, map[string]string{
 		"tsconfig.json": strictTSConfig,
@@ -789,6 +812,7 @@ func TestTscIncrementalLeavesProjectClean(t *testing.T) {
 }
 
 func TestTscIncrementalFollowsEdits(t *testing.T) {
+	t.Parallel()
 	tsc := globalTsc7(t)
 	root := tscProject(t, tsc, map[string]string{
 		"tsconfig.json": strictTSConfig,
@@ -801,6 +825,7 @@ func TestTscIncrementalFollowsEdits(t *testing.T) {
 }
 
 func TestTscIncrementalFollowsImportedJs(t *testing.T) {
+	t.Parallel()
 	tsc := globalTsc7(t)
 	root := tscProject(t, tsc, map[string]string{
 		"tsconfig.json": `{
@@ -830,12 +855,13 @@ func incrementalTscAnswer(t *testing.T, root string) []tscDiagnostic {
 }
 
 func TestTscIncrementalCorruptBuildInfo(t *testing.T) {
+	cache := t.TempDir()
+	rulestest.IsolateUserCache(t, cache)
 	tsc := globalTsc7(t)
 	root := tscProject(t, tsc, map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "export const n: number = 1\n",
 	})
-	cache := os.Getenv("XDG_CACHE_HOME")
 	assert.Empty(t, tscFindings(t, root))
 	buildInfo, err := filepath.Glob(filepath.Join(cache, "glint", "tools", "tsc", "*.tsbuildinfo"))
 	require.NoError(t, err)
@@ -846,15 +872,14 @@ func TestTscIncrementalCorruptBuildInfo(t *testing.T) {
 }
 
 func TestTscIncrementalWorktreesApart(t *testing.T) {
+	t.Parallel()
 	tsc := globalTsc7(t)
 	files := map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "export const n: number = 1\n",
 	}
 	left := tscProject(t, tsc, files)
-	cache := os.Getenv("XDG_CACHE_HOME")
 	right := tscProject(t, tsc, files)
-	rulestest.IsolateUserCache(t, cache)
 	patterntest.WriteProjectFile(t, left, "src/main.ts", "export const n: number = 'one'\n")
 	assert.NotEmpty(t, tscFindings(t, left))
 	assert.Empty(t, tscFindings(t, right))
@@ -873,6 +898,7 @@ const strictTSConfig = `{
 // an error in a file it imports is the imported file's; a file no tsconfig
 // compiles is checked strictly on its own, with the types of node.
 func TestTscReportsTypeErrorsOfProgramsAndStandaloneFiles(t *testing.T) {
+	t.Parallel()
 	tsc := globalTsc7(t)
 	root := tscProject(t, tsc, map[string]string{
 		"package.json":  `{"scripts": {"type-check": "tsc --noEmit"}}`,
@@ -892,6 +918,7 @@ func TestTscReportsTypeErrorsOfProgramsAndStandaloneFiles(t *testing.T) {
 
 // A tsconfig is not strict without strict, or with one of its checks off.
 func TestTscReportsTsconfigWithoutStrict(t *testing.T) {
+	t.Parallel()
 	tsc := globalTsc7(t)
 	root := tscProject(t, tsc, map[string]string{
 		"app/tsconfig.json":  `{"compilerOptions": {"noEmit": true}}`,
@@ -925,13 +952,14 @@ while [ "$#" -gt 0 ]; do
 done
 exit %d
 `, real, status)
-	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(path, []byte(script)))
 	return path
 }
 
 // A tsconfig the project's tsc builds and tsc 7 does not is medium: the
 // project has to move before it takes the new compiler.
 func TestTscReportsTsconfigTsc7DoesNotBuild(t *testing.T) {
+	t.Parallel()
 	tsc := globalTsc7(t)
 	root := tscProject(t, stubTsc(t, tsc, 0), map[string]string{
 		"tsconfig.json": `{"compilerOptions": {"strict": true, "noEmit": true}}`,
@@ -946,6 +974,7 @@ func TestTscReportsTsconfigTsc7DoesNotBuild(t *testing.T) {
 // The answer is cached: a second run does not ask tsc. A change of a file
 // the program imports is a change of the input, so tsc runs again.
 func TestTscCacheFollowsTheFilesOfTheProgram(t *testing.T) {
+	t.Parallel()
 	tsc := globalTsc7(t)
 	root := tscProject(t, tsc, map[string]string{
 		"tsconfig.json":  strictTSConfig,
@@ -970,6 +999,7 @@ func TestTscCacheFollowsTheFilesOfTheProgram(t *testing.T) {
 // A tsconfig needs the project's tsc and a TS file outside tsconfigs the
 // global one; a root without TypeScript needs neither.
 func TestTscCheckToolsNeedsTheTscOfEachProgram(t *testing.T) {
+	t.Parallel()
 	tsc := globalTsc7(t)
 	check := func(rule *TscRule, root string) error {
 		contexts := tscContexts(t, root)
@@ -996,10 +1026,11 @@ func TestTscCheckToolsNeedsTheTscOfEachProgram(t *testing.T) {
 // tsc continues a message on indented lines; an error of the program as a
 // whole has no file; a failure without a reported error is an error of the run.
 func TestTscDiagnosticsReadsTscOutput(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	script := func(body string) string {
 		path := filepath.Join(t.TempDir(), "tsc")
-		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755))
+		require.NoError(t, writeTestExecutable(path, []byte("#!/bin/sh\n"+body)))
 		return path
 	}
 	reporting := script(`printf '%s\n' "src/a.ts(3,7): error TS2322: Type 'A' is not assignable to type 'B'." "  Types of property 'id' are incompatible." "error TS5102: Option 'baseUrl' has been removed."
@@ -1019,6 +1050,7 @@ exit 2
 }
 
 func TestTscAnswerWithUnresolvedReferenceIsNotCached(t *testing.T) {
+	t.Parallel()
 	for _, code := range []string{"TS2307", "TS2792", "TS7016", "TS2688", "TS6053"} {
 		t.Run(code, func(t *testing.T) {
 			answer := tscAnswer{Errors: []tscDiagnostic{{Code: code}}}
@@ -1028,6 +1060,7 @@ func TestTscAnswerWithUnresolvedReferenceIsNotCached(t *testing.T) {
 }
 
 func TestTsc7UnresolvedReferenceIsNotCached(t *testing.T) {
+	t.Parallel()
 	answer := tscAnswer{TSC7: []tscDiagnostic{{Code: "TS2792"}}}
 	assert.True(t, hasUnresolvedReferenceDiagnostic(answer))
 }
@@ -1035,6 +1068,7 @@ func TestTsc7UnresolvedReferenceIsNotCached(t *testing.T) {
 // A file no tsconfig compiles is checked again once the file it imports
 // appears, as a file of a program is.
 func TestTscStatCacheStandaloneMissingModuleAppears(t *testing.T) {
+	t.Parallel()
 	root, local, _ := countedTscProject(t, map[string]string{
 		"tsconfig.json":  strictTSConfig,
 		"src/main.ts":    "export const n: number = 1\n",

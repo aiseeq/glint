@@ -17,6 +17,7 @@ import (
 // nothing, whether the import is relative or goes through a path alias and
 // whether the directory of the file was there before or not.
 func TestTscStatCacheMissingModuleAppears(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		config  string
@@ -79,6 +80,7 @@ func TestTscStatCacheMissingModuleAppears(t *testing.T) {
 // A run that already reports nothing keeps the cache: the fix does not
 // turn every project with a resolved import into a slow run.
 func TestTscStatCacheMissingModuleResolvedKeepsCache(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json":             strictTSConfig,
 		"src/main.ts":               "import type { Order } from \"../shared/types/generated\"\nexport const o: Order | null = null\n",

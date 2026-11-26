@@ -8,13 +8,12 @@ import (
 	"time"
 
 	"github.com/aiseeq/glint/pkg/core"
-	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestTscGlobalCompilerUsesOnlyGlobalTsc(t *testing.T) {
-	rulestest.IsolateUserCache(t, t.TempDir())
+	t.Parallel()
 	root := t.TempDir()
 	config := filepath.Join(root, "tsconfig.json")
 	require.NoError(t, os.WriteFile(config, []byte(`{"compilerOptions":{"strict":true},"files":["main.ts"]}`), 0o644))
@@ -29,7 +28,7 @@ func TestTscGlobalCompilerUsesOnlyGlobalTsc(t *testing.T) {
 }
 
 func TestTscGlobalCompilerErrorsAreHighFindings(t *testing.T) {
-	rulestest.IsolateUserCache(t, t.TempDir())
+	t.Parallel()
 	root := t.TempDir()
 	config := filepath.Join(root, "tsconfig.json")
 	source := filepath.Join(root, "main.ts")
@@ -39,7 +38,7 @@ func TestTscGlobalCompilerErrorsAreHighFindings(t *testing.T) {
 	globalLog := filepath.Join(root, "global-runs")
 	require.NoError(t, os.MkdirAll(filepath.Dir(global), 0o755))
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'Version 7.0.2\\n'; exit 0; fi\ncase \"$*\" in *--showConfig*) printf '%%s\\n' '{\"compilerOptions\":{\"strict\":true}}'; exit 0 ;; esac\nprintf 'run\\n' >> %q\nprevious=\nfor arg in \"$@\"; do if [ \"$previous\" = --tsBuildInfoFile ]; then printf '{}\\n' > \"$arg\"; fi; previous=\"$arg\"; done\nprintf '%%s\\n' %q\nexit 2\n", globalLog, source+"(1,29): error TS2322: Type 'string' is not assignable to type 'number'.")
-	require.NoError(t, os.WriteFile(global, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(global, []byte(script)))
 	contexts := tscContexts(t, root)
 	rule := NewTscRule()
 	rule.global = global
@@ -56,7 +55,7 @@ func TestTscGlobalCompilerErrorsAreHighFindings(t *testing.T) {
 }
 
 func TestTscGlobalCompilerDoesNotCallProjectTsc(t *testing.T) {
-	rulestest.IsolateUserCache(t, t.TempDir())
+	t.Parallel()
 	root := t.TempDir()
 	config := filepath.Join(root, "tsconfig.json")
 	source := filepath.Join(root, "main.ts")
@@ -69,9 +68,9 @@ func TestTscGlobalCompilerDoesNotCallProjectTsc(t *testing.T) {
 	require.NoError(t, os.WriteFile(config, []byte(`{"compilerOptions":{"strict":true},"files":["main.ts"]}`), 0o644))
 	require.NoError(t, os.WriteFile(source, []byte("export const value: number = 'bad'\n"), 0o644))
 	localScript := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nif [ \"$1\" = --version ]; then printf 'Version 5.9.3\\n'; exit 0; fi\nprintf '%%s\\n' '{\"compilerOptions\":{\"strict\":true}}'\n", localLog)
-	require.NoError(t, os.WriteFile(local, []byte(localScript), 0o755))
+	require.NoError(t, writeTestExecutable(local, []byte(localScript)))
 	globalScript := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nif [ \"$1\" = --version ]; then printf 'Version 7.0.2\\n'; exit 0; fi\ncase \"$*\" in *--showConfig*) printf '%%s\\n' '{\"compilerOptions\":{\"strict\":true}}'; exit 0 ;; esac\nprevious=\nfor arg in \"$@\"; do if [ \"$previous\" = --tsBuildInfoFile ]; then printf '{}\\n' > \"$arg\"; fi; previous=\"$arg\"; done\nprintf '%%s\\n' %q\nexit 2\n", globalLog, source+"(1,29): error TS2322: Type 'string' is not assignable to type 'number'.")
-	require.NoError(t, os.WriteFile(global, []byte(globalScript), 0o755))
+	require.NoError(t, writeTestExecutable(global, []byte(globalScript)))
 
 	rule := NewTscRule()
 	rule.global = global
@@ -98,7 +97,7 @@ func TestTscGlobalCompilerDoesNotCallProjectTsc(t *testing.T) {
 }
 
 func TestTscGlobalCompilerDefaultStillComparesBothCompilers(t *testing.T) {
-	rulestest.IsolateUserCache(t, t.TempDir())
+	t.Parallel()
 	root := t.TempDir()
 	config := filepath.Join(root, "tsconfig.json")
 	source := filepath.Join(root, "main.ts")
@@ -116,12 +115,14 @@ func TestTscGlobalCompilerDefaultStillComparesBothCompilers(t *testing.T) {
 }
 
 func TestTscGlobalCompilerRejectsUnknownSetting(t *testing.T) {
+	t.Parallel()
 	err := NewTscRule().Configure(map[string]any{"compiler": "nonsense"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "project\" or \"global")
 }
 
 func TestTscGlobalCompilerRejectsNonStringSetting(t *testing.T) {
+	t.Parallel()
 	for _, value := range []any{7, true, []string{"global"}} {
 		t.Run(fmt.Sprintf("%T", value), func(t *testing.T) {
 			err := NewTscRule().Configure(map[string]any{"compiler": value})
@@ -132,7 +133,7 @@ func TestTscGlobalCompilerRejectsNonStringSetting(t *testing.T) {
 }
 
 func TestTscGlobalCompilerCacheSeparatesModes(t *testing.T) {
-	rulestest.IsolateUserCache(t, t.TempDir())
+	t.Parallel()
 	root := t.TempDir()
 	config := filepath.Join(root, "tsconfig.json")
 	require.NoError(t, os.WriteFile(config, []byte(`{"compilerOptions":{"strict":true}}`), 0o644))

@@ -9,12 +9,14 @@ import (
 	"testing"
 
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patterntest"
+	"github.com/aiseeq/glint/pkg/rules/rulestest"
 	"github.com/aiseeq/glint/pkg/toolcache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestTscStaleJSXRuntimeAppears(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json":                   `{"compilerOptions":{"strict":true,"jsx":"react-jsx","module":"esnext","moduleResolution":"bundler","noEmit":true},"include":["src"]}`,
 		"src/main.tsx":                    "export const element = <div />\n",
@@ -35,6 +37,7 @@ func TestTscStaleJSXRuntimeAppears(t *testing.T) {
 }
 
 func TestTscNoCacheIgnoresBuildInfo(t *testing.T) {
+	rulestest.IsolateUserCache(t, t.TempDir())
 	root, _, _ := countedTscProject(t, map[string]string{
 		"tsconfig.json":                   `{"compilerOptions":{"strict":true,"jsx":"react-jsx","module":"esnext","moduleResolution":"bundler","noEmit":true},"include":["src"]}`,
 		"src/main.tsx":                    "export const element = <div />\n",
@@ -49,6 +52,7 @@ func TestTscNoCacheIgnoresBuildInfo(t *testing.T) {
 }
 
 func TestTscReusesBuildInfoForSourceEdits(t *testing.T) {
+	t.Parallel()
 	real := globalTsc7(t)
 	log := filepath.Join(t.TempDir(), "buildinfo-used")
 	wrapper := filepath.Join(t.TempDir(), "tsc")
@@ -60,7 +64,7 @@ for arg in "$@"; do
 done
 exec %q "$@"
 `, log, real)
-	require.NoError(t, os.WriteFile(wrapper, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(wrapper, []byte(script)))
 	root := tscProject(t, wrapper, map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "export const n: number = 1\n",
@@ -75,6 +79,7 @@ exec %q "$@"
 }
 
 func TestTscDependencyResolutionChanges(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		initial map[string]string
@@ -103,6 +108,7 @@ func TestTscDependencyResolutionChanges(t *testing.T) {
 }
 
 func TestTscJSXRuntimeResolutionChanges(t *testing.T) {
+	t.Parallel()
 	const runtime = "export namespace JSX { interface IntrinsicElements { div: {} } }\n"
 	for _, tc := range []struct {
 		name     string
@@ -135,6 +141,7 @@ func TestTscJSXRuntimeResolutionChanges(t *testing.T) {
 }
 
 func TestTscUnresolvedReferenceInvalidatesOldFingerprint(t *testing.T) {
+	t.Parallel()
 	root, local, _ := countedTscProject(t, map[string]string{
 		"tsconfig.json":                   `{"compilerOptions":{"strict":true,"jsx":"react-jsx","module":"esnext","moduleResolution":"bundler","noEmit":true},"include":["src"]}`,
 		"src/main.tsx":                    "export const element = 1\n",

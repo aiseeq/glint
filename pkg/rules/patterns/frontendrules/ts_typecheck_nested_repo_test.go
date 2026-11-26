@@ -36,6 +36,7 @@ func checkedTSConfigPaths(t *testing.T, root string, files map[string]string) []
 // library) has a name without a dot; its package.json type-checks its own
 // code, not the project's, and the run does not walk it.
 func TestCheckedTSConfigsLeaveOutNestedRepository(t *testing.T) {
+	t.Parallel()
 	got := checkedTSConfigPaths(t, t.TempDir(), map[string]string{
 		".git/HEAD":                       "ref: refs/heads/main\n",
 		"web/package.json":                typecheckPackage,
@@ -52,6 +53,7 @@ func TestCheckedTSConfigsLeaveOutNestedRepository(t *testing.T) {
 // A package.json in a directory git ignores is the project's only when the
 // run walks that directory: with settings.respect_gitignore off.
 func TestCheckedTSConfigsReadIgnoredDirectoryOnlyWithoutRespectGitignore(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	files := map[string]string{
 		".git/HEAD":               "ref: refs/heads/main\n",
@@ -83,6 +85,7 @@ var ignoredCheckProject = map[string]string{
 // settings.respect_gitignore, and a file of the ignored directory is
 // type-checked by its package.json only when the run walks that directory.
 func TestTSFileTypeCheckedFollowsRespectGitignore(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	checkedTSConfigPaths(t, root, ignoredCheckProject)
 	file := filepath.Join(root, "gen/a.ts")
@@ -95,6 +98,7 @@ func TestTSFileTypeCheckedFollowsRespectGitignore(t *testing.T) {
 }
 
 func TestTSFileTypeCheckedRespectsSkipDirs(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	files := map[string]string{
 		".git/HEAD":               "ref: refs/heads/main\n",
@@ -112,6 +116,7 @@ func TestTSFileTypeCheckedRespectsSkipDirs(t *testing.T) {
 // ignored directory by the tsconfig its package.json names; respecting
 // .gitignore, by the nearest tsconfig.json above it, as an editor does.
 func TestTscPlanFollowsRespectGitignore(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	checkedTSConfigPaths(t, root, ignoredCheckProject)
 	file := filepath.Join(root, "gen/a.ts")
@@ -131,6 +136,7 @@ func TestTscPlanFollowsRespectGitignore(t *testing.T) {
 
 // Run in a linked worktree of the project, its own package.json counts.
 func TestCheckedTSConfigsReadWorktreeRoot(t *testing.T) {
+	t.Parallel()
 	got := checkedTSConfigPaths(t, t.TempDir(), map[string]string{
 		".git":              "gitdir: /elsewhere/.git/worktrees/wt\n",
 		"web/package.json":  typecheckPackage,
