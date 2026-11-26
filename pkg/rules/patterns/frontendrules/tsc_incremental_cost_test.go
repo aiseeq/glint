@@ -29,7 +29,7 @@ for arg in "$@"; do
 done
 exec %q "$@"
 `, log, real)
-	require.NoError(t, os.WriteFile(wrapper, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(wrapper, []byte(script)))
 	return wrapper, log
 }
 
@@ -41,6 +41,7 @@ func requireBuildInfoReused(t *testing.T, log string) {
 }
 
 func TestTscAtomicSourceEditReusesBuildInfo(t *testing.T) {
+	t.Parallel()
 	wrapper, log := buildInfoCountingTsc(t, globalTsc7(t))
 	root := tscProject(t, wrapper, map[string]string{"tsconfig.json": strictTSConfig, "src/main.ts": "export const n: number = 1\n"})
 	ageTscInputs(t, root, wrapper)
@@ -54,6 +55,7 @@ func TestTscAtomicSourceEditReusesBuildInfo(t *testing.T) {
 }
 
 func TestTscJSONEditReusesBuildInfo(t *testing.T) {
+	t.Parallel()
 	wrapper, log := buildInfoCountingTsc(t, globalTsc7(t))
 	root := tscProject(t, wrapper, map[string]string{
 		"tsconfig.json":   `{"compilerOptions":{"strict":true,"module":"esnext","moduleResolution":"bundler","resolveJsonModule":true,"noEmit":true},"include":["src"]}`,
@@ -70,6 +72,7 @@ func TestTscJSONEditReusesBuildInfo(t *testing.T) {
 }
 
 func TestTscDependencyFileChangeStartsFresh(t *testing.T) {
+	t.Parallel()
 	wrapper, log := buildInfoCountingTsc(t, globalTsc7(t))
 	root := tscProject(t, wrapper, map[string]string{
 		"tsconfig.json":                 strictTSConfig,
@@ -86,6 +89,7 @@ func TestTscDependencyFileChangeStartsFresh(t *testing.T) {
 }
 
 func TestTscAddedGlobalDeclarationMatchesFull(t *testing.T) {
+	t.Parallel()
 	root, local, _ := countedTscProject(t, map[string]string{"tsconfig.json": strictTSConfig, "src/main.ts": "export const n: number = probeGlobal;\n"})
 	ageTscInputs(t, root, local)
 	initial := incrementalTscAnswer(t, root)
@@ -98,6 +102,7 @@ func TestTscAddedGlobalDeclarationMatchesFull(t *testing.T) {
 }
 
 func TestTscUnresolvedReferenceReusesBuildInfo(t *testing.T) {
+	t.Parallel()
 	wrapper, log := buildInfoCountingTsc(t, globalTsc7(t))
 	root := tscProject(t, wrapper, map[string]string{"tsconfig.json": strictTSConfig, "src/main.ts": "import {value} from 'pkg'; export const n: number = value\n"})
 	ageTscInputs(t, root, wrapper)
@@ -127,11 +132,12 @@ func TestTscUnresolvedReferenceReusesBuildInfo(t *testing.T) {
 }
 
 func TestTscReusesProjectCompilerVersion(t *testing.T) {
+	t.Parallel()
 	real := globalTsc7(t)
 	log := filepath.Join(t.TempDir(), "versions")
 	wrapper := filepath.Join(t.TempDir(), "tsc")
 	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'version\\n' >> %q; fi\nexec %q \"$@\"\n", log, real)
-	require.NoError(t, os.WriteFile(wrapper, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(wrapper, []byte(script)))
 	root := tscProject(t, wrapper, map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "import {value} from 'pkg'; export const n = value\n",
@@ -154,6 +160,7 @@ func TestTscReusesProjectCompilerVersion(t *testing.T) {
 }
 
 func TestTscSourceEditReusesShownConfig(t *testing.T) {
+	t.Parallel()
 	root, local, log := countedTscProject(t, map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "import {value} from 'pkg'; export const n = value\n",
@@ -177,9 +184,9 @@ func TestTscSourceEditReusesShownConfig(t *testing.T) {
 }
 
 func TestTscCompilerVersionsInvalidatedByExecutableChange(t *testing.T) {
-	rulestest.IsolateUserCache(t, t.TempDir())
+	t.Parallel()
 	compiler := filepath.Join(t.TempDir(), "tsc")
-	require.NoError(t, os.WriteFile(compiler, []byte("compiler"), 0o755))
+	require.NoError(t, writeTestExecutable(compiler, []byte("compiler")))
 	old := time.Now().Add(-time.Minute)
 	require.NoError(t, os.Chtimes(compiler, old, old))
 	stamp, err := statPath(compiler)
@@ -205,6 +212,7 @@ func TestTscCompilerVersionsInvalidatedByExecutableChange(t *testing.T) {
 }
 
 func TestTscNoCacheDoesNotOverwriteFingerprint(t *testing.T) {
+	rulestest.IsolateUserCache(t, t.TempDir())
 	root, local, _ := countedTscProject(t, map[string]string{"tsconfig.json": strictTSConfig, "src/main.ts": "import {value} from 'pkg'; export const n = value\n"})
 	ageTscInputs(t, root, local)
 	require.Contains(t, strings.Join(runCountedTsc(t, root), "\n"), "TS2307")
@@ -242,6 +250,7 @@ func TestTscNoCacheDoesNotOverwriteFingerprint(t *testing.T) {
 }
 
 func TestTscStandaloneNoCacheDoesNotStore(t *testing.T) {
+	rulestest.IsolateUserCache(t, t.TempDir())
 	globalTsc7(t)
 	root := tscProject(t, "", map[string]string{
 		"run.ts":                   "export const n: number = 1\n",
@@ -265,7 +274,9 @@ func TestTscStandaloneNoCacheDoesNotStore(t *testing.T) {
 	assert.Empty(t, entries, "--no-cache must not store standalone answers or fingerprints")
 }
 
+// Sequential with a cache of its own: it counts the stat fingerprints in the cache directory.
 func TestTscUnstableUnresolvedRunInvalidatesOldFingerprint(t *testing.T) {
+	rulestest.IsolateUserCache(t, t.TempDir())
 	real := globalTsc7(t)
 	root := tscProject(t, "", map[string]string{
 		"tsconfig.json": strictTSConfig,
@@ -286,7 +297,7 @@ case "$*" in
 esac
 exit "$status"
 `, real, marker, target, marker)
-	require.NoError(t, os.WriteFile(wrapper, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(wrapper, []byte(script)))
 	installProjectTsc(t, root, wrapper)
 	ageTscInputs(t, root, wrapper)
 	require.Empty(t, incrementalTscAnswer(t, root))
@@ -314,6 +325,7 @@ exit "$status"
 }
 
 func TestTsc5ReusesBuildInfoAfterPackageChange(t *testing.T) {
+	t.Parallel()
 	path := os.Getenv("GLINT_TEST_TSC5")
 	if path == "" {
 		t.Skip("set GLINT_TEST_TSC5 to a local TypeScript 5 compiler")
@@ -334,6 +346,7 @@ func TestTsc5ReusesBuildInfoAfterPackageChange(t *testing.T) {
 }
 
 func TestTscOlderVersionKeepsBuildInfoAfterConfigChange(t *testing.T) {
+	t.Parallel()
 	real := globalTsc7(t)
 	log := filepath.Join(t.TempDir(), "reused")
 	wrapper := filepath.Join(t.TempDir(), "tsc")
@@ -346,7 +359,7 @@ for arg in "$@"; do
 done
 exec %q "$@"
 `, log, real)
-	require.NoError(t, os.WriteFile(wrapper, []byte(script), 0o755))
+	require.NoError(t, writeTestExecutable(wrapper, []byte(script)))
 	root := tscProject(t, wrapper, map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "const xs: number[] = [1]; export const n: number = xs[0]\n",
@@ -362,6 +375,7 @@ exec %q "$@"
 }
 
 func TestTscRecentInputsMustStayStableDuringRun(t *testing.T) {
+	t.Parallel()
 	root := tscProject(t, "", map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "export const n = 1\n",
@@ -383,6 +397,7 @@ func TestTscRecentInputsMustStayStableDuringRun(t *testing.T) {
 }
 
 func TestTscNewPackageMetadataInvalidatesFingerprint(t *testing.T) {
+	t.Parallel()
 	root := tscProject(t, "", map[string]string{
 		"tsconfig.json": strictTSConfig,
 		"src/main.ts":   "export const n = 1\n",
@@ -402,6 +417,7 @@ func TestTscNewPackageMetadataInvalidatesFingerprint(t *testing.T) {
 }
 
 func TestTscFingerprintWatchesIncludedDirectoriesWithoutListedFiles(t *testing.T) {
+	t.Parallel()
 	root := tscProject(t, "", map[string]string{
 		"tsconfig.json":       strictTSConfig,
 		"src/main.ts":         "export const n = 1\n",
@@ -418,6 +434,7 @@ func TestTscFingerprintWatchesIncludedDirectoriesWithoutListedFiles(t *testing.T
 }
 
 func TestTscFingerprintSkipsHiddenDirectoriesUnlessIncludedLiterally(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		include string
@@ -457,6 +474,7 @@ func TestTscFingerprintSkipsHiddenDirectoriesUnlessIncludedLiterally(t *testing.
 }
 
 func TestTscFingerprintDoesNotExtendLiteralHiddenIncludeToPrefixSibling(t *testing.T) {
+	t.Parallel()
 	root := tscProject(t, "", map[string]string{
 		"tsconfig.json":          `{"compilerOptions":{"strict":true,"noEmit":true},"include":[".next/types/**/*.ts"]}`,
 		".next/typesX/README.md": "not included\n",
@@ -476,6 +494,7 @@ func TestTscFingerprintDoesNotExtendLiteralHiddenIncludeToPrefixSibling(t *testi
 }
 
 func TestTscFingerprintSkipsDefaultOutDir(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		files map[string]string
@@ -514,6 +533,7 @@ func TestTscFingerprintSkipsDefaultOutDir(t *testing.T) {
 }
 
 func TestTscConfigResolutionChangesMatchFull(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		before string
