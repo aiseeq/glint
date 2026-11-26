@@ -185,6 +185,14 @@ func (ctx *FileContext) IsComposeFile() bool {
 	return IsComposeFileName(filepath.Base(ctx.Path))
 }
 
+// IsGraftConfig reports the graft task configuration file.
+func (ctx *FileContext) IsGraftConfig() bool {
+	return IsGraftConfigName(filepath.Base(ctx.Path))
+}
+
+// IsGraftConfigName reports the graft task configuration file name.
+func IsGraftConfigName(name string) bool { return name == ".graft.yaml" }
+
 // IsTSConfig reports a TypeScript project file: tsconfig.json or a variant
 // such as tsconfig.test.json.
 func (ctx *FileContext) IsTSConfig() bool {

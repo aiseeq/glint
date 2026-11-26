@@ -7,6 +7,7 @@ import (
 
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules/helpers"
+	"gopkg.in/yaml.v3"
 )
 
 // ShellLine is one logical command line of a shell script or a make recipe:
@@ -25,6 +26,9 @@ func (l ShellLine) LineAt(offset int) int {
 	i := max(sort.Search(len(l.starts), func(i int) bool { return l.starts[i] > offset })-1, 0)
 	return l.Nums[i]
 }
+
+// BlockID identifies a shell block such as a graft step.
+func (l ShellLine) BlockID() int { return l.block }
 
 // lineBuilder joins physical lines into a logical one.
 type lineBuilder struct {
@@ -59,6 +63,7 @@ func (b *lineBuilder) line(block int) ShellLine {
 type ShellSource struct {
 	Ctx   *core.FileContext
 	Make  bool
+	Graft bool
 	Lines []ShellLine
 	// MakeShell is the SHELL a make file sets outside its recipes, "" when
 	// it sets none; makeFlags its .SHELLFLAGS.
@@ -79,6 +84,81 @@ func ReadShell(ctx *core.FileContext) (*ShellSource, bool) {
 	return nil, false
 }
 
+// ReadGraftShell reads each sh: scalar in a .graft.yaml file as an independent
+// shell script. Literal and quoted YAML scalars retain their source line.
+func ReadGraftShell(ctx *core.FileContext) (*ShellSource, bool) {
+	if !ctx.IsGraftConfig() {
+		return nil, false
+	}
+	var doc yaml.Node
+	if yaml.Unmarshal(ctx.Content, &doc) != nil {
+		return nil, false
+	}
+	src := &ShellSource{Ctx: ctx, Graft: true}
+	if len(doc.Content) == 0 {
+		return src, true
+	}
+	root := doc.Content[0]
+	tasks := mappingValue(root, "tasks")
+	block := 0
+	if tasks != nil && tasks.Kind == yaml.MappingNode {
+		for i := 1; i < len(tasks.Content); i += 2 {
+			run := mappingValue(tasks.Content[i], "run")
+			if run == nil || run.Kind != yaml.SequenceNode {
+				continue
+			}
+			for _, step := range run.Content {
+				if !isGraftShellStep(step) {
+					continue
+				}
+				src.Lines = append(src.Lines, graftScalarLines(step.Content[1], block)...)
+				block++
+			}
+		}
+	}
+	if gate := mappingValue(root, "gate"); gate != nil && gate.Kind == yaml.SequenceNode {
+		for _, step := range gate.Content {
+			if isGraftShellStep(step) {
+				src.Lines = append(src.Lines, graftScalarLines(step.Content[1], block)...)
+				block++
+			}
+		}
+	}
+	return src, true
+}
+
+func isGraftShellStep(step *yaml.Node) bool {
+	return step != nil && step.Kind == yaml.MappingNode && len(step.Content) == 2 &&
+		step.Content[0].Value == "sh" && step.Content[1].Kind == yaml.ScalarNode
+}
+
+func graftScalarLines(v *yaml.Node, block int) []ShellLine {
+	lines := scriptLines(strings.Split(v.Value, "\n"))
+	for i := range lines {
+		for j := range lines[i].Nums {
+			if v.Style == yaml.LiteralStyle {
+				lines[i].Nums[j] += v.Line
+			} else {
+				lines[i].Nums[j] = v.Line
+			}
+		}
+		lines[i].block = block
+	}
+	return lines
+}
+
+func mappingValue(n *yaml.Node, key string) *yaml.Node {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == key {
+			return n.Content[i+1]
+		}
+	}
+	return nil
+}
+
 // Units returns what one shell runs: the whole script, or each logical line
 // of a recipe (make starts a shell per line). A script's lines are joined
 // with newlines, which segments treats as a list operator.
@@ -97,6 +177,28 @@ func (src *ShellSource) Units() []ShellLine {
 		whole.addLine(l)
 	}
 	return []ShellLine{whole.line(0)}
+}
+
+// BlockUnits groups source lines that graft executes in one shell step or
+// make executes in one .ONESHELL recipe block.
+func (src *ShellSource) BlockUnits() []ShellLine {
+	var out []ShellLine
+	for i := 0; i < len(src.Lines); {
+		j := i + 1
+		for j < len(src.Lines) && src.Lines[j].block == src.Lines[i].block {
+			j++
+		}
+		var b lineBuilder
+		for k := i; k < j; k++ {
+			if k > i {
+				b.text.WriteString("\n")
+			}
+			b.addLine(src.Lines[k])
+		}
+		out = append(out, b.line(src.Lines[i].block))
+		i = j
+	}
+	return out
 }
 
 var makeShellAssign = regexp.MustCompile(`^\s*(?:export\s+)?(SHELL|\.SHELLFLAGS)\s*[:?+!]?=\s*(.*)$`)
