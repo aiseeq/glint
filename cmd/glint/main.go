@@ -1418,6 +1418,9 @@ func scopedAnalysisWalker(projectRoot string, root analysisRoot, cfg *core.Confi
 	extraFiles, hasAdditional := additionalFilePredicate(enabledRules)
 	if ticketsConfigured {
 		walker.WithTicketFilePredicate(func(path string) bool {
+			if core.IsGraftConfigName(filepath.Base(path)) {
+				return false
+			}
 			ext := strings.ToLower(filepath.Ext(path))
 			return ext == ".yaml" || ext == ".yml"
 		})

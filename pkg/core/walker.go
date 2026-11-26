@@ -585,6 +585,9 @@ func (w *Walker) isAnalyzableFile(path string) bool {
 	if IsComposeFileName(filepath.Base(path)) {
 		return true // deploy rules (rules must guard with IsComposeFile)
 	}
+	if IsGraftConfigName(filepath.Base(path)) {
+		return true // shell-status-of-pipe-tail reads graft sh: steps
+	}
 	if isEnvTemplateName(filepath.Base(path)) {
 		return true // deploy env rules (rules must guard with IsEnvTemplate)
 	}
