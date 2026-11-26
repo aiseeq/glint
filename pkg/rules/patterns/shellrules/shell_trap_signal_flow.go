@@ -27,7 +27,8 @@ type stmtPlace struct {
 // command being followed, the call at the top level that runs it as the
 // latest known, and span the definitions run for which what has been
 // followed so far holds; runs keeps the time for the body of each
-// function.
+// function, traps what each command read is as a trap, and reader reads
+// the words of trap.
 type trapFlow struct {
 	order    []*syntax.Stmt
 	where    map[*syntax.Stmt]stmtPlace
@@ -41,6 +42,32 @@ type trapFlow struct {
 	time     uint
 	span     epochSpan
 	runs     map[string]uint
+	traps    map[*syntax.CallExpr]trapRead
+	reader   trapReader
+}
+
+// trapRead is what a command is as a trap: trap marks a trap command, sets one
+// that sets INT or TERM or takes a handler off them, as set.
+type trapRead struct {
+	set        signalTrap
+	trap, sets bool
+}
+
+// readTrap reads each command once and keeps what it is, not its words.
+func (f *trapFlow) readTrap(call *syntax.CallExpr) trapRead {
+	read, ok := f.traps[call]
+	if !ok {
+		var words trapWords
+		words, read.trap = f.reader.readTrap(call, trapSignalWords...)
+		read.set, read.sets = signalTrapWords(words)
+		f.traps[call] = read
+	}
+	return read
+}
+
+func (f *trapFlow) signalTrap(call *syntax.CallExpr) (signalTrap, bool) {
+	read := f.readTrap(call)
+	return read.set, read.sets
 }
 
 // trapEntry is the effect of a call with the signals that keep the
@@ -76,6 +103,8 @@ func (s *scriptFuncs) flow(file *syntax.File) *trapFlow {
 		memo:     make(map[string][]trapEntry),
 		visiting: make(map[string]bool),
 		span:     anyEpoch,
+		traps:    make(map[*syntax.CallExpr]trapRead),
+		reader:   newTrapReader(file),
 	}
 	owner := make(map[syntax.Command]*syntax.Stmt)
 	bodyOf := make(map[*syntax.Stmt]string)
@@ -269,7 +298,7 @@ func callName(call *syntax.CallExpr) string {
 // remains active afterwards or that ends with exit, return or exec of a
 // command.
 func (f *trapFlow) trapFollowedByWork(stmts []*syntax.Stmt, signals uint8) bool {
-	if waitThenCleanup(stmts) {
+	if f.waitThenCleanup(stmts) {
 		return false
 	}
 	defer func() { f.time = 0 }()
@@ -387,15 +416,15 @@ func (f *trapFlow) afterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
 			return f.binaryAfterTrap(x, signals)
 		}
 	}
-	return otherAfterTrap(stmt, signals)
+	return f.otherAfterTrap(stmt, signals)
 }
 
 // otherAfterTrap is the effect of a command the walk does not look into:
 // a loop in it runs with the handler on, other work counts.
-func otherAfterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
+func (f *trapFlow) otherAfterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
 	effect := trapEffect{found: runsLoop(stmt)}
 	if !effect.found {
-		effect.work, effect.left = doesWork(stmt), signals
+		effect.work, effect.left = f.doesWork(stmt), signals
 	}
 	return effect
 }
@@ -404,8 +433,8 @@ func otherAfterTrap(stmt *syntax.Stmt, signals uint8) trapEffect {
 // of a command end the path, and a call of a function of the script is
 // followed.
 func (f *trapFlow) callEffect(stmt *syntax.Stmt, call *syntax.CallExpr, signals uint8) (trapEffect, bool) {
-	if later, ok := signalTrapCall(call); ok {
-		return trapEffect{left: signals &^ later.signals}, true
+	if later, ok := f.signalTrap(call); ok {
+		return trapEffect{left: signals &^ later.replaces}, true
 	}
 	if exitsShell(call) {
 		return trapEffect{exits: true}, true
@@ -557,7 +586,7 @@ func (f *trapFlow) caseAfterTrap(x *syntax.CaseClause, signals uint8) trapEffect
 	if runsLoop(x.Word) {
 		return trapEffect{found: true}
 	}
-	word := trapEffect{work: doesWork(x.Word), left: signals}
+	word := trapEffect{work: f.doesWork(x.Word), left: signals}
 	out, hasDefault := trapEffect{}, false
 	for _, item := range x.Items {
 		out = out.orPath(word.seq(f.listAfterTrap(item.Stmts, signals)))
@@ -583,14 +612,17 @@ func runsLoop(node syntax.Node) bool {
 
 // doesWork finds a command other than a builtin that only waits, reports
 // or tests, including one in a command substitution.
-func doesWork(node syntax.Node) bool {
+func (f *trapFlow) doesWork(node syntax.Node) bool {
 	return foregroundWalk(node, func(n syntax.Node) bool {
 		call, ok := n.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return false
 		}
+		if f.readTrap(call).trap {
+			return false
+		}
 		switch wordLit(call.Args[0]) {
-		case "wait", "trap", "exit", "return", "exec", "echo", "printf", ":", "true", "false", "[", "test":
+		case "wait", "exit", "return", "exec", "echo", "printf", ":", "true", "false", "[", "test":
 			return false
 		}
 		return true

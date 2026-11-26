@@ -517,7 +517,10 @@ func checkBackgroundWithoutTrap(r *shellRule, src *patternkit.ShellSource) []*co
 const backgroundJobTrapSuggestion = "Save its pid and kill it from an EXIT trap, and make INT and TERM exit: " +
 	"pid=$!; trap 'kill \"$pid\" 2>/dev/null || true' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM"
 
-var trapExit = regexp.MustCompile(`^trap\s+.*\b(?:EXIT|0)\b`)
+var (
+	trapExit    = regexp.MustCompile(`^trap\s+.*\b(?:EXIT|0)\b`)
+	trapOptions = regexp.MustCompile(`^trap\s+-\w`)
+)
 
 const (
 	trapInLoopMessage    = "trap ... EXIT inside a loop replaces the trap of the previous iteration — only the last cleanup runs"
@@ -542,13 +545,14 @@ func checkTrapInLoop(r *shellRule, src *patternkit.ShellSource) []*core.Violatio
 	}
 	var out []*core.Violation
 	var stack []syntax.Node
+	reader := newTrapReader(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if node == nil {
 			stack = stack[:len(stack)-1]
 			return true
 		}
 		// The command from its name: an assignment before it is no part of it.
-		if call, ok := node.(*syntax.CallExpr); ok && trapSetsExit(call) && loopShell(stack) {
+		if call, ok := node.(*syntax.CallExpr); ok && trapSetsExit(reader, call) && loopShell(stack) {
 			out = appendReport(out, src.Report(r, int(call.Pos().Line()), trapInLoopMessage, trapInLoopSuggestion))
 		}
 		stack = append(stack, node)
@@ -558,42 +562,11 @@ func checkTrapInLoop(r *shellRule, src *patternkit.ShellSource) []*core.Violatio
 }
 
 // trapSetsExit reports whether the command is trap with EXIT among its
-// signals. The signals are words, so a trap continued over a line break or
-// with an action of several lines counts, and an EXIT or a 0 inside the action
-// does not. A word counts by its value, quoted or not ("EXIT", E"XIT"). As in
-// bash: trap may be called as builtin trap or command trap; a single operand,
-// or a first operand that is a number, starts the signals to reset, otherwise
-// the first operand is the action; a name is taken in any case and a number by
-// its value (00 is EXIT), SIGEXIT is no signal, and trap -p, -P and -l set
-// nothing. A word bash expands at run time ("$sig") is not known.
-func trapSetsExit(call *syntax.CallExpr) bool {
-	args := call.Args
-	for len(args) > 0 {
-		name, _ := wordValue(args[0])
-		if name != "builtin" && name != "command" {
-			break
-		}
-		args = args[1:]
-	}
-	if len(args) < 2 {
-		return false
-	}
-	if name, _ := wordValue(args[0]); name != "trap" {
-		return false
-	}
-	operands := args[1:]
-	switch first, _ := wordValue(operands[0]); first {
-	case "-p", "-P", "-l":
-		return false
-	case "--":
-		operands = operands[1:]
-	}
-	if len(operands) > 1 {
-		if _, number := signalNumber(wordLit(operands[0])); !number {
-			operands = operands[1:]
-		}
-	}
-	for _, w := range operands {
+// signals, by its name in any case or by its number (00 is EXIT); SIGEXIT is no
+// signal. The words of the command are read by readTrap.
+func trapSetsExit(reader trapReader, call *syntax.CallExpr) bool {
+	words, _ := reader.readTrap(call, "exit", "0")
+	for _, w := range words.signals {
 		v := wordLit(w)
 		if strings.ToUpper(v) == "EXIT" {
 			return true
@@ -603,12 +576,6 @@ func trapSetsExit(call *syntax.CallExpr) bool {
 		}
 	}
 	return false
-}
-
-// signalNumber reads a signal given by its number, as trap 0 or trap 00.
-func signalNumber(s string) (uint64, bool) {
-	n, err := strconv.ParseUint(s, 10, 0)
-	return n, err == nil
 }
 
 // wordLit is the value of a word bash leaves as it is, or "" for one it
@@ -695,7 +662,7 @@ func trapInLoopSteps(r *shellRule, src *patternkit.ShellSource) []*core.Violatio
 			depth++
 		case loopEnd.MatchString(text):
 			depth--
-		case depth > 0 && trapExit.MatchString(text):
+		case depth > 0 && trapExit.MatchString(text) && !trapOptions.MatchString(text):
 			out = appendReport(out, src.Report(r, s.Line, trapInLoopMessage, trapInLoopSuggestion))
 		}
 	}

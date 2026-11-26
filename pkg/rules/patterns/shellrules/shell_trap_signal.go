@@ -15,45 +15,45 @@ func init() {
 	rules.Register(newShellRule("shell-trap-signal-without-exit", "Detects an INT or TERM trap that does not exit while the script continues to work, swallowing the signal", core.SeverityMedium, checkTrapSignalWithoutExit))
 }
 
+// signalTrap is a trap command: the action it sets for the signals INT and TERM
+// among its words, "-" for a reset, and the signals it may take another handler
+// off.
 type signalTrap struct {
-	action  string
-	signals uint8
-	line    int
+	action   string
+	signals  uint8
+	replaces uint8
 }
 
-// signalTrapCall reads only statically known trap actions and signals.
-func signalTrapCall(call *syntax.CallExpr) (signalTrap, bool) {
-	args := call.Args
-	for len(args) > 0 && (wordLit(args[0]) == "builtin" || wordLit(args[0]) == "command") {
-		args = args[1:]
+const allTrapSignals = 3
+
+// trapSignalWords are what may name INT or TERM: the names, with SIG or not, and
+// the numbers, with leading zeros or not.
+var trapSignalWords = []string{"int", "term", "2", "15"}
+
+// signalTrapWords reads only statically known trap actions and signals. A word
+// past the bounds of brace expansion may be any signals: the trap may replace a
+// handler of either, and sets one only for those known.
+func signalTrapWords(words trapWords) (signalTrap, bool) {
+	trap := signalTrap{action: "-"}
+	for _, w := range words.signals {
+		trap.signals |= trapSignalMask(wordLit(w))
 	}
-	if len(args) < 3 || wordLit(args[0]) != "trap" {
-		return signalTrap{}, false
+	trap.replaces = trap.signals
+	if words.unbound {
+		trap.replaces = allTrapSignals
 	}
-	args = args[1:]
-	if opt := wordLit(args[0]); opt == "-p" || opt == "-P" || opt == "-l" {
-		return signalTrap{}, false
-	}
-	if wordLit(args[0]) == "--" {
-		args = args[1:]
-	}
-	if len(args) < 2 {
-		return signalTrap{}, false
-	}
-	action, known := wordValue(args[0])
-	if !known {
-		return signalTrap{}, false
-	}
-	var signals uint8
-	for _, w := range args[1:] {
-		switch strings.ToUpper(wordLit(w)) {
-		case "INT", "SIGINT", "2":
-			signals |= 1
-		case "TERM", "SIGTERM", "15":
-			signals |= 2
+	if words.action != nil {
+		action, known := wordValue(words.action)
+		switch {
+		case known:
+			trap.action = action
+		case unboundWord(words.action):
+			trap.signals = 0
+		default:
+			return signalTrap{}, false
 		}
 	}
-	return signalTrap{action: action, signals: signals, line: int(call.Pos().Line())}, signals != 0
+	return trap, trap.replaces != 0
 }
 
 func checkTrapSignalWithoutExit(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
@@ -79,8 +79,8 @@ func checkTrapSignalWithoutExit(r *shellRule, src *patternkit.ShellSource) []*co
 		if !ok || stmt.Background {
 			continue
 		}
-		trap, ok := signalTrapCall(call)
-		if !ok || trap.action == "" || trap.action == "-" {
+		trap, ok := flow.signalTrap(call)
+		if !ok || trap.signals == 0 || trap.action == "" || trap.action == "-" {
 			continue
 		}
 		action, err := syntax.NewParser().Parse(strings.NewReader(trap.action), "")
@@ -95,7 +95,7 @@ func checkTrapSignalWithoutExit(r *shellRule, src *patternkit.ShellSource) []*co
 		if flow.funcs.sourced && unknownTrapHandler(action.Stmts, funcs) {
 			continue
 		}
-		handled, flags, handlerBodies := trapHandlerEffects(action, funcs)
+		handled, flags, handlerBodies := flow.trapHandlerEffects(action)
 		handlerBodies[stmt] = true
 		if trap.signals&^handled == 0 {
 			continue
@@ -112,16 +112,17 @@ func checkTrapSignalWithoutExit(r *shellRule, src *patternkit.ShellSource) []*co
 			continue
 		}
 		signals := trapSignalNames(trap.signals &^ handled)
-		out = appendReport(out, src.Report(r, trap.line, fmt.Sprintf("%s trap does not exit, so the script can continue after the signal", signals), trapSignalSuggestion))
+		out = appendReport(out, src.Report(r, int(call.Pos().Line()), fmt.Sprintf("%s trap does not exit, so the script can continue after the signal", signals), trapSignalSuggestion))
 	}
 	return out
 }
 
 // trapHandlerEffects finds flags and reset-then-reraise actions, following
 // locally defined functions with their statically known positional arguments.
-func trapHandlerEffects(action syntax.Node, funcs map[string]*syntax.Stmt) (uint8, map[string]bool, map[*syntax.Stmt]bool) {
+func (f *trapFlow) trapHandlerEffects(action syntax.Node) (uint8, map[string]bool, map[*syntax.Stmt]bool) {
 	scan := &handlerScan{
-		funcs:    funcs,
+		flow:     f,
+		funcs:    f.funcs.last,
 		flags:    make(map[string]bool),
 		bodies:   make(map[*syntax.Stmt]bool),
 		visiting: make(map[string]bool),
@@ -132,6 +133,7 @@ func trapHandlerEffects(action syntax.Node, funcs map[string]*syntax.Stmt) (uint
 
 // handlerScan holds what the walk of a trap handler has found so far.
 type handlerScan struct {
+	flow          *trapFlow
 	funcs         map[string]*syntax.Stmt
 	flags         map[string]bool
 	bodies        map[*syntax.Stmt]bool
@@ -184,17 +186,7 @@ func (s *handlerScan) call(x *syntax.CallExpr, params []string, locals map[strin
 		return
 	}
 	name := wordLit(args[0])
-	if name == "trap" && len(args) >= 3 {
-		operands := args[1:]
-		if wordLit(operands[0]) == "--" {
-			operands = operands[1:]
-		}
-		if len(operands) >= 2 && wordLit(operands[0]) == "-" {
-			for _, signal := range operands[1:] {
-				s.reset |= trapSignalMask(resolveHandlerWord(signal, params))
-			}
-		}
-	}
+	s.trap(x, params)
 	if name == "kill" {
 		if signal, target := handlerKill(args[1:], params); target {
 			s.raised |= s.reset & signal
@@ -209,6 +201,21 @@ func (s *handlerScan) call(x *syntax.CallExpr, params []string, locals map[strin
 		s.visiting[name] = true
 		s.visit(body, nested, handlerLocals(body, locals))
 		delete(s.visiting, name)
+	}
+}
+
+// trap records a reset of signals; with a word past the bounds of brace expansion
+// it may be a reset of any.
+func (s *handlerScan) trap(x *syntax.CallExpr, params []string) {
+	words, _ := s.flow.reader.readTrap(x)
+	if words.action != nil && wordLit(words.action) != "-" && !unboundWord(words.action) {
+		return
+	}
+	if words.unbound {
+		s.reset = allTrapSignals
+	}
+	for _, signal := range words.signals {
+		s.reset |= trapSignalMask(resolveHandlerWord(signal, params))
 	}
 }
 
@@ -294,7 +301,12 @@ func handlerKill(args []*syntax.Word, params []string) (uint8, bool) {
 	return signal, len(args) == 1 && isCurrentShellPID(args[0])
 }
 
+// trapSignalMask reads INT or TERM by its name in any case, or by its number
+// (02 is INT).
 func trapSignalMask(signal string) uint8 {
+	if n, ok := signalNumber(signal); ok {
+		signal = strconv.FormatUint(n, 10)
+	}
 	switch strings.ToUpper(signal) {
 	case "INT", "SIGINT", "2":
 		return 1
@@ -391,7 +403,7 @@ func unknownTrapHandler(stmts []*syntax.Stmt, funcs map[string]*syntax.Stmt) boo
 
 // A wrapper that starts a child, waits and only cleans up afterwards has no
 // further long-running work that can swallow the signal.
-func waitThenCleanup(stmts []*syntax.Stmt) bool {
+func (f *trapFlow) waitThenCleanup(stmts []*syntax.Stmt) bool {
 	waited := false
 	for _, stmt := range stmts {
 		if stmt.Background {
@@ -404,10 +416,12 @@ func waitThenCleanup(stmts []*syntax.Stmt) bool {
 		if len(call.Args) == 0 {
 			continue
 		}
+		if f.readTrap(call).trap {
+			continue
+		}
 		switch wordLit(call.Args[0]) {
 		case "wait":
 			waited = true
-		case "trap":
 		case "rm", "echo", "printf", "exit", "return", ":", "true":
 			if !waited {
 				return false
