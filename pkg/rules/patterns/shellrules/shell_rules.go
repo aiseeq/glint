@@ -106,7 +106,7 @@ func checkPipeTailStatus(r *shellRule, src *patternkit.ShellSource) []*core.Viol
 		return nil
 	}
 	var out []*core.Violation
-	for _, shellSrc := range legacyShellSources(src) {
+	for _, shellSrc := range shellsOf(src) {
 		for _, unit := range shellSrc.Units() {
 			segs := patternkit.Segments(unit.Text)
 			for k := 1; k < len(segs); k++ {
@@ -131,7 +131,9 @@ func checkPipeTailStatus(r *shellRule, src *patternkit.ShellSource) []*core.Viol
 	return append(out, newPipeTailFindings(r, src)...)
 }
 
-func legacyShellSources(src *patternkit.ShellSource) []*patternkit.ShellSource {
+// shellsOf splits a source into the shells that run it: a script or a
+// Makefile is one source, each graft step is a sh -c of its own.
+func shellsOf(src *patternkit.ShellSource) []*patternkit.ShellSource {
 	if !src.Graft {
 		return []*patternkit.ShellSource{src}
 	}
@@ -186,7 +188,7 @@ func newPipeTailFindings(r *shellRule, src *patternkit.ShellSource) []*core.Viol
 	var out []*core.Violation
 	for _, unit := range units {
 		facts := inspectShellUnit(unit.Text)
-		if facts == nil { // Syntax errors leave the legacy forms intact.
+		if facts == nil { // The $? forms above read the text of such a unit.
 			continue
 		}
 		segs := patternkit.Segments(unit.Text)
@@ -203,6 +205,8 @@ func inspectShellUnit(text string) *shellFacts {
 	f := &shellFacts{}
 	file, err := syntax.NewParser().Parse(strings.NewReader(text), "")
 	if err != nil {
+		// Expected for a unit outside the bash grammar (zsh, a template):
+		// without its syntax tree the new forms leave it alone.
 		return nil
 	}
 	syntax.Walk(file, func(n syntax.Node) bool {
