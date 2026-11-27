@@ -43,7 +43,7 @@ func (r *shellRule) AnalyzeFile(ctx *core.FileContext) []*core.Violation {
 
 func init() {
 	pipeTailRule := newShellRule("shell-status-of-pipe-tail",
-		"Detects $? read after a pipeline that ends in tee, cat or another filter without pipefail — the status is the filter's, and a failed command passes",
+		"Detects failed pipeline producers hidden by a successful tail status or an empty command substitution used as success, including -z tests, for lists and checked assignments",
 		core.SeverityHigh, checkPipeTailStatus)
 	pipeTailRule.readsGraftSteps = true
 	rules.Register(pipeTailRule)
@@ -102,30 +102,32 @@ var (
 // checkPipeTailStatus reports $? read right after a pipeline whose last
 // command is a filter, with no pipefail in effect.
 func checkPipeTailStatus(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	if src.Make && (pipefailSetting.MatchString(src.MakeFlags) || pipefailSetting.MatchString(src.MakeShell)) {
-		return nil
-	}
 	var out []*core.Violation
+	makePipefail := makeSetsPipefail(src)
 	for _, shellSrc := range shellsOf(src) {
-		for _, unit := range shellSrc.Units() {
-			segs := patternkit.Segments(unit.Text)
-			for k := 1; k < len(segs); k++ {
-				loc := statusRead.FindStringIndex(segs[k].Text)
-				if loc == nil {
-					continue
+		if !makePipefail {
+			for _, unit := range shellSrc.Units() {
+				segs := patternkit.Segments(unit.Text)
+				for k := 1; k < len(segs); k++ {
+					loc := statusRead.FindStringIndex(segs[k].Text)
+					if loc == nil {
+						continue
+					}
+					prev := segs[k-1]
+					if !pipeFilters[lastPipeCommand(prev.Text)] || pipeStatusMarker.MatchString(prev.Text) ||
+						pipefailSetting.MatchString(unit.Text[:prev.Offset]) {
+						continue
+					}
+					line := unit.LineAt(segs[k].Offset + loc[0])
+					out = appendReport(out, shellSrc.Report(r, line,
+						"$? read after a pipeline ending in "+lastPipeCommand(prev.Text)+" — without pipefail it is the status of the filter, and a failed command passes",
+						"Run the recipe or script with set -o pipefail (SHELL := bash, .SHELLFLAGS := -eo pipefail -c), or read ${PIPESTATUS[0]} under bash"))
 				}
-				prev := segs[k-1]
-				if !pipeFilters[lastPipeCommand(prev.Text)] || pipeStatusMarker.MatchString(prev.Text) ||
-					pipefailSetting.MatchString(unit.Text[:prev.Offset]) {
-					continue
-				}
-				line := unit.LineAt(segs[k].Offset + loc[0])
-				out = appendReport(out, shellSrc.Report(r, line,
-					"$? read after a pipeline ending in "+lastPipeCommand(prev.Text)+" — without pipefail it is the status of the filter, and a failed command passes",
-					"Run the recipe or script with set -o pipefail (SHELL := bash, .SHELLFLAGS := -eo pipefail -c), or read ${PIPESTATUS[0]} under bash"))
 			}
 		}
-		out = append(out, capturedPipeTails(r, shellSrc)...)
+		if !makePipefail {
+			out = append(out, capturedPipeTails(r, shellSrc)...)
+		}
 	}
 	out = append(out, recipeCheckPiped(r, src)...)
 	return append(out, newPipeTailFindings(r, src)...)
@@ -158,6 +160,7 @@ type shellFacts struct {
 	conditions, heredocs, functions, declarations []textSpan
 	pipefail                                      []pipefailEvent
 	captures                                      []*syntax.Assign
+	tree                                          *syntax.File
 }
 
 func (f *shellFacts) hasSpan(spans []textSpan, offset int) bool {
@@ -186,14 +189,21 @@ func newPipeTailFindings(r *shellRule, src *patternkit.ShellSource) []*core.Viol
 		units = src.BlockUnits()
 	}
 	var out []*core.Violation
+	makePipefail := makeSetsPipefail(src)
 	for _, unit := range units {
 		facts := inspectShellUnit(unit.Text)
 		if facts == nil { // The $? forms above read the text of such a unit.
 			continue
 		}
+		if makePipefail {
+			facts.pipefail = append([]pipefailEvent{{offset: 0, active: true}}, facts.pipefail...)
+		}
 		segs := patternkit.Segments(unit.Text)
-		out = append(out, producerPipeFindings(r, src, unit, segs, facts)...)
-		out = append(out, capturedProducerPipesForUnit(r, src, unit, facts)...)
+		if !makePipefail {
+			out = append(out, producerPipeFindings(r, src, unit, segs, facts)...)
+			out = append(out, capturedProducerPipesForUnit(r, src, unit, facts)...)
+		}
+		out = append(out, emptyCapturePipeFindings(r, src, unit, facts)...)
 	}
 	return out
 }
@@ -209,6 +219,7 @@ func inspectShellUnit(text string) *shellFacts {
 		// without its syntax tree the new forms leave it alone.
 		return nil
 	}
+	f.tree = file
 	syntax.Walk(file, func(n syntax.Node) bool {
 		switch x := n.(type) {
 		case *syntax.IfClause:
@@ -319,6 +330,10 @@ func callPipefailState(c *syntax.CallExpr) (active, recognized bool) {
 		}
 	}
 	return false, false
+}
+
+func makeSetsPipefail(src *patternkit.ShellSource) bool {
+	return src.Make && (pipefailSetting.MatchString(src.MakeFlags) || pipefailSetting.MatchString(src.MakeShell))
 }
 
 // hidesProducerFailure tells whether tailCmd, the last command of a pipeline
@@ -468,7 +483,7 @@ var pipeTailFilter = map[string]bool{"grep": true}
 // into a filter: make reads the filter's status, and a failed run passes the
 // target.
 func recipeCheckPiped(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	if !src.Make {
+	if !src.Make || makeSetsPipefail(src) {
 		return nil
 	}
 	var out []*core.Violation
