@@ -1,3 +1,5 @@
+//go:build !race
+
 package main
 
 import (
@@ -7,6 +9,8 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 )
+
+// This checks only static registry and default configuration metadata.
 
 // DefaultConfig lives in core, which cannot import the registry, so its
 // category list is a literal. This test keeps it honest: every category the

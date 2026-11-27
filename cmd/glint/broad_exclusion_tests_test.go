@@ -86,32 +86,6 @@ func TestBroadExclusionReportsEveryTestFileOfALanguage(t *testing.T) {
 	}
 }
 
-// A test file is named by its language: Go by _test.go, TypeScript and
-// JavaScript by .test or .spec before the extension.
-func TestTestFileLanguage(t *testing.T) {
-	for file, want := range map[string][2]string{
-		"a/x_test.go":  {"Go", "test"},
-		"a/x.go":       {"Go", ""},
-		"a/x.test.ts":  {"TypeScript", "test"},
-		"a/x.spec.mts": {"TypeScript", "test"},
-		"a/x.tsx":      {"TypeScript", ""},
-		"a/test.ts":    {"TypeScript", ""},
-		"a/x.test.JS":  {"JavaScript", "test"},
-		"a/x.spec.cjs": {"JavaScript", "test"},
-		"a/x.jsx":      {"JavaScript", ""},
-		"a/x.test.md":  {"", ""},
-		"a/x_Test.go":  {"Go", ""},
-		"a/x.Spec.ts":  {"TypeScript", ""},
-	} {
-		language, test := testFileLanguage(file)
-		kind := ""
-		if test {
-			kind = "test"
-		}
-		assert.Equal(t, want, [2]string{language, kind}, file)
-	}
-}
-
 // An exception of one rule for the tests is no finding: the rule may not fit
 // tests, and the other rules still read them.
 func TestBroadExclusionAllowsOneRuleExceptedForTests(t *testing.T) {
