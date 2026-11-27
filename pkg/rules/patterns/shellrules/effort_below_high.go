@@ -379,16 +379,8 @@ func jsSettingFindings(ctx *core.FileContext) map[int]string {
 		matches := jsEffortAssignForm.FindAllStringSubmatchIndex(line, -1)
 		matches = append(matches, jsEffortObjectForm.FindAllStringSubmatchIndex(line, -1)...)
 		for _, m := range matches {
-			_, end := m[0], m[1]
-			keyStart, keyEnd := -1, -1
-			if m[2] >= 0 {
-				keyStart, keyEnd = m[2], m[3]
-			} else {
-				continue
-			}
-			if keyStart < 0 {
-				continue
-			}
+			end := m[1]
+			keyStart, keyEnd := m[2], m[3]
 			key := strings.ToLower(line[keyStart:keyEnd])
 			if !strings.Contains(key, "effort") {
 				continue
@@ -824,18 +816,18 @@ func scanCallArgs(source string, open int) ([]string, int) {
 	for i := open + 1; i < len(source); i++ {
 		c := source[i]
 		if quote != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 			continue
 		}
-		if c == '\'' || c == '"' || c == '`' {
+		switch c {
+		case '\'', '"', '`':
 			quote = c
 			continue
-		}
-		switch c {
 		case '(', '[', '{':
 			depth++
 		case ')':
@@ -962,7 +954,6 @@ func shellCodexOptions(w []string, lit []bool, start int) (string, bool) {
 			continue
 		}
 		if strings.HasPrefix(a, "-cmodel_reasoning_effort=") {
-			explicit = true
 			v := strings.SplitN(a, "=", 2)[1]
 			if effortValuePattern.MatchString(strings.Trim(v, "\"'")) {
 				return strings.ToLower(strings.Trim(v, "\"'")), true
@@ -972,7 +963,6 @@ func shellCodexOptions(w []string, lit []bool, start int) (string, bool) {
 		if strings.HasPrefix(a, "--config=") || strings.HasPrefix(a, "-c=") {
 			config := strings.SplitN(a, "=", 2)[1]
 			if strings.HasPrefix(strings.ToLower(config), "model_reasoning_effort=") {
-				explicit = true
 				v := strings.SplitN(config, "=", 2)[1]
 				if low := literalEffort(v); low != "" {
 					return low, true
