@@ -123,23 +123,43 @@ func (r *ModelNotApprovedRule) AnalyzeFile(ctx *core.FileContext) []*core.Violat
 	if testData {
 		patterns = patterns[:1]
 	}
+	return analyzeModelCodeLines(ctx, r, func(line int, code string) *core.Violation {
+		// modelFlag needs "-m", modelKey "model" in any case.
+		if !strings.Contains(code, "-m") && !patternkit.ContainsAnyFold(code, []string{"model"}) {
+			return nil
+		}
+		model := unapprovedModel(code, patterns, approved.accepted)
+		if model == "" {
+			return nil
+		}
+		v := r.CreateViolation(ctx.RelPath, line, fmt.Sprintf("Model %q is not on the approved list (%s)", model, strings.Join(approved.names, ", ")))
+		v.WithCode(ctx.GetLine(line))
+		v.WithSuggestion("Use an approved model by its name or id; a model off the list is taken only after a benchmark and the owner's approval of the list")
+		return v
+	})
+}
+
+// analyzeModelCodeLines shares the language, test-data, suppression and
+// violation traversal used by rules that inspect model-related code.
+func analyzeModelCodeLines(ctx *core.FileContext, rule rules.Rule, analyze func(line int, code string) *core.Violation) []*core.Violation {
+	return analyzeModelCodeLinesFromLines(ctx, rule, modelCodeLines(ctx), analyze)
+}
+
+// analyzeModelCodeLinesFromLines applies shared test-data and suppression
+// handling to an already prepared view of source lines.
+func analyzeModelCodeLinesFromLines(ctx *core.FileContext, rule rules.Rule, lines []string, analyze func(line int, code string) *core.Violation) []*core.Violation {
+	testData := ctx.IsTestFile() && !ctx.IsShellFile()
 	var violations []*core.Violation
-	for i, code := range modelCodeLines(ctx) {
+	for i, code := range lines {
+		line := i + 1
 		if testData && !processLaunch.MatchString(code) {
 			continue
 		}
-		// modelFlag needs "-m", modelKey "model" in any case.
-		if !strings.Contains(code, "-m") && !patternkit.ContainsAnyFold(code, []string{"model"}) {
+		violation := analyze(line, code)
+		if violation == nil || ctx.IsSuppressed(line, rule.Name()) {
 			continue
 		}
-		model := unapprovedModel(code, patterns, approved.accepted)
-		if model == "" || ctx.IsSuppressed(i+1, r.Name()) {
-			continue
-		}
-		v := r.CreateViolation(ctx.RelPath, i+1, fmt.Sprintf("Model %q is not on the approved list (%s)", model, strings.Join(approved.names, ", ")))
-		v.WithCode(ctx.GetLine(i + 1))
-		v.WithSuggestion("Use an approved model by its name or id; a model off the list is taken only after a benchmark and the owner's approval of the list")
-		violations = append(violations, v)
+		violations = append(violations, violation)
 	}
 	return violations
 }
