@@ -1,5 +1,5 @@
-github.com/aiseeq/akit v1.91.17 h1:SHiAKct57T5hFAnEWUTzekkkKBLSHExyDWpSwGwO/GE=
-github.com/aiseeq/akit v1.91.17/go.mod h1:h744yWejrk12HEgtkCdkoMPVyb2cTtz0W4sBFXKIM9M=
+github.com/aiseeq/akit v1.92.2 h1:+wS1dGWEEGH4zxwZ4kE1dHT2KkwrGjFgWV24u47lSLs=
+github.com/aiseeq/akit v1.92.2/go.mod h1:h744yWejrk12HEgtkCdkoMPVyb2cTtz0W4sBFXKIM9M=
 github.com/bmatcuk/doublestar/v4 v4.10.7 h1:zcFCzVP2tosKRCXLXISX2dQ9YWXAvB3u7bhc1CDLc64=
 github.com/bmatcuk/doublestar/v4 v4.10.7/go.mod h1:xBQ8jztBU6kakFMg+8WGxn0c6z1fTSPVIjEY1Wr7jzc=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
@@ -45,8 +45,8 @@ github.com/tailscale/hujson v0.0.0-20221223112325-20486734a56a h1:SJy1Pu0eH1C29X
 github.com/tailscale/hujson v0.0.0-20221223112325-20486734a56a/go.mod h1:DFSS3NAGHthKo1gTlmEcSBiZrRJXi28rLNd/1udP1c8=
 github.com/tetratelabs/wazero v1.12.0 h1:DuWcpNu/FzgEXgGBDp8J1Spc+CWOvvtvVyjKlaZopYU=
 github.com/tetratelabs/wazero v1.12.0/go.mod h1:LvKtzl2RqO4gyF27BiXU+nKAjcV8f38U+kP/q2vgxh0=
-github.com/wasilibs/go-pgquery v0.0.0-20261124022233-3939604ca45d h1:ESxAHoKvtJ2dlqDw4kiR67ChFU278VmN78qWB/EuKhU=
-github.com/wasilibs/go-pgquery v0.0.0-20261124022233-3939604ca45d/go.mod h1:qsL+i7YEWvAeqOvbo1ARwbB6bdgdZKyravVkGOC8BYk=
+github.com/wasilibs/go-pgquery v0.0.0-20261127020734-be0bec80c2a1 h1:qIZyOSzVpHcsoW7bheZbFpz/ufM0HvR7RAGKVCOKh0w=
+github.com/wasilibs/go-pgquery v0.0.0-20261127020734-be0bec80c2a1/go.mod h1:qsL+i7YEWvAeqOvbo1ARwbB6bdgdZKyravVkGOC8BYk=
 github.com/wasilibs/wazero-helpers v0.0.0-20250123031827-cd30c44769bb h1:gQ+ZV4wJke/EBKYciZ2MshEouEHFuinB85dY3f5s1q8=
 github.com/wasilibs/wazero-helpers v0.0.0-20250123031827-cd30c44769bb/go.mod h1:jMeV4Vpbi8osrE/pKUxRZkVaA0EX7NZN0A9/oRzgpgY=
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=

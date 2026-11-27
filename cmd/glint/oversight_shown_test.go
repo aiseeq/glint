@@ -1,14 +1,11 @@
-// The checks below run `glint check` in a child of the test binary and read
-// only the report the child prints on stdout: checkShownIn discards the exit
-// status and stderr of the child, where a race build reports a data race
-// (WARNING: DATA RACE, exit status 66). The race build of these tests would
-// find nothing, while each of them starts the race-built analysis of every
-// rule several times. They run in the plain test task; the race build leaves
-// them out. The concurrent analysis they start stays under -race in
-// TestAnalyzeFilesIsDeterministicAndRaceFree and
-// TestProjectRulesAreDeterministicAndRaceFree, and in children whose exit
-// status fails the test: TestProjectCacheExcludedConfiguredMigrationMatchesNoCache,
-// TestScopedGoRunKeepsDeadConfigExceptionFinding, the TestSQLChild tests.
+// These checks run glint check in a child process and read only its stdout
+// report. checkShownIn discards the child's exit status and stderr, where the
+// race detector reports a race (WARNING: DATA RACE, exit status 66), so these
+// tests cannot observe races in that analysis. Race-enabled coverage remains
+// in TestAnalyzeFilesIsDeterministicAndRaceFree,
+// TestProjectRulesAreDeterministicAndRaceFree, and in child checks whose
+// failures are asserted: TestProjectCacheExcludedConfiguredMigrationMatchesNoCache
+// and TestScopedGoRunKeepsDeadConfigExceptionFinding.
 
 //go:build !race
 

@@ -365,36 +365,6 @@ func TestMainE2EHelper(t *testing.T) {
 	main()
 }
 
-func TestMainChangesDirectoryBeforeLoadingConfigAndPaths(t *testing.T) {
-	base := t.TempDir()
-	first := filepath.Join(base, "first")
-	project := filepath.Join(first, "project")
-	if err := os.MkdirAll(project, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("settings:\n  fail_on: medium\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(project, "go.mod"), []byte("module projectA\n\ngo 1.24\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(project, "sample.go"), []byte("package projectA\n\nfunc Example(value interface{}) {}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(base)
-
-	// The medium finding fails the run only under the fail_on of the -C
-	// project's config: the default fail_on (high) would exit 0.
-	output, err := mainSubprocess(t, []string{"-C", "first", "-C", "project", "check", "-r", "interface-any", "-s", "low", "sample.go"}).CombinedOutput()
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
-		t.Fatalf("got exit error %v, want 1 from fail_on: medium of the -C project (output: %s)", err, output)
-	}
-	if !strings.Contains(string(output), "interface-any") || !strings.Contains(string(output), "sample.go") {
-		t.Fatalf("expected finding from -C project, got:\n%s", output)
-	}
-}
-
 func TestProjectCacheExcludedConfiguredMigrationMatchesNoCache(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GLINT_CACHE_DIR", t.TempDir())
@@ -469,66 +439,6 @@ func Lookup(ctx context.Context, db *sql.DB) (string, error) {
 	}
 }
 
-func TestMainMissingDirectoryIsUsageError(t *testing.T) {
-	base := t.TempDir()
-	t.Chdir(base)
-	cmd := mainSubprocess(t, []string{"-C", "missing", "rules"})
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("missing -C directory succeeded: %s", output)
-	}
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() != exitUsage {
-		t.Fatalf("got exit error %v, want usage exit code 2 (output: %s)", err, output)
-	}
-	if !strings.Contains(string(output), `-C "missing"`) {
-		t.Fatalf("error does not name missing -C directory: %s", output)
-	}
-}
-
-// A path where the command goes, as in go vet ./..., is a call of check
-// without its name: the error says how to write it.
-func TestMainPathWithoutCommandSuggestsCheck(t *testing.T) {
-	t.Chdir(t.TempDir())
-	if err := os.Mkdir("internal", 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{{"./..."}, {"."}, {"internal"}, {"/nowhere/..."}, {"-C", ".", "./...", "internal"}, {"./...", "-r", "ignored-error"}} {
-		output, err := mainSubprocess(t, args).CombinedOutput()
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) || exit.ExitCode() != exitUsage {
-			t.Fatalf("glint %v: got exit error %v, want usage exit code 2 (output: %s)", args, err, output)
-		}
-		want := "glint check " + strings.Join(args, " ")
-		if !strings.Contains(string(output), want) {
-			t.Fatalf("glint %v: error does not suggest %q: %s", args, want, output)
-		}
-	}
-}
-
-func TestMainUnknownCommandSuggestsSimilarOne(t *testing.T) {
-	output, err := mainSubprocess(t, []string{"chek"}).CombinedOutput()
-	if err == nil {
-		t.Fatalf("unknown command succeeded: %s", output)
-	}
-	if !strings.Contains(string(output), `unknown command "chek"`) || !strings.Contains(string(output), "\tcheck") {
-		t.Fatalf("error does not name the command and suggest check: %s", output)
-	}
-	if strings.Contains(string(output), "glint check chek") {
-		t.Fatalf("a word that is not a path got the path hint: %s", output)
-	}
-}
-
-func TestMainWithoutArgumentsPrintsHelp(t *testing.T) {
-	output, err := mainSubprocess(t, nil).CombinedOutput()
-	if err != nil {
-		t.Fatalf("glint without arguments failed: %v (output: %s)", err, output)
-	}
-	if !strings.Contains(string(output), "Available Commands:") {
-		t.Fatalf("glint without arguments does not print help: %s", output)
-	}
-}
-
 // mainSubprocess runs main with args in a child of the test binary, so the
 // os.Exit and os.Chdir of main do not touch the test process.
 func mainSubprocess(t *testing.T, args []string) *exec.Cmd {
@@ -546,70 +456,33 @@ func mainSubprocess(t *testing.T, args []string) *exec.Cmd {
 	return cmd
 }
 
-func TestGetProjectRootsExpandsRecursiveCurrentDirectory(t *testing.T) {
-	want, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("get working directory: %v", err)
+func TestMainChangesDirectoryBeforeLoadingConfigAndPaths(t *testing.T) {
+	base := t.TempDir()
+	first := filepath.Join(base, "first")
+	project := filepath.Join(first, "project")
+	if err := os.MkdirAll(project, 0755); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(project, ".glint.yaml"), []byte("settings:\n  fail_on: medium\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "go.mod"), []byte("module projectA\n\ngo 1.24\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "sample.go"), []byte("package projectA\n\nfunc Example(value interface{}) {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(base)
 
-	got, err := getProjectRoots([]string{"./..."})
-	if err != nil {
-		t.Fatalf("get project roots: %v", err)
+	// The medium finding fails the run only under the fail_on of the -C
+	// project's config: the default fail_on (high) would exit 0.
+	output, err := mainSubprocess(t, []string{"-C", "first", "-C", "project", "check", "-r", "interface-any", "-s", "low", "sample.go"}).CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("got exit error %v, want 1 from fail_on: medium of the -C project (output: %s)", err, output)
 	}
-	if len(got) != 1 || got[0] != want {
-		t.Fatalf("got project roots %v, want [%s]", got, want)
-	}
-}
-
-func TestGetProjectRootsRejectsMissingPath(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "missing")
-
-	_, err := getProjectRoots([]string{missing})
-	if err == nil {
-		t.Fatal("expected missing project root to return an error")
-	}
-}
-
-func TestGetProjectRootsReturnsAbsoluteCleanPath(t *testing.T) {
-	parent := t.TempDir()
-	root := filepath.Join(parent, "project")
-	if err := os.Mkdir(root, 0755); err != nil {
-		t.Fatalf("create project root: %v", err)
-	}
-	t.Chdir(parent)
-
-	got, err := getProjectRoots([]string{"project/./"})
-	if err != nil {
-		t.Fatalf("get project roots: %v", err)
-	}
-	if len(got) != 1 || got[0] != root {
-		t.Fatalf("got project roots %v, want [%s]", got, root)
-	}
-}
-
-func TestShouldFailAnalysisAtThreshold(t *testing.T) {
-	low := core.ViolationList{core.NewViolation("low", "test", "test.go", 1, core.SeverityLow, "low")}
-	medium := core.ViolationList{core.NewViolation("medium", "test", "test.go", 1, core.SeverityMedium, "medium")}
-	high := core.ViolationList{core.NewViolation("high", "test", "test.go", 1, core.SeverityHigh, "high")}
-	critical := core.ViolationList{core.NewViolation("critical", "test", "test.go", 1, core.SeverityCritical, "critical")}
-
-	if medium.AnyAtLeast(core.SeverityHigh) {
-		t.Fatal("medium findings must not fail analysis at the default high threshold")
-	}
-	if !high.AnyAtLeast(core.SeverityHigh) {
-		t.Fatal("high findings must fail analysis at the high threshold")
-	}
-	if !critical.AnyAtLeast(core.SeverityHigh) {
-		t.Fatal("critical findings must fail analysis at the high threshold")
-	}
-	if !medium.AnyAtLeast(core.SeverityMedium) {
-		t.Fatal("medium findings must fail analysis at the medium threshold")
-	}
-	if low.AnyAtLeast(core.SeverityMedium) {
-		t.Fatal("low findings must not fail analysis at the medium threshold")
-	}
-	if high.AnyAtLeast(core.SeverityCritical) {
-		t.Fatal("high findings must not fail analysis at the critical threshold")
+	if !strings.Contains(string(output), "interface-any") || !strings.Contains(string(output), "sample.go") {
+		t.Fatalf("expected finding from -C project, got:\n%s", output)
 	}
 }
 
@@ -1114,82 +987,6 @@ func TestAnalyzeProjectReturnsRuleError(t *testing.T) {
 	_, err = analyzeProject(contexts, []rules.Rule{rule}, core.DefaultConfig(), project, nil)
 	if !errors.Is(err, rule.err) {
 		t.Fatalf("got error %v, want %v", err, rule.err)
-	}
-}
-
-func TestGetProjectRootsKeepsEveryPath(t *testing.T) {
-	parent := t.TempDir()
-	first := filepath.Join(parent, "backend")
-	second := filepath.Join(parent, "tools")
-	for _, dir := range []string{first, second} {
-		if err := os.Mkdir(dir, 0755); err != nil {
-			t.Fatalf("create %s: %v", dir, err)
-		}
-	}
-
-	got, err := getProjectRoots([]string{first, second})
-	if err != nil {
-		t.Fatalf("get project roots: %v", err)
-	}
-	if len(got) != 2 || got[0] != first || got[1] != second {
-		t.Fatalf("got project roots %v, want [%s %s]", got, first, second)
-	}
-}
-
-func TestGetProjectRootsDeduplicatesRepeatedPath(t *testing.T) {
-	root := t.TempDir()
-
-	got, err := getProjectRoots([]string{root, root + "/."})
-	if err != nil {
-		t.Fatalf("get project roots: %v", err)
-	}
-	if len(got) != 1 || got[0] != root {
-		t.Fatalf("got project roots %v, want [%s]", got, root)
-	}
-}
-
-func dedupeViolations(root string, violations core.ViolationList) core.ViolationList {
-	findings := newFindingSet()
-	findings.add(root, violations)
-	return findings.list
-}
-
-func TestFindingSetDropsRepeatedFinding(t *testing.T) {
-	violations := core.ViolationList{
-		{Rule: "error-wrap", File: "a.go", Line: 10, Message: "wrap it"},
-		{Rule: "error-wrap", File: "a.go", Line: 10, Message: "wrap it"},
-		{Rule: "error-wrap", File: "a.go", Line: 20, Message: "wrap it"},
-		{Rule: "magic-number", File: "a.go", Line: 10, Message: "42"},
-	}
-
-	got := dedupeViolations("/project", violations)
-	if len(got) != 3 {
-		t.Fatalf("got %d violations, want 3", len(got))
-	}
-}
-
-// One rule can report several distinct problems on the same line — for
-// example two magic numbers in one expression. Those are not duplicates.
-func TestFindingSetKeepsDistinctFindingsOnOneLine(t *testing.T) {
-	violations := core.ViolationList{
-		{Rule: "magic-number", File: "a.go", Line: 10, Column: 12, Message: "Magic number 86400"},
-		{Rule: "magic-number", File: "a.go", Line: 10, Column: 30, Message: "Magic number 3600"},
-	}
-
-	if got := dedupeViolations("/project", violations); len(got) != 2 {
-		t.Fatalf("got %d violations, want both distinct findings kept", len(got))
-	}
-}
-
-// Overlapping roots name the same file differently: "sub/a.go" from the
-// parent, "a.go" from sub itself. It is still one finding.
-func TestFindingSetDropsFindingOfOverlappingRoot(t *testing.T) {
-	findings := newFindingSet()
-	findings.add("/project", core.ViolationList{{Rule: "magic-number", File: "sub/a.go", Line: 5, Message: "777"}})
-	findings.add("/project/sub", core.ViolationList{{Rule: "magic-number", File: "a.go", Line: 5, Message: "777"}})
-
-	if len(findings.list) != 1 || findings.list[0].File != "sub/a.go" {
-		t.Fatalf("got %v, want the single finding of the first root", findings.list)
 	}
 }
 

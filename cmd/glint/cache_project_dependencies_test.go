@@ -1,3 +1,5 @@
+//go:build !race
+
 package main
 
 import (
@@ -12,6 +14,9 @@ import (
 	"github.com/aiseeq/glint/pkg/rules/duplication"
 	"github.com/stretchr/testify/require"
 )
+
+// These tests inspect cache dependency metadata and rule declarations only;
+// they do not run analysis or start glint workers in the test process.
 
 type projectCacheIndexConsumer struct {
 	*projectStubRule

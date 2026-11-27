@@ -1,3 +1,5 @@
+//go:build !race
+
 package main
 
 import (
@@ -9,6 +11,9 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 )
+
+// These tests inspect registry keys and cache metadata without running file
+// analysis or starting glint workers in the test process.
 
 // A rule that asks the registry whether a marker names a rule keeps its
 // cached findings only while the registered rule names stay the same: a

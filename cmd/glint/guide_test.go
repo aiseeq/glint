@@ -1,3 +1,8 @@
+//go:build !race
+
+// Guide tests read rendered text and command metadata; they do not run an
+// analysis or start glint workers.
+
 package main
 
 import (
