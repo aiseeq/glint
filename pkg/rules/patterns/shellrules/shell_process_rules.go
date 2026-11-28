@@ -682,6 +682,10 @@ func checkTrapRemovesResults(r *shellRule, src *patternkit.ShellSource) []*core.
 		return nil
 	}
 	errexit := errexitSetting.MatchString(strings.Join(src.Ctx.Lines, "\n"))
+	// The copies of each line and its exit on failure are found once, on
+	// the first trap, not again for every trap above the line.
+	var copies [][]lineCopy
+	var exits []bool
 	var out []*core.Violation
 	for i, l := range src.Lines {
 		m := trapRemove.FindStringSubmatch(l.Text)
@@ -694,9 +698,15 @@ func checkTrapRemovesResults(r *shellRule, src *patternkit.ShellSource) []*core.
 		}
 		fromDir := regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?/`)
 		inDir := regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?(?:/|"|$)`)
+		if copies == nil {
+			copies, exits = make([][]lineCopy, len(src.Lines)), make([]bool, len(src.Lines))
+			for j, later := range src.Lines {
+				copies[j], exits[j] = lineCopies(later.Text), failExit.MatchString(later.Text)
+			}
+		}
 		failed := errexit
-		for _, later := range src.Lines[i+1:] {
-			if copiesOut(later.Text, fromDir, inDir) {
+		for j := i + 1; j < len(src.Lines); j++ {
+			if copiesOut(copies[j], fromDir, inDir) {
 				if failed {
 					out = appendReport(out, src.Report(r, l.LineAt(0),
 						"The trap removes $"+dir[1]+" on exit, and a failed run exits before the results are copied out of it — the log of the failure is removed with the directory",
@@ -704,30 +714,38 @@ func checkTrapRemovesResults(r *shellRule, src *patternkit.ShellSource) []*core.
 				}
 				break
 			}
-			failed = failed || failExit.MatchString(later.Text)
+			failed = failed || exits[j]
 		}
 	}
 	return out
 }
 
-// copiesOut reports a cp or mv in the line that takes a source from the
-// directory and puts it outside; a copy into it (cp "$bin" "$work/") or
-// within it does not count.
-func copiesOut(line string, fromDir, inDir *regexp.Regexp) bool {
+// lineCopy is a cp or mv of a line: its sources and its destination.
+type lineCopy struct {
+	sources []string
+	dest    string
+}
+
+// lineCopies returns the first cp or mv of each command of the line.
+func lineCopies(line string) []lineCopy {
+	var found []lineCopy
 	for _, seg := range flatSegments(line) {
 		words := commandWords(seg.Text)
-		for k, w := range words {
-			if w != "cp" && w != "mv" {
-				continue
-			}
+		if k := slices.IndexFunc(words, func(w string) bool { return w == "cp" || w == "mv" }); k >= 0 {
 			sources, dest := copyArgs(words[k+1:])
-			if dest != "" && !inDir.MatchString(dest) && slices.ContainsFunc(sources, fromDir.MatchString) {
-				return true
-			}
-			break
+			found = append(found, lineCopy{sources: sources, dest: dest})
 		}
 	}
-	return false
+	return found
+}
+
+// copiesOut reports a copy of the line that takes a source from the
+// directory and puts it outside; a copy into it (cp "$bin" "$work/") or
+// within it does not count.
+func copiesOut(copies []lineCopy, fromDir, inDir *regexp.Regexp) bool {
+	return slices.ContainsFunc(copies, func(c lineCopy) bool {
+		return c.dest != "" && !inDir.MatchString(c.dest) && slices.ContainsFunc(c.sources, fromDir.MatchString)
+	})
 }
 
 var redirectOp = regexp.MustCompile(`^(?:\d*[<>]+&?|&>>?)`)
