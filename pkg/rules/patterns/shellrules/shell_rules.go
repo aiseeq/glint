@@ -12,6 +12,7 @@ import (
 	"github.com/aiseeq/glint/pkg/core"
 	"github.com/aiseeq/glint/pkg/rules"
 	"github.com/aiseeq/glint/pkg/rules/patterns/internal/patternkit"
+	"gopkg.in/yaml.v3"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -97,6 +98,7 @@ var (
 	newPipeProducers = map[string]bool{"psql": true, "curl": true, "ssh": true, "jq": true, "git": true, "docker": true, "kubectl": true, "mysql": true, "aws": true, "gcloud": true, "find": true}
 	emptyFallback    = regexp.MustCompile(`^\|\|\s*([A-Za-z_][A-Za-z0-9_]*)=([^\s;#]*)`)
 	droppedFailure   = regexp.MustCompile(`^\|\|\s*(?::|true)(?:\s|;|$|#)`)
+	droppedGroup     = regexp.MustCompile(`^\|\|\s*\{\s*:\s*;?\s*\}`)
 )
 
 // checkPipeTailStatus reports $? read right after a pipeline whose last
@@ -198,10 +200,12 @@ func newPipeTailFindings(r *shellRule, src *patternkit.ShellSource) []*core.Viol
 		if makePipefail {
 			facts.pipefail = append([]pipefailEvent{{offset: 0, active: true}}, facts.pipefail...)
 		}
-		segs := patternkit.Segments(unit.Text)
+		if !src.Graft && shebangSetsPipefail(strings.Join(src.Ctx.Lines, "\n")) {
+			facts.pipefail = append([]pipefailEvent{{offset: 0, active: true}}, facts.pipefail...)
+		}
 		if !makePipefail {
-			out = append(out, producerPipeFindings(r, src, unit, segs, facts)...)
-			out = append(out, capturedProducerPipesForUnit(r, src, unit, facts)...)
+			out = append(out, producerPipeFindingsFromTree(r, src, unit, facts)...)
+			out = append(out, capturedProducerPipesFromTree(r, src, unit, facts)...)
 		}
 		out = append(out, emptyCapturePipeFindings(r, src, unit, facts)...)
 	}
@@ -336,6 +340,240 @@ func makeSetsPipefail(src *patternkit.ShellSource) bool {
 	return src.Make && (pipefailSetting.MatchString(src.MakeFlags) || pipefailSetting.MatchString(src.MakeShell))
 }
 
+func shebangSetsPipefail(text string) bool {
+	first, _, _ := strings.Cut(text, "\n")
+	if !strings.HasPrefix(first, "#!") {
+		return false
+	}
+	args := strings.Fields(strings.TrimSpace(strings.TrimPrefix(first, "#!")))
+	for i, arg := range args {
+		if arg == "pipefail" {
+			return true
+		}
+		if strings.HasPrefix(arg, "-") && strings.Contains(arg[1:], "o") && i+1 < len(args) && args[i+1] == "pipefail" {
+			return true
+		}
+	}
+	return false
+}
+
+type shellPipeline struct {
+	start, end  int
+	first, last string
+	tail        *syntax.Stmt
+}
+
+// shellPipelines returns complete pipeline trees, including pipelines nested
+// inside groups and command substitutions.
+func shellPipelines(tree *syntax.File, text string) []shellPipeline {
+	var out []shellPipeline
+	syntax.Walk(tree, func(n syntax.Node) bool {
+		b, ok := n.(*syntax.BinaryCmd)
+		if !ok || (b.Op != syntax.Pipe && b.Op != syntax.PipeAll) {
+			return true
+		}
+		first, last := b, b
+		for {
+			left, ok := first.X.Cmd.(*syntax.BinaryCmd)
+			if !ok || (left.Op != syntax.Pipe && left.Op != syntax.PipeAll) {
+				break
+			}
+			first = left
+		}
+		for {
+			right, ok := last.Y.Cmd.(*syntax.BinaryCmd)
+			if !ok || (right.Op != syntax.Pipe && right.Op != syntax.PipeAll) {
+				break
+			}
+			last = right
+		}
+		start, end := int(first.X.Pos().Offset()), int(last.Y.End().Offset())
+		if start >= 0 && end <= len(text) && start < end {
+			out = append(out, shellPipeline{start: start, end: end, first: text[start:int(first.X.End().Offset())], last: text[int(last.Y.Pos().Offset()):end], tail: last.Y})
+		}
+		return false // the widest pipeline already includes its pipe children
+	})
+	return out
+}
+
+func producerPipeFindingsFromTree(r *shellRule, src *patternkit.ShellSource, unit patternkit.ShellLine, facts *shellFacts) []*core.Violation {
+	var out []*core.Violation
+	for _, p := range shellPipelines(facts.tree, unit.Text) {
+		producer := commandWord(patternkit.CommandPrefix.ReplaceAllString(strings.TrimSpace(p.first), ""))
+		tail := commandWord(patternkit.CommandPrefix.ReplaceAllString(strings.TrimSpace(p.last), ""))
+		if !hidesProducerFailure(producer, p.last) || earlyExitTail(tail, p.tail) || facts.inCondition(p.start) || facts.inHeredoc(p.start) || facts.pipefailAt(p.start) {
+			continue
+		}
+		// A later list command replaces this pipeline's status.
+		rawRest := strings.TrimSpace(patternkit.WithoutComment(unit.Text[p.end:]))
+		if strings.HasPrefix(rawRest, "&") {
+			continue // a background pipeline does not determine the script status
+		}
+		rest := strings.TrimLeft(rawRest, ";} \t\n")
+		if laterShellCommand(rest) && !strings.HasPrefix(rest, ">") || strings.Contains(unit.Text[p.end:], "PIPESTATUS") {
+			continue
+		}
+		line := graftCommandLine(src, unit, p.start, producer)
+		out = appendReport(out, src.Report(r, line, "A failed "+producer+" in this pipeline is hidden by "+tail+" — the pipeline returns the tail's status", "Set -o pipefail in this shell step or script, or capture "+producer+" first and check its status"))
+	}
+	return out
+}
+
+func earlyExitTail(command string, stmt *syntax.Stmt) bool {
+	words := literalCallWords(stmt)
+	if len(words) > 0 {
+		command = words[0]
+	}
+	if command == "head" {
+		return true
+	}
+	if command == "sed" {
+		for _, script := range words[1:] {
+			if strings.HasSuffix(script, "q") {
+				return true
+			}
+		}
+	}
+	if command == "awk" {
+		for _, script := range words[1:] {
+			if strings.Contains(script, "exit") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func literalCallWords(stmt *syntax.Stmt) []string {
+	if stmt == nil {
+		return nil
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok {
+		return nil
+	}
+	words := make([]string, 0, len(call.Args))
+	for _, arg := range call.Args {
+		word, ok := wordValue(arg)
+		if !ok {
+			word = ""
+		}
+		words = append(words, word)
+	}
+	return words
+}
+
+func lastAssignmentValueSubstitution(word *syntax.Word) *syntax.CmdSubst {
+	var last *syntax.CmdSubst
+	for _, part := range word.Parts {
+		switch p := part.(type) {
+		case *syntax.CmdSubst:
+			last = p
+		case *syntax.DblQuoted:
+			for _, inner := range p.Parts {
+				if subst, ok := inner.(*syntax.CmdSubst); ok {
+					last = subst
+				}
+			}
+		}
+	}
+	return last
+}
+
+func laterShellCommand(text string) bool {
+	return strings.TrimSpace(text) != "" && strings.TrimSpace(strings.Trim(text, ";&| \t\n")) != ""
+}
+
+func capturedProducerPipesFromTree(r *shellRule, src *patternkit.ShellSource, unit patternkit.ShellLine, facts *shellFacts) []*core.Violation {
+	var out []*core.Violation
+	for _, a := range facts.captures {
+		if a == nil || a.Value == nil || a.Name == nil || facts.hasSpan(facts.declarations, int(a.Pos().Offset())) {
+			continue
+		}
+		subst := lastAssignmentValueSubstitution(a.Value)
+		if subst == nil {
+			continue
+		}
+		start := int(subst.Left.Offset()) + 2
+		end := int(subst.Right.Offset())
+		if start < 0 || end > len(unit.Text) || start >= end {
+			continue
+		}
+		bodyFacts := inspectShellUnit(unit.Text[start:end])
+		if bodyFacts == nil {
+			continue
+		}
+		pipes := shellPipelines(bodyFacts.tree, unit.Text[start:end])
+		if len(pipes) == 0 {
+			continue
+		}
+		p := pipes[len(pipes)-1]
+		bodyEnd := len(strings.TrimRight(unit.Text[start:end], " \t\n"))
+		if p.end != bodyEnd {
+			continue
+		}
+		producer := commandWord(patternkit.CommandPrefix.ReplaceAllString(strings.TrimSpace(p.first), ""))
+		if !hidesProducerFailure(producer, p.last) || earlyExitTail(commandWord(p.last), p.tail) {
+			continue
+		}
+		checked := facts.inCondition(int(a.Pos().Offset())) || assignmentStatusChecked(unit.Text, int(a.End().Offset()), a.Name.Value)
+		if !checked || facts.inHeredoc(start) || facts.pipefailAt(start) {
+			continue
+		}
+		if strings.Contains(unit.Text[end:], "PIPESTATUS") {
+			continue
+		}
+		line := graftCommandLine(src, unit, int(a.Pos().Offset()), producer)
+		out = appendReport(out, src.Report(r, line, "The status of this captured pipeline is checked, but a failed "+producer+" returns the filter's status", "Set -o pipefail in this shell, or capture "+producer+" alone and check its status"))
+	}
+	return out
+}
+
+func graftCommandLine(src *patternkit.ShellSource, unit patternkit.ShellLine, offset int, command string) int {
+	line := unit.LineAt(offset)
+	if !src.Graft {
+		return line
+	}
+	var doc yaml.Node
+	if yaml.Unmarshal(src.Ctx.Content, &doc) != nil || len(doc.Content) == 0 {
+		return line
+	}
+	root := doc.Content[0]
+	var nodes []*yaml.Node
+	collectGraftNodes(root, &nodes)
+	for index, scalar := range nodes {
+		if scalar.Kind != yaml.ScalarNode {
+			continue
+		}
+		if scalar.Line != line {
+			continue
+		}
+		nextNodeLine := len(src.Ctx.Lines) + 1
+		for _, next := range nodes[index+1:] {
+			if next.Line > scalar.Line {
+				nextNodeLine = next.Line
+				break
+			}
+		}
+		for i := scalar.Line; i < nextNodeLine && i <= len(src.Ctx.Lines); i++ {
+			if strings.Contains(src.Ctx.Lines[i-1], command) {
+				return i
+			}
+		}
+	}
+	return line
+}
+
+func collectGraftNodes(n *yaml.Node, out *[]*yaml.Node) {
+	if n == nil {
+		return
+	}
+	*out = append(*out, n)
+	for _, c := range n.Content {
+		collectGraftNodes(c, out)
+	}
+}
+
 // hidesProducerFailure tells whether tailCmd, the last command of a pipeline
 // from producer, returns 0 when producer fails. head is left out: with
 // pipefail the producer ends on SIGPIPE and a good run fails. jq -e is left
@@ -360,85 +598,24 @@ func jqExitStatus(cmd string) bool {
 	return false
 }
 
-func producerPipeFindings(r *shellRule, src *patternkit.ShellSource, unit patternkit.ShellLine, segs []patternkit.ShellSegment, facts *shellFacts) []*core.Violation {
-	var out []*core.Violation
-	for i, seg := range segs {
-		if patternkit.WithoutComment(seg.Trimmed()) == "" || facts.inHeredoc(seg.Offset) {
-			continue
-		}
-		parts := pipeElements(patternkit.WithoutComment(seg.Trimmed()))
-		if len(parts) < 2 {
-			continue
-		}
-		producer := commandWord(patternkit.CommandPrefix.ReplaceAllString(parts[0], ""))
-		tail := commandWord(parts[len(parts)-1])
-		if !hidesProducerFailure(producer, parts[len(parts)-1]) {
-			continue
-		}
-		if facts.inCondition(seg.Offset) || (i+1 < len(segs) && (segs[i].Sep == "||" || segs[i].Sep == "&")) {
-			continue
-		}
-		laterCommand := false
-		for _, later := range segs[i+1:] {
-			if patternkit.WithoutComment(later.Trimmed()) != "" {
-				laterCommand = true
-				break
-			}
-		}
-		if laterCommand || facts.pipefailAt(seg.Offset) || (i+1 < len(segs) && pipeStatusMarker.MatchString(segs[i+1].Text)) {
-			continue
-		}
-		line := unit.LineAt(seg.Offset)
-		out = appendReport(out, src.Report(r, line, "A failed "+producer+" in this pipeline is hidden by "+tail+" — the pipeline returns the tail's status", "Set -o pipefail in this shell step or script, or capture "+producer+" first and check its status"))
+func assignmentStatusChecked(text string, end int, variable string) bool {
+	if end > len(text) {
+		return false
 	}
-	return out
-}
-
-func capturedProducerPipesForUnit(r *shellRule, src *patternkit.ShellSource, unit patternkit.ShellLine, facts *shellFacts) []*core.Violation {
-	var out []*core.Violation
-	for _, a := range facts.captures {
-		if a == nil || a.Value == nil || a.Name == nil {
-			continue
-		}
-		subst := findCmdSubst(a.Value)
-		if subst == nil {
-			continue
-		}
-		start, end := int(subst.Left.Offset()), int(subst.Right.Offset())
-		if start+2 > end || end > len(unit.Text) {
-			continue
-		}
-		body := unit.Text[start+2 : end]
-		parts := pipeElements(patternkit.WithoutComment(body))
-		if len(parts) < 2 {
-			continue
-		}
-		producer := commandWord(patternkit.CommandPrefix.ReplaceAllString(parts[0], ""))
-		if !hidesProducerFailure(producer, parts[len(parts)-1]) {
-			continue
-		}
-		if facts.hasSpan(facts.declarations, int(a.Pos().Offset())) {
-			continue
-		}
-		checked := facts.inCondition(int(a.Pos().Offset())) || assignmentStatusChecked(unit.Text, int(a.End().Offset()), a.Name.Value)
-		if !checked || facts.inHeredoc(start) || facts.pipefailAt(start) {
-			continue
-		}
-		bodySegments := patternkit.Segments(body)
-		usesPipeStatus := false
-		for i := 0; i+1 < len(bodySegments); i++ {
-			if len(pipeElements(patternkit.WithoutComment(bodySegments[i].Trimmed()))) > 1 && pipeStatusMarker.MatchString(bodySegments[i+1].Text) {
-				usesPipeStatus = true
-				break
-			}
-		}
-		if usesPipeStatus {
-			continue
-		}
-		line := unit.LineAt(int(a.Pos().Offset()))
-		out = appendReport(out, src.Report(r, line, "The status of this captured pipeline is checked, but a failed "+producer+" returns the filter's status", "Set -o pipefail in this shell, or capture "+producer+" alone and check its status"))
+	rest := strings.TrimLeft(text[end:], " \t\n")
+	if strings.HasPrefix(rest, "&&") {
+		return true
 	}
-	return out
+	if strings.HasPrefix(rest, "||") {
+		if droppedFailure.MatchString(rest) || droppedGroup.MatchString(rest) {
+			return false
+		}
+		if m := emptyFallback.FindStringSubmatch(rest); m != nil && m[1] == variable && (m[2] == "" || m[2] == "''" || m[2] == `""`) {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 func findCmdSubst(w *syntax.Word) *syntax.CmdSubst {
@@ -455,26 +632,6 @@ func findCmdSubst(w *syntax.Word) *syntax.CmdSubst {
 		}
 	}
 	return nil
-}
-
-func assignmentStatusChecked(text string, end int, variable string) bool {
-	if end > len(text) {
-		return false
-	}
-	rest := strings.TrimLeft(text[end:], " \t\n")
-	if strings.HasPrefix(rest, "&&") {
-		return true
-	}
-	if strings.HasPrefix(rest, "||") {
-		if droppedFailure.MatchString(rest) {
-			return false
-		}
-		if m := emptyFallback.FindStringSubmatch(rest); m != nil && m[1] == variable && (m[2] == "" || m[2] == "''" || m[2] == `""`) {
-			return false
-		}
-		return true
-	}
-	return false
 }
 
 var pipeTailFilter = map[string]bool{"grep": true}
