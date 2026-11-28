@@ -754,7 +754,7 @@ func typeChildren(typ types.Type) []types.Type {
 // package needs no check of its own: no library function is such a call.
 func nearCopyCandidate(fd *ast.FuncDecl, info *types.Info) bool {
 	if fd.Recv == nil {
-		return IsDuplicateFuncBodyCandidate(fd, info)
+		return IsDuplicateFuncBodyCandidate(fd, info) || shortReassignedParameterCandidate(fd, info)
 	}
 	if fd.Body == nil || fd.Name == nil || fd.Type == nil || fd.Type.Params == nil || info == nil {
 		return false
@@ -768,11 +768,94 @@ func exactLibraryMatch(fd *ast.FuncDecl, info *types.Info, keys map[string]libra
 	}
 	n := newFunctionBlockNormalizer(info, fd)
 	n.walk(fd.Body)
-	if n.nodes < minimumDuplicateBodyNodes {
+	if n.nodes >= minimumDuplicateBodyNodes {
+		if match, ok := keys[n.b.String()]; ok {
+			return match, true
+		}
+	}
+	assign, oldValue, ok := shortReassignedParameter(fd, info)
+	if !ok {
 		return libraryMatch{}, false
 	}
-	match, ok := keys[n.b.String()]
+	target, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok {
+		return libraryMatch{}, false
+	}
+	obj := info.ObjectOf(target)
+	if n.redeclared == nil {
+		n.redeclared = make(map[types.Object]bool)
+	}
+	n.redeclared[obj] = true
+	// In the normalized library body, its new local is encountered first
+	// ($L0), then the input parameter ($L1). This reassignment uses one Go
+	// object for both values, so number its occurrences separately.
+	n.localIDs = make(map[*ast.Ident]int)
+	ast.Inspect(fd.Body, func(node ast.Node) bool {
+		if id, ok := node.(*ast.Ident); ok && info.ObjectOf(id) == obj {
+			n.localIDs[id] = 0
+		}
+		return true
+	})
+	n.localIDs[oldValue] = 1
+	n.locals = make(map[types.Object]int)
+	n.locals[obj] = 0
+	n.localOffset = 1
+	n.b.Reset()
+	n.nodes, n.stmts = 0, 0
+	n.walk(fd.Body)
+	// A qualifying reassignment has the same value flow as declaring a new
+	// local from the parameter, so compare its assignment as a declaration.
+	key := strings.Replace(n.b.String(), "(AssignStmt=", "(AssignStmt:=", 1)
+	match, ok := keys[key]
 	return match, ok
+}
+
+// shortReassignedParameter finds a first-statement x = f(x), where x is a
+// parameter and the only read of its old value is the one in that expression.
+// The rest of the body therefore reads the value written by the assignment.
+func shortReassignedParameter(fd *ast.FuncDecl, info *types.Info) (*ast.AssignStmt, *ast.Ident, bool) {
+	if fd == nil || fd.Body == nil || fd.Type == nil || fd.Type.Params == nil || info == nil || len(fd.Body.List) == 0 {
+		return nil, nil, false
+	}
+	assign := singleAssign(fd.Body.List[0], token.ASSIGN)
+	if assign == nil {
+		return nil, nil, false
+	}
+	target, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok {
+		return nil, nil, false
+	}
+	obj := info.ObjectOf(target)
+	parameter := false
+	for _, field := range fd.Type.Params.List {
+		for _, name := range field.Names {
+			parameter = parameter || info.Defs[name] == obj
+		}
+	}
+	if !parameter {
+		return nil, nil, false
+	}
+	if _, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr); !ok {
+		return nil, nil, false
+	}
+	var oldValue *ast.Ident
+	reads := 0
+	ast.Inspect(assign.Rhs[0], func(node ast.Node) bool {
+		if id, ok := node.(*ast.Ident); ok && info.Uses[id] == obj {
+			oldValue = id
+			reads++
+		}
+		return true
+	})
+	if reads != 1 {
+		return nil, nil, false
+	}
+	return assign, oldValue, true
+}
+
+func shortReassignedParameterCandidate(fd *ast.FuncDecl, info *types.Info) bool {
+	_, _, ok := shortReassignedParameter(fd, info)
+	return ok
 }
 
 func (r *DuplicateFuncOfLibraryRule) libraryViolation(file *core.FileContext, fd *ast.FuncDecl, line int, match libraryMatch, score float64, exact bool) *core.Violation {
@@ -1156,47 +1239,8 @@ func loadFunctionKeys(dir string, includeUnexported bool) (libraryCacheEntry, er
 
 	entry := libraryCacheEntry{Keys: map[string][]libraryFunction{}}
 	for _, pkg := range pkgs {
-		if pkg == nil || pkg.Name == "main" || pkg.TypesInfo == nil || pkg.Types == nil || len(pkg.Errors) > 0 {
-			continue
-		}
-		for _, file := range pkg.Syntax {
-			if ast.IsGenerated(file) {
-				continue
-			}
-			for _, decl := range file.Decls {
-				fd, ok := decl.(*ast.FuncDecl)
-				if ok && !includeUnexported {
-					modulePath := pkg.PkgPath
-					if pkg.Module != nil {
-						modulePath = pkg.Module.Path
-					}
-					if run, found := inlineRunLibraryFunction(fd, pkg.TypesInfo, pkg.PkgPath, pkg.Name); found {
-						entry.Runs = append(entry.Runs, run)
-					}
-					if fn, found := inlineLibraryFunction(fd, pkg.TypesInfo, pkg.PkgPath, pkg.Name, modulePath); found {
-						entry.Inline = append(entry.Inline, fn)
-					}
-				}
-				if !ok || fd.Name == nil || !includeUnexported && !fd.Name.IsExported() || !IsDuplicateFuncBodyCandidate(fd, pkg.TypesInfo) {
-					continue
-				}
-				fn, ok := pkg.TypesInfo.Defs[fd.Name].(*types.Func)
-				if !ok || fn == nil || fn.Signature().Recv() != nil {
-					continue
-				}
-				n := newFunctionBlockNormalizer(pkg.TypesInfo, fd)
-				n.walk(fd.Body)
-				if n.nodes >= minimumDuplicateBodyNodes {
-					found := libraryFunction{Name: fd.Name.Name, Package: pkg.Name, ImportPath: pkg.PkgPath}
-					if includeUnexported {
-						found.Types = functionNamedTypes(fd, pkg.TypesInfo, pkg.Module.Path)
-					}
-					entry.Keys[n.b.String()] = append(entry.Keys[n.b.String()], found)
-					if body := goNearBody(pkg.TypesInfo, fd, true); len(body.Tokens) >= minGoNearCopyTokens {
-						entry.Near = append(entry.Near, libraryNearFunction{libraryFunction: found, Lang: "go", Body: body})
-					}
-				}
-			}
+		if validLibraryPackage(pkg) {
+			addLibraryPackageFunctions(&entry, pkg, includeUnexported)
 		}
 	}
 	tsFuncs, err := libraryTSFunctions(dir)
@@ -1205,4 +1249,56 @@ func loadFunctionKeys(dir string, includeUnexported bool) (libraryCacheEntry, er
 	}
 	entry.Near = append(entry.Near, tsFuncs...)
 	return entry, nil
+}
+
+func validLibraryPackage(pkg *packages.Package) bool {
+	return pkg != nil && pkg.Name != "main" && pkg.TypesInfo != nil && pkg.Types != nil && len(pkg.Errors) == 0
+}
+
+func addLibraryPackageFunctions(entry *libraryCacheEntry, pkg *packages.Package, includeUnexported bool) {
+	for _, file := range pkg.Syntax {
+		if ast.IsGenerated(file) {
+			continue
+		}
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if ok {
+				addLibraryFunction(entry, pkg, fd, includeUnexported)
+			}
+		}
+	}
+}
+
+func addLibraryFunction(entry *libraryCacheEntry, pkg *packages.Package, fd *ast.FuncDecl, includeUnexported bool) {
+	if !includeUnexported {
+		modulePath := pkg.PkgPath
+		if pkg.Module != nil {
+			modulePath = pkg.Module.Path
+		}
+		if run, found := inlineRunLibraryFunction(fd, pkg.TypesInfo, pkg.PkgPath, pkg.Name); found {
+			entry.Runs = append(entry.Runs, run)
+		}
+		if fn, found := inlineLibraryFunction(fd, pkg.TypesInfo, pkg.PkgPath, pkg.Name, modulePath); found {
+			entry.Inline = append(entry.Inline, fn)
+		}
+	}
+	if fd.Name == nil || fd.Body == nil || fd.Type == nil || fd.Type.Params == nil || fd.Type.Params.NumFields() == 0 || !includeUnexported && !fd.Name.IsExported() || delegates(fd.Body, pkg.TypesInfo, pkg.Types) {
+		return
+	}
+	fn, ok := pkg.TypesInfo.Defs[fd.Name].(*types.Func)
+	if !ok || fn == nil || fn.Signature().Recv() != nil {
+		return
+	}
+	n := newFunctionBlockNormalizer(pkg.TypesInfo, fd)
+	n.walk(fd.Body)
+	found := libraryFunction{Name: fd.Name.Name, Package: pkg.Name, ImportPath: pkg.PkgPath}
+	if includeUnexported {
+		found.Types = functionNamedTypes(fd, pkg.TypesInfo, pkg.Module.Path)
+	}
+	entry.Keys[n.b.String()] = append(entry.Keys[n.b.String()], found)
+	if n.nodes >= minimumDuplicateBodyNodes {
+		if body := goNearBody(pkg.TypesInfo, fd, true); len(body.Tokens) >= minGoNearCopyTokens {
+			entry.Near = append(entry.Near, libraryNearFunction{libraryFunction: found, Lang: "go", Body: body})
+		}
+	}
 }
