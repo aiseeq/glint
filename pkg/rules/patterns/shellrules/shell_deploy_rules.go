@@ -127,9 +127,6 @@ func newShellRuleIn(category, name, description string, severity core.Severity, 
 	return &shellRule{BaseRule: rules.NewBaseRule(name, category, description, severity), check: check}
 }
 
-// errexitSetting is set -e in any spelling.
-var errexitSetting = regexp.MustCompile(`(?m)^\s*set\s+(?:-[a-zA-Z]*e[a-zA-Z]*\b|-o\s+errexit\b)`)
-
 var (
 	successMessage = regexp.MustCompile(`(?i)^(?:log_?(?:success|ok|done)\b|(?:echo|printf)\b.*\b(?:success|succeeded|switched|done|completed|ready|ok)\b)`)
 	testCommand    = regexp.MustCompile(`^(?:\[\[?|test\b|!)`)
@@ -137,10 +134,11 @@ var (
 	conditionStart = regexp.MustCompile(`^(?:if|elif|while|until)\b`)
 )
 
-// checkAndListFailurePasses reports, in a script under set -e, a && list of
-// commands ended by a newline or ; and followed by a success message.
+// checkAndListFailurePasses reports, under set -e, a && list of commands
+// ended by a newline or ; and followed by a success message.
 func checkAndListFailurePasses(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	if src.Make || !errexitSetting.MatchString(strings.Join(src.Ctx.Lines, "\n")) {
+	options := scriptOptionsOf(src)
+	if options == nil {
 		return nil
 	}
 	var out []*core.Violation
@@ -161,7 +159,7 @@ func checkAndListFailurePasses(r *shellRule, src *patternkit.ShellSource) []*cor
 			continue
 		}
 		next := patternkit.CommandPrefix.ReplaceAllString(steps[end+1].Text, "")
-		if !successMessage.MatchString(next) {
+		if !successMessage.MatchString(next) || !options.step(steps[start]).may(stateErrexit, true) {
 			continue
 		}
 		out = appendReport(out, src.Report(r, steps[start].Line,
@@ -471,8 +469,8 @@ func checkPipeProducerStderr(r *shellRule, src *patternkit.ShellSource) []*core.
 				"Keep stderr (drop 2>/dev/null), or capture the output, check the status and fail with the error before parsing"))
 		}
 	}
-	if !src.Make && !errexitSetting.MatchString(strings.Join(src.Ctx.Lines, "\n")) {
-		out = append(out, quietFileProducers(r, src)...)
+	if options := scriptOptionsOf(src); options != nil {
+		out = append(out, quietFileProducers(r, src, options)...)
 	}
 	for name := range piped {
 		for _, l := range src.Body(funcs[name]) {
@@ -495,11 +493,11 @@ var (
 	fileChecked = `\[\[?\s+-s\s+"?`
 )
 
-// quietFileProducers reports, in a script without set -e, a service call, a
+// quietFileProducers reports, where set -e is off, a service call, a
 // container run or a sibling script with stderr sent to /dev/null and stdout
 // to a file, whose status nothing checks and whose file nothing tests for
 // content: a failure leaves an empty file the next steps read as a result.
-func quietFileProducers(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
+func quietFileProducers(r *shellRule, src *patternkit.ShellSource, options *scriptOptions) []*core.Violation {
 	var out []*core.Violation
 	steps := src.Steps()
 	whole := strings.Join(src.Ctx.Lines, "\n")
@@ -515,6 +513,9 @@ func quietFileProducers(r *shellRule, src *patternkit.ShellSource) []*core.Viola
 			continue
 		}
 		if s.Sep == "||" || s.Sep == "&&" || conditionStart.MatchString(s.Text) || (i+1 < len(steps) && strings.Contains(steps[i+1].Text, "$?")) {
+			continue
+		}
+		if !options.step(s).may(stateErrexit, false) {
 			continue
 		}
 		if regexp.MustCompile(fileChecked + regexp.QuoteMeta(strings.Trim(file[1], `"`))).MatchString(whole) {
