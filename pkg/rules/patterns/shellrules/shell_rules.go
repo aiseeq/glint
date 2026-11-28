@@ -92,7 +92,6 @@ func init() {
 var (
 	statusRead       = regexp.MustCompile(`\$\{?\?`)
 	pipeFilters      = map[string]bool{"tee": true, "cat": true, "sed": true, "awk": true, "head": true, "tail": true, "sort": true, "uniq": true, "tr": true, "cut": true, "ts": true, "column": true, "fold": true, "nl": true}
-	pipefailSetting  = regexp.MustCompile(`pipefail`)
 	pipeStatusMarker = regexp.MustCompile(`PIPESTATUS`)
 	newPipeFilters   = map[string]bool{"jq": true, "xargs": true}
 	newPipeProducers = map[string]bool{"psql": true, "curl": true, "ssh": true, "jq": true, "git": true, "docker": true, "kubectl": true, "mysql": true, "aws": true, "gcloud": true, "find": true}
@@ -110,14 +109,20 @@ func checkPipeTailStatus(r *shellRule, src *patternkit.ShellSource) []*core.Viol
 		if !makePipefail {
 			for _, unit := range shellSrc.Units() {
 				segs := patternkit.Segments(unit.Text)
+				var options *shellOptions
 				for k := 1; k < len(segs); k++ {
 					loc := statusRead.FindStringIndex(segs[k].Text)
 					if loc == nil {
 						continue
 					}
 					prev := segs[k-1]
-					if !pipeFilters[lastPipeCommand(prev.Text)] || pipeStatusMarker.MatchString(prev.Text) ||
-						pipefailSetting.MatchString(unit.Text[:prev.Offset]) {
+					if !pipeFilters[lastPipeCommand(prev.Text)] || pipeStatusMarker.MatchString(prev.Text) {
+						continue
+					}
+					if options == nil {
+						options = unitShellOptions(shellSrc, unit)
+					}
+					if options.pipefailAt(prev.Offset + len(prev.Text) - len(strings.TrimLeft(prev.Text, " \t\n"))) {
 						continue
 					}
 					line := unit.LineAt(segs[k].Offset + loc[0])
@@ -154,15 +159,11 @@ func shellsOf(src *patternkit.ShellSource) []*patternkit.ShellSource {
 }
 
 type textSpan struct{ start, end int }
-type pipefailEvent struct {
-	offset int
-	active bool
-}
 type shellFacts struct {
-	conditions, heredocs, functions, declarations []textSpan
-	pipefail                                      []pipefailEvent
-	captures                                      []*syntax.Assign
-	tree                                          *syntax.File
+	conditions, heredocs, declarations []textSpan
+	captures                           []*syntax.Assign
+	tree                               *syntax.File
+	options                            *shellOptions
 }
 
 func (f *shellFacts) hasSpan(spans []textSpan, offset int) bool {
@@ -171,17 +172,7 @@ func (f *shellFacts) hasSpan(spans []textSpan, offset int) bool {
 }
 func (f *shellFacts) inHeredoc(offset int) bool   { return f.hasSpan(f.heredocs, offset) }
 func (f *shellFacts) inCondition(offset int) bool { return f.hasSpan(f.conditions, offset) }
-func (f *shellFacts) pipefailAt(offset int) bool {
-	if f.hasSpan(f.functions, offset) {
-		for _, event := range f.pipefail {
-			if event.active {
-				return true
-			}
-		}
-	}
-	i := sort.Search(len(f.pipefail), func(i int) bool { return f.pipefail[i].offset > offset })
-	return i > 0 && f.pipefail[i-1].active
-}
+func (f *shellFacts) pipefailAt(offset int) bool  { return f.options.pipefailAt(offset) }
 
 func newPipeTailFindings(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
 	units := src.Units()
@@ -192,16 +183,16 @@ func newPipeTailFindings(r *shellRule, src *patternkit.ShellSource) []*core.Viol
 	}
 	var out []*core.Violation
 	makePipefail := makeSetsPipefail(src)
+	script := scriptOptionsOf(src)
 	for _, unit := range units {
-		facts := inspectShellUnit(unit.Text)
+		var facts *shellFacts
+		if script != nil {
+			facts = indexShellFacts(script.tree, script.options)
+		} else if tree := parseShellUnit(unit.Text); tree != nil {
+			facts = indexShellFacts(tree, newShellOptions(tree, initialOptions(src)))
+		}
 		if facts == nil { // The $? forms above read the text of such a unit.
 			continue
-		}
-		if makePipefail {
-			facts.pipefail = append([]pipefailEvent{{offset: 0, active: true}}, facts.pipefail...)
-		}
-		if !src.Graft && shebangSetsPipefail(strings.Join(src.Ctx.Lines, "\n")) {
-			facts.pipefail = append([]pipefailEvent{{offset: 0, active: true}}, facts.pipefail...)
 		}
 		if !makePipefail {
 			out = append(out, producerPipeFindingsFromTree(r, src, unit, facts)...)
@@ -214,16 +205,24 @@ func newPipeTailFindings(r *shellRule, src *patternkit.ShellSource) []*core.Viol
 
 var oneShellDirective = regexp.MustCompile(`(?m)^\.ONESHELL\s*:`)
 
-// inspectShellUnit parses once and indexes the syntax ranges used by this rule.
-func inspectShellUnit(text string) *shellFacts {
-	f := &shellFacts{}
+// parseShellUnit parses a unit; nil for a unit that does not parse.
+func parseShellUnit(text string) *syntax.File {
 	file, err := syntax.NewParser().Parse(strings.NewReader(text), "")
 	if err != nil {
 		// Expected for a unit outside the bash grammar (zsh, a template):
 		// without its syntax tree the new forms leave it alone.
 		return nil
 	}
-	f.tree = file
+	return file
+}
+
+// indexShellFacts indexes the syntax ranges used by this rule; nil without a
+// tree.
+func indexShellFacts(file *syntax.File, options *shellOptions) *shellFacts {
+	if file == nil {
+		return nil
+	}
+	f := &shellFacts{tree: file, options: options}
 	syntax.Walk(file, func(n syntax.Node) bool {
 		switch x := n.(type) {
 		case *syntax.IfClause:
@@ -238,24 +237,16 @@ func inspectShellUnit(text string) *shellFacts {
 			if x.Hdoc != nil {
 				f.heredocs = append(f.heredocs, textSpan{int(x.Hdoc.Pos().Offset()), int(x.Hdoc.End().Offset())})
 			}
-		case *syntax.CallExpr:
-			if active, recognized := callPipefailState(x); recognized {
-				f.pipefail = append(f.pipefail, pipefailEvent{int(x.Pos().Offset()), active})
-			}
 		case *syntax.Assign:
 			f.captures = append(f.captures, x)
 		case *syntax.DeclClause:
 			f.declarations = append(f.declarations, textSpan{int(x.Pos().Offset()), int(x.End().Offset())})
-		case *syntax.FuncDecl:
-			f.functions = append(f.functions, textSpan{int(x.Pos().Offset()), int(x.End().Offset())})
 		}
 		return true
 	})
 	f.conditions = mergeSpans(f.conditions)
 	f.heredocs = mergeSpans(f.heredocs)
-	f.functions = mergeSpans(f.functions)
 	f.declarations = mergeSpans(f.declarations)
-	sort.Slice(f.pipefail, func(i, j int) bool { return f.pipefail[i].offset < f.pipefail[j].offset })
 	return f
 }
 
@@ -274,87 +265,12 @@ func mergeSpans(spans []textSpan) []textSpan {
 	return merged
 }
 
-func callPipefailState(c *syntax.CallExpr) (active, recognized bool) {
-	if len(c.Args) == 0 {
-		return false, false
-	}
-	commandIndex := 0
-	command := wordLit(c.Args[commandIndex])
-	if command == "builtin" && len(c.Args) > 1 {
-		commandIndex++
-		command = wordLit(c.Args[commandIndex])
-	}
-	if command != "set" && command != "shopt" {
-		return false, false
-	}
-	mode := byte(0)
-	hasOptionMode, query := false, false
-	for i := commandIndex + 1; i < len(c.Args); i++ {
-		arg := wordLit(c.Args[i])
-		if arg == "" {
-			continue
-		}
-		if arg[0] == '-' || arg[0] == '+' {
-			if command == "set" {
-				if arg == "-o" || arg == "+o" {
-					if i+1 < len(c.Args) && wordLit(c.Args[i+1]) == "pipefail" {
-						return arg[0] == '-', true
-					}
-					continue
-				}
-				if strings.Contains(arg[1:], "o") {
-					mode = arg[0]
-					hasOptionMode = true
-				}
-			} else {
-				flags := arg[1:]
-				if strings.Contains(flags, "q") {
-					query = true
-				}
-				if strings.Contains(flags, "s") {
-					mode = '-'
-				} else if strings.Contains(flags, "u") {
-					mode = '+'
-				}
-				if arg == "-o" || arg == "+o" {
-					hasOptionMode = true
-					continue
-				}
-				if strings.Contains(flags, "o") {
-					hasOptionMode = true
-				}
-			}
-			continue
-		}
-		if arg == "pipefail" && hasOptionMode {
-			if command == "shopt" && (query || mode == 0) {
-				return false, false
-			}
-			return mode == '-', true
-		}
-	}
-	return false, false
-}
-
 func makeSetsPipefail(src *patternkit.ShellSource) bool {
-	return src.Make && (pipefailSetting.MatchString(src.MakeFlags) || pipefailSetting.MatchString(src.MakeShell))
-}
-
-func shebangSetsPipefail(text string) bool {
-	first, _, _ := strings.Cut(text, "\n")
-	if !strings.HasPrefix(first, "#!") {
+	if !src.Make {
 		return false
 	}
-	args := strings.Fields(strings.TrimSpace(strings.TrimPrefix(first, "#!")))
-	for i, arg := range args {
-		if arg == "pipefail" {
-			return true
-		}
-		if strings.HasPrefix(arg, "-") && strings.Contains(arg[1:], "o") && i+1 < len(args) && args[i+1] == "pipefail" {
-			return true
-		}
-	}
-	return false
+	on, _ := optionChangesTurn(makeOptionChanges(src), "pipefail")
+	return on
 }
 
 type shellPipeline struct {
@@ -499,11 +415,11 @@ func capturedProducerPipesFromTree(r *shellRule, src *patternkit.ShellSource, un
 		if start < 0 || end > len(unit.Text) || start >= end {
 			continue
 		}
-		bodyFacts := inspectShellUnit(unit.Text[start:end])
-		if bodyFacts == nil {
+		body := parseShellUnit(unit.Text[start:end])
+		if body == nil {
 			continue
 		}
-		pipes := shellPipelines(bodyFacts.tree, unit.Text[start:end])
+		pipes := shellPipelines(body, unit.Text[start:end])
 		if len(pipes) == 0 {
 			continue
 		}
@@ -517,7 +433,8 @@ func capturedProducerPipesFromTree(r *shellRule, src *patternkit.ShellSource, un
 			continue
 		}
 		checked := facts.inCondition(int(a.Pos().Offset())) || assignmentStatusChecked(unit.Text, int(a.End().Offset()), a.Name.Value)
-		if !checked || facts.inHeredoc(start) || facts.pipefailAt(start) {
+		// pipefail where the pipeline runs: $(set -o pipefail; a | b) has it.
+		if !checked || facts.inHeredoc(start) || facts.pipefailAt(start+p.start) {
 			continue
 		}
 		if strings.Contains(unit.Text[end:], "PIPESTATUS") {
@@ -671,26 +588,30 @@ var failingProducers = map[string]bool{
 }
 
 // capturedPipeTails reports a function captured with $(...) whose last
-// command is a pipeline from a command that can fail into a filter, with no
-// pipefail in the script: the function returns the filter's 0 and an empty
-// value, and the caller takes a failure for an absent result.
+// command is a pipeline from a command that can fail into a filter, with
+// pipefail off where that pipeline runs in some call: the function returns
+// the filter's 0 and an empty value, and the caller takes a failure for an
+// absent result.
 func capturedPipeTails(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	if src.Make || scriptSetsPipefail(src) {
+	if src.Make {
 		return nil
 	}
 	funcs := src.Functions()
 	captured := capturedFunctions(src, funcs)
 	names := slices.Sorted(maps.Keys(captured))
+	var options *scriptOptions
 	var out []*core.Violation
 	for _, name := range names {
-		body := src.Body(funcs[name])
+		fn := funcs[name]
+		body := src.Body(fn)
 		if len(body) == 0 {
 			continue
 		}
-		last := body[len(body)-1]
-		if strings.TrimSpace(last.Text) == "}" && len(body) > 1 {
-			last = body[len(body)-2]
+		index := len(body) - 1
+		if strings.TrimSpace(body[index].Text) == "}" && len(body) > 1 {
+			index--
 		}
+		last := body[index]
 		segs := patternkit.Segments(last.Text)
 		if len(segs) == 0 {
 			continue
@@ -701,42 +622,21 @@ func capturedPipeTails(r *shellRule, src *patternkit.ShellSource) []*core.Violat
 		if !pipeFilters[filter] || !failingProducers[producer] || pipeStatusMarker.MatchString(tail.Text) {
 			continue
 		}
+		if options == nil {
+			options = unitOptionsOf(src)
+		}
+		source, offset := fn.First+index, tail.Offset
+		if index == 0 { // the body on the definition line, after its {
+			offset = max(strings.LastIndex(src.Lines[source].Text, tail.Text), 0)
+		}
+		if !options.at(source, offset).may(statePipefail, false) {
+			continue
+		}
 		out = appendReport(out, src.Report(r, last.LineAt(tail.Offset),
 			name+" is captured with $(...) and ends in "+producer+" | ... | "+filter+" — without pipefail a failed "+producer+" returns the filter's 0 and an empty value",
 			"Set -o pipefail in the function or the script, or capture "+producer+" alone and check its status"))
 	}
 	return out
-}
-
-// scriptSetsPipefail reports pipefail set in the script itself, outside the
-// heredocs it sends to other shells.
-func scriptSetsPipefail(src *patternkit.ShellSource) bool {
-	terminator := ""
-	lines := src.Ctx.Lines
-	if src.Graft {
-		lines = make([]string, 0, len(src.Lines))
-		for _, line := range src.Lines {
-			lines = append(lines, line.Text)
-		}
-	}
-	for _, line := range lines {
-		if terminator != "" {
-			if strings.TrimSpace(line) == terminator {
-				terminator = ""
-			}
-			continue
-		}
-		if strings.HasPrefix(strings.TrimSpace(line), "#") {
-			continue // a usage comment may show a heredoc
-		}
-		if m := heredocStart.FindStringSubmatch(line); m != nil {
-			terminator = m[1]
-		}
-		if pipefailSetting.MatchString(line) {
-			return true
-		}
-	}
-	return false
 }
 
 var gluedRedirect = regexp.MustCompile(`[A-Za-z_.-]([12])>(?:&[0-9]|/dev/null|\s|$)`)

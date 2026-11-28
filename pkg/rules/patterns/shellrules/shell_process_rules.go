@@ -678,15 +678,56 @@ var (
 // checkTrapRemovesResults reports trap 'rm -rf "$dir"' EXIT when the results
 // are copied out of dir only after an exit on failure.
 func checkTrapRemovesResults(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	if src.Make {
+	options := scriptOptionsOf(src)
+	if options == nil {
 		return nil
 	}
-	errexit := errexitSetting.MatchString(strings.Join(src.Ctx.Lines, "\n"))
-	// The copies of each line and its exit on failure are found once, on
-	// the first trap, not again for every trap above the line.
-	var copies [][]lineCopy
-	var exits []bool
+	traps := removingTraps(src)
+	if len(traps) == 0 {
+		return nil
+	}
+	// The copies of each line and its exit on failure are found once for
+	// all the traps. Under set -e any failed command between the trap and
+	// the copy exits; without it only an explicit exit does.
+	lines := make([]trapLaterLine, len(src.Lines))
+	for j, later := range src.Lines {
+		lines[j] = trapLaterLine{lineCopies(later.Text), failExit.MatchString(later.Text) || options.line(src, j).may(stateErrexit, true)}
+	}
 	var out []*core.Violation
+	for _, trap := range traps {
+		failed := options.line(src, trap.index).may(stateErrexit, true)
+		for _, later := range lines[trap.index+1:] {
+			if copiesOut(later.copies, trap.fromDir, trap.inDir) {
+				if failed {
+					out = appendReport(out, src.Report(r, src.Lines[trap.index].LineAt(0),
+						"The trap removes $"+trap.dir+" on exit, and a failed run exits before the results are copied out of it — the log of the failure is removed with the directory",
+						"Copy the results out in the trap before removing the directory, or copy them before any exit on failure"))
+				}
+				break
+			}
+			failed = failed || later.exits
+		}
+	}
+	return out
+}
+
+// removingTrap is a trap that removes a directory on exit: the logical line
+// it is on and the patterns of a path from and in the directory.
+type removingTrap struct {
+	index          int
+	dir            string
+	fromDir, inDir *regexp.Regexp
+}
+
+// trapLaterLine is what a line after a trap does: its copies, and whether a
+// failure there exits.
+type trapLaterLine struct {
+	copies []lineCopy
+	exits  bool
+}
+
+func removingTraps(src *patternkit.ShellSource) []removingTrap {
+	var out []removingTrap
 	for i, l := range src.Lines {
 		m := trapRemove.FindStringSubmatch(l.Text)
 		if m == nil || shellCopyCommandRe.MatchString(m[2]) {
@@ -696,26 +737,9 @@ func checkTrapRemovesResults(r *shellRule, src *patternkit.ShellSource) []*core.
 		if dir == nil {
 			continue
 		}
-		fromDir := regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?/`)
-		inDir := regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?(?:/|"|$)`)
-		if copies == nil {
-			copies, exits = make([][]lineCopy, len(src.Lines)), make([]bool, len(src.Lines))
-			for j, later := range src.Lines {
-				copies[j], exits[j] = lineCopies(later.Text), failExit.MatchString(later.Text)
-			}
-		}
-		failed := errexit
-		for j := i + 1; j < len(src.Lines); j++ {
-			if copiesOut(copies[j], fromDir, inDir) {
-				if failed {
-					out = appendReport(out, src.Report(r, l.LineAt(0),
-						"The trap removes $"+dir[1]+" on exit, and a failed run exits before the results are copied out of it — the log of the failure is removed with the directory",
-						"Copy the results out in the trap before removing the directory, or copy them before any exit on failure"))
-				}
-				break
-			}
-			failed = failed || exits[j]
-		}
+		out = append(out, removingTrap{i, dir[1],
+			regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?/`),
+			regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?(?:/|"|$)`)})
 	}
 	return out
 }

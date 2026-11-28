@@ -204,17 +204,11 @@ func excuses(handler string) bool {
 	return word == "true" || word == ":"
 }
 
-// sourcePipefail reports pipefail in effect for the file.
-func sourcePipefail(src *patternkit.ShellSource) bool {
-	if src.Make {
-		return pipefailSetting.MatchString(src.MakeFlags) || pipefailSetting.MatchString(src.MakeShell)
-	}
-	return scriptSetsPipefail(src)
-}
-
-// checkPipelineOrTrue reports cmd | grep ... || true under pipefail.
+// checkPipelineOrTrue reports cmd | grep ... || true under pipefail: the
+// shell of a make file, or pipefail where the pipeline of a script runs.
 func checkPipelineOrTrue(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	if !sourcePipefail(src) {
+	options := scriptOptionsOf(src)
+	if options == nil && !makeSetsPipefail(src) {
 		return nil
 	}
 	var out []*core.Violation
@@ -226,6 +220,9 @@ func checkPipelineOrTrue(r *shellRule, src *patternkit.ShellSource) []*core.Viol
 		}
 		elements := pipeElements(patternkit.CommandPrefix.ReplaceAllString(s.Text, ""))
 		if len(elements) < 2 || commandWord(elements[len(elements)-1]) != "grep" || commandWord(elements[0]) == "grep" {
+			continue
+		}
+		if options != nil && !options.step(s).may(statePipefail, true) {
 			continue
 		}
 		out = appendReport(out, src.Report(r, steps[i+1].Line,
@@ -240,7 +237,8 @@ var invertedGrep = regexp.MustCompile(`^grep\s+(?:-[A-Za-z]*v[A-Za-z]*|--invert-
 // checkGrepFilterExits reports a pipeline ending in grep -v under set -e,
 // as a statement or as a plain capture.
 func checkGrepFilterExits(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	if src.Make || !errexitSetting.MatchString(strings.Join(src.Ctx.Lines, "\n")) {
+	options := scriptOptionsOf(src)
+	if options == nil {
 		return nil
 	}
 	var out []*core.Violation
@@ -260,7 +258,7 @@ func checkGrepFilterExits(r *shellRule, src *patternkit.ShellSource) []*core.Vio
 			text = m[2]
 		}
 		elements := pipeElements(text)
-		if len(elements) < 2 || !invertedGrep.MatchString(sudoPrefix.ReplaceAllString(elements[len(elements)-1], "")) {
+		if len(elements) < 2 || !invertedGrep.MatchString(sudoPrefix.ReplaceAllString(elements[len(elements)-1], "")) || !options.step(s).may(stateErrexit, true) {
 			continue
 		}
 		out = appendReport(out, src.Report(r, s.Line,
@@ -348,11 +346,12 @@ var (
 	echoStep    = regexp.MustCompile(`^(?:echo|printf|log\w*)\b`)
 )
 
-// checkLoopIgnoresStepFailure reports, in a script without set -e, a loop
-// step that runs a script or a service into a log and checks nothing, when a
-// message follows the loop.
+// checkLoopIgnoresStepFailure reports, where set -e is off, a loop step that
+// runs a script or a service into a log and checks nothing, when a message
+// follows the loop.
 func checkLoopIgnoresStepFailure(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	if src.Make || errexitSetting.MatchString(strings.Join(src.Ctx.Lines, "\n")) {
+	options := scriptOptionsOf(src)
+	if options == nil {
 		return nil
 	}
 	funcs := src.Functions()
@@ -372,7 +371,7 @@ func checkLoopIgnoresStepFailure(r *shellRule, src *patternkit.ShellSource) []*c
 				}
 				pending = nil
 			}
-		case depth > 0 && uncheckedStep(steps, i, text, funcs):
+		case depth > 0 && uncheckedStep(steps, i, text, funcs) && options.step(s).may(stateErrexit, false):
 			pending = append(pending, i)
 		}
 	}
@@ -423,7 +422,8 @@ var (
 // checkCheckOutputDiscarded reports, under set -e, a test, vet or build run
 // with stdout to /dev/null and no handler.
 func checkCheckOutputDiscarded(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	if src.Make || !errexitSetting.MatchString(strings.Join(src.Ctx.Lines, "\n")) {
+	options := scriptOptionsOf(src)
+	if options == nil {
 		return nil
 	}
 	var out []*core.Violation
@@ -432,7 +432,7 @@ func checkCheckOutputDiscarded(r *shellRule, src *patternkit.ShellSource) []*cor
 			continue
 		}
 		text := envPrefix.ReplaceAllString(patternkit.CommandPrefix.ReplaceAllString(s.Text, ""), "")
-		if !checkRun.MatchString(text) || !stdoutDiscard.MatchString(text) || stdoutElsewise.MatchString(stdoutDiscard.ReplaceAllString(text, " ")) {
+		if !checkRun.MatchString(text) || !stdoutDiscard.MatchString(text) || stdoutElsewise.MatchString(stdoutDiscard.ReplaceAllString(text, " ")) || !options.step(s).may(stateErrexit, true) {
 			continue
 		}
 		out = appendReport(out, src.Report(r, s.Line,

@@ -164,7 +164,7 @@ type trapReader struct {
 func newTrapReader(file *syntax.File) trapReader {
 	braces := true
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if call, ok := node.(*syntax.CallExpr); ok && setsBracesOff(call.Args) {
+		if call, ok := node.(*syntax.CallExpr); ok && setsBracesOff(call) {
 			braces = false
 		}
 		return braces
@@ -174,22 +174,9 @@ func newTrapReader(file *syntax.File) trapReader {
 
 // setsBracesOff reports whether the command is set +B or set +o braceexpand,
 // alone or among other options.
-func setsBracesOff(args []*syntax.Word) bool {
-	args, _ = unprefixed(args)
-	if len(args) == 0 || wordLit(args[0]) != "set" {
-		return false
-	}
-	for i := 1; i < len(args); i++ {
-		option := wordLit(args[i])
-		switch {
-		case option == "+o" || option == "-o":
-			if i+1 < len(args) && option == "+o" && wordLit(args[i+1]) == "braceexpand" {
-				return true
-			}
-			i++
-		case option == "" || option == "-" || option == "--" || option[0] != '+' && option[0] != '-':
-			return false
-		case option[0] == '+' && strings.Contains(option, "B"):
+func setsBracesOff(call *syntax.CallExpr) bool {
+	for _, change := range callOptionChanges(call) {
+		if change.name == "braceexpand" && !change.on {
 			return true
 		}
 	}

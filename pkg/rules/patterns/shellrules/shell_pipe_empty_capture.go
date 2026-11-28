@@ -23,17 +23,16 @@ type emptyTestWord struct {
 	neg  bool
 }
 type emptyCaptureReport struct {
-	r       *shellRule
-	src     *patternkit.ShellSource
-	unit    patternkit.ShellLine
-	facts   *shellFacts
-	errexit captureErrexitIndex
-	out     []*core.Violation
-	seen    map[int]bool
+	r     *shellRule
+	src   *patternkit.ShellSource
+	unit  patternkit.ShellLine
+	facts *shellFacts
+	out   []*core.Violation
+	seen  map[int]bool
 }
 
 func emptyCapturePipeFindings(r *shellRule, src *patternkit.ShellSource, unit patternkit.ShellLine, facts *shellFacts) []*core.Violation {
-	report := emptyCaptureReport{r: r, src: src, unit: unit, facts: facts, errexit: indexCaptureErrexit(facts.tree, unit.Text, src), seen: make(map[int]bool)}
+	report := emptyCaptureReport{r: r, src: src, unit: unit, facts: facts, seen: make(map[int]bool)}
 	tests, loops, rejected := collectEmptyCaptureConsumers(facts.tree)
 	uses := reportEmptyTestConsumers(&report, facts, tests, rejected)
 	reportEmptyAssignments(&report, facts, uses)
@@ -199,211 +198,7 @@ func reportEmptyAssignments(report *emptyCaptureReport, facts *shellFacts, uses 
 
 func assignmentSafeFromErrexit(report *emptyCaptureReport, assignment *syntax.Assign) bool {
 	offset := int(assignment.Pos().Offset())
-	return !report.facts.hasSpan(report.facts.declarations, offset) && report.facts.pipefailAt(offset) && report.errexit.enabled(assignment)
-}
-
-type captureErrexitScope struct {
-	function string
-	initial  bool
-	events   []captureErrexitEvent
-}
-
-type captureErrexitEvent struct {
-	offset int
-	active bool
-}
-
-type captureErrexitIndex struct {
-	scopeByAssign map[*syntax.Assign]*captureErrexitScope
-}
-
-func (i captureErrexitIndex) enabled(assignment *syntax.Assign) bool {
-	scope := i.scopeByAssign[assignment]
-	if scope == nil {
-		return false
-	}
-	state := scope.initial
-	offset := int(assignment.Pos().Offset())
-	for _, event := range scope.events {
-		if event.offset > offset {
-			break
-		}
-		state = event.active
-	}
-	return state
-}
-
-func indexCaptureErrexit(tree *syntax.File, text string, src *patternkit.ShellSource) captureErrexitIndex {
-	index := captureErrexitIndex{scopeByAssign: make(map[*syntax.Assign]*captureErrexitScope)}
-	if tree == nil {
-		return index
-	}
-	initialText := text
-	if !src.Make && !src.Graft {
-		initialText = string(src.Ctx.Content)
-	}
-	top := &captureErrexitScope{initial: captureInitialErrexit(initialText, src)}
-	scopes := []*captureErrexitScope{top}
-	marks := make([]bool, 0, 32)
-	var functionCalls []captureFunctionCall
-	var functions []*captureErrexitScope
-	syntax.Walk(tree, func(node syntax.Node) bool {
-		if node == nil {
-			isScope := marks[len(marks)-1]
-			marks = marks[:len(marks)-1]
-			if isScope {
-				scopes = scopes[:len(scopes)-1]
-			}
-			return true
-		}
-		_, function := node.(*syntax.FuncDecl)
-		_, subshell := node.(*syntax.Subshell)
-		_, substitution := node.(*syntax.CmdSubst)
-		isScope := function || subshell || substitution
-		if isScope {
-			parent := scopes[len(scopes)-1]
-			start := int(node.Pos().Offset())
-			child := &captureErrexitScope{initial: captureScopeState(parent, start)}
-			if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil {
-				child.function = decl.Name.Value
-				functions = append(functions, child)
-			}
-			scopes = append(scopes, child)
-		}
-		current := scopes[len(scopes)-1]
-		switch x := node.(type) {
-		case *syntax.CallExpr:
-			if active, ok := captureSetErrexit(x); ok {
-				current.events = append(current.events, captureErrexitEvent{int(x.End().Offset()), active})
-			}
-			if len(scopes) == 1 && len(x.Args) > 0 {
-				functionCalls = append(functionCalls, captureFunctionCall{name: wordLit(x.Args[0]), offset: int(x.Pos().Offset())})
-			}
-		case *syntax.Assign:
-			index.scopeByAssign[x] = current
-		}
-		marks = append(marks, isScope)
-		return true
-	})
-	for _, function := range functions {
-		for _, call := range functionCalls {
-			if call.name == function.function {
-				function.initial = captureScopeState(top, call.offset)
-			}
-		}
-	}
-	return index
-}
-
-type captureFunctionCall struct {
-	name   string
-	offset int
-}
-
-func captureScopeState(scope *captureErrexitScope, offset int) bool {
-	state := scope.initial
-	for _, event := range scope.events {
-		if event.offset >= offset {
-			break
-		}
-		state = event.active
-	}
-	return state
-}
-
-func captureSetErrexit(call *syntax.CallExpr) (active, recognized bool) {
-	if len(call.Args) == 0 {
-		return false, false
-	}
-	commandIndex := 0
-	command := wordLit(call.Args[0])
-	if command == "builtin" && len(call.Args) > 1 {
-		commandIndex++
-		command = wordLit(call.Args[commandIndex])
-	}
-	if command != "set" {
-		return false, false
-	}
-	for i := commandIndex + 1; i < len(call.Args); i++ {
-		arg := wordLit(call.Args[i])
-		if arg == "--" {
-			break
-		}
-		if arg == "-o" || arg == "+o" {
-			if i+1 < len(call.Args) && wordLit(call.Args[i+1]) == "errexit" {
-				active, recognized = arg[0] == '-', true
-			}
-			i++
-			continue
-		}
-		if len(arg) < 2 || (arg[0] != '-' && arg[0] != '+') {
-			break
-		}
-		if strings.ContainsRune(arg[1:], 'e') {
-			active, recognized = arg[0] == '-', true
-		}
-	}
-	return active, recognized
-}
-
-func captureInitialErrexit(text string, src *patternkit.ShellSource) bool {
-	if src.Make {
-		return makeOptionsEnableErrexit(src.MakeFlags, false) || makeOptionsEnableErrexit(src.MakeShell, true)
-	}
-	lineEnd := strings.IndexByte(text, '\n')
-	if lineEnd < 0 {
-		lineEnd = len(text)
-	}
-	line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text[:lineEnd]), "#!"))
-	if !strings.HasPrefix(strings.TrimSpace(text[:lineEnd]), "#!") {
-		return false
-	}
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return false
-	}
-	if strings.HasSuffix(fields[0], "/env") {
-		fields = fields[1:]
-		if len(fields) > 0 && fields[0] == "-S" {
-			fields = fields[1:]
-		}
-	}
-	if len(fields) < 2 {
-		return false
-	}
-	return captureOptionState(fields[1:])
-}
-
-func makeOptionsEnableErrexit(options string, hasShell bool) bool {
-	fields := strings.Fields(options)
-	if hasShell && len(fields) > 0 {
-		fields = fields[1:]
-	}
-	return captureOptionState(fields)
-}
-
-func captureOptionState(args []string) bool {
-	active := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		if arg == "-o" || arg == "+o" {
-			if i+1 < len(args) && args[i+1] == "errexit" {
-				active = arg[0] == '-'
-			}
-			i++
-			continue
-		}
-		if len(arg) < 2 || (arg[0] != '-' && arg[0] != '+') {
-			break
-		}
-		if strings.ContainsRune(arg[1:], 'e') {
-			active = arg[0] == '-'
-		}
-	}
-	return active
+	return !report.facts.hasSpan(report.facts.declarations, offset) && report.facts.options.strictAt(offset)
 }
 
 func assignmentHasEmptyTest(uses map[emptyCaptureKey][]emptyCaptureUse, unit patternkit.ShellLine, assignment *syntax.Assign) bool {

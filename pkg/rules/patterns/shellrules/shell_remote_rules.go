@@ -301,7 +301,7 @@ func independentCommands(body string) bool {
 		if text == "" {
 			continue
 		}
-		if errexitSetting.MatchString(text) {
+		if textTurnsErrexitOn(text) {
 			return false
 		}
 		if !joined && !blockKeywords[patternkit.FirstShellWord(text)] {
@@ -324,15 +324,14 @@ var (
 // checkFallbackEchoDuplicates reports $(cmd || echo LITERAL) where cmd ends
 // in a command that prints its answer when it fails.
 func checkFallbackEchoDuplicates(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	pipefail := !src.Make && scriptSetsPipefail(src)
 	var out []*core.Violation
-	for _, l := range src.Lines {
+	for k, l := range src.Lines {
 		for _, m := range fallbackEchoLiteral.FindAllStringSubmatchIndex(l.Text, -1) {
 			if strings.Trim(l.Text[m[2]:m[3]], `"'`) == "" {
 				continue // an empty echo leaves nothing after the capture
 			}
 			left := captureBefore(l.Text, m[0])
-			if left == "" || !printsOnFailure(left, pipefail) {
+			if left == "" || !printsOnFailure(left, linePipefail(src, k, m[0])) {
 				continue
 			}
 			out = appendReport(out, src.Report(r, l.LineAt(m[0]),
@@ -630,7 +629,6 @@ func fileTested(lines []string, target string) bool {
 }
 
 var (
-	errexitOff     = regexp.MustCompile(`^set\s+\+[a-zA-Z]*e\b|^set\s+\+o\s+errexit\b`)
 	plainCapture   = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=\$\((.*)\)$`)
 	failingAnswer  = regexp.MustCompile(`\bsystemctl\s+(?:--\S+\s+)*is-(?:active|enabled|failed)\b|\bgrep\b|\bcurl\b[^|]*(?:\s-[A-Za-z]*f[A-Za-z]*\b|--fail\b)`)
 	valueTestStart = regexp.MustCompile(`^(?:if|elif|\[\[?|test|case)\b`)
@@ -639,26 +637,20 @@ var (
 // checkSetEBeforeHandler reports, under set -e, VAR=$(cmd) whose cmd fails
 // for the value the next lines test VAR for.
 func checkSetEBeforeHandler(r *shellRule, src *patternkit.ShellSource) []*core.Violation {
-	if src.Make {
+	options := scriptOptionsOf(src)
+	if options == nil {
 		return nil
 	}
-	pipefail := scriptSetsPipefail(src)
 	funcs := src.Functions()
 	var out []*core.Violation
-	errexit := false
 	for i, l := range src.Lines {
 		text := patternkit.WithoutComment(strings.TrimSpace(l.Text))
-		switch {
-		case errexitSetting.MatchString(text):
-			errexit = true
-		case errexitOff.MatchString(text):
-			errexit = false
-		}
 		m := plainCapture.FindStringSubmatch(text)
-		if !errexit || m == nil || strings.Contains(m[2], "||") || len(patternkit.Segments(text)) > 1 {
+		if m == nil || strings.Contains(m[2], "||") || len(patternkit.Segments(text)) > 1 {
 			continue
 		}
-		if !failsOnAnswer(m[2], pipefail) || conditionalCaller(src, funcs, i) {
+		states := options.line(src, i)
+		if !states.may(stateErrexit, true) || !failsOnAnswer(m[2], states.may(statePipefail, true)) || conditionalCaller(src, funcs, i) {
 			continue
 		}
 		message := "Under set -e the capture stops the script when the command fails, and it fails for the very value the next lines test " + m[1] + " for — the handler never runs"
