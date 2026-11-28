@@ -294,6 +294,10 @@ type blockNormalizer struct {
 	info   *types.Info
 	lo, hi token.Pos
 	locals map[types.Object]int
+	// localIDs overrides the number for selected identifier occurrences when
+	// one object represents two values across a reassignment.
+	localIDs    map[*ast.Ident]int
+	localOffset int
 	// packageNames keeps the name of a package-level variable or constant
 	// instead of the placeholder, so two of them do not compare equal.
 	packageNames bool
@@ -305,6 +309,7 @@ type blockNormalizer struct {
 	// inside it declares again: they are the statement's own, as they are in
 	// a copy where no earlier declaration exists.
 	redeclared map[types.Object]bool
+
 	// fieldNames keeps a field path from a value from outside the statement
 	// as the placeholder and the field names: a copy touches the same fields.
 	fieldNames bool
@@ -410,6 +415,10 @@ func (n *blockNormalizer) ident(id *ast.Ident) string {
 	if id.Name == "_" {
 		return "_"
 	}
+	if num, ok := n.localIDs[id]; ok {
+		return "$L" + strconv.Itoa(num)
+	}
+
 	switch obj := n.info.ObjectOf(id).(type) {
 	case *types.Var:
 		if obj.IsField() {
@@ -418,7 +427,7 @@ func (n *blockNormalizer) ident(id *ast.Ident) string {
 		if obj.Pos() >= n.lo && obj.Pos() < n.hi || n.redeclared[obj] {
 			num, ok := n.locals[obj]
 			if !ok {
-				num = len(n.locals)
+				num = len(n.locals) + n.localOffset
 				n.locals[obj] = num
 			}
 			return "$L" + strconv.Itoa(num)
