@@ -49,7 +49,7 @@ func (r *EffortBelowHighRule) AnalyzeFile(ctx *core.FileContext) []*core.Violati
 		if ctx.IsGoFile() {
 			codexFindings, cliValues = goLaunchFindings(ctx)
 		} else {
-			codexFindings, cliValues = jsLaunchFindings(ctx, lines)
+			codexFindings, cliValues = jsLaunchFindings(lines)
 		}
 	}
 
@@ -287,77 +287,107 @@ func goLaunchFindings(ctx *core.FileContext) (map[int]string, map[int]string) {
 	}
 	ast.Inspect(ctx.GoAST, func(n ast.Node) bool {
 		c, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		name := ""
-		switch f := c.Fun.(type) {
-		case *ast.SelectorExpr:
-			name = f.Sel.Name
-		case *ast.Ident:
-			name = f.Name
-		}
-		if !strings.Contains(name, "Command") {
-			return true
-		}
-		vals := make([]string, len(c.Args))
-		literals := make([]bool, len(c.Args))
-		for i, a := range c.Args {
-			if b, ok := a.(*ast.BasicLit); ok && b.Kind == token.STRING {
-				v, e := strconv.Unquote(b.Value)
-				if e == nil {
-					vals[i], literals[i] = v, true
-				}
-			} else if b, ok := a.(*ast.BinaryExpr); ok && b.Op == token.ADD {
-				if lit, ok := b.X.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					if v, e := strconv.Unquote(lit.Value); e == nil {
-						vals[i], literals[i] = v, true
-					}
-				}
-			}
-		}
-		start := -1
-		for i := range vals {
-			if !literals[i] || (vals[i] != "codex" && vals[i] != "codex.exe") {
-				continue
-			}
-			idx, sub := codexSubcommand(vals, literals, i+1)
-			if idx >= 0 && (sub == "exec" || sub == "e") {
-				start = i + 1
-				break
-			}
-		}
-		line := ctx.GoFileSet.Position(c.Pos()).Line
-		if start >= 0 {
-			if hasArg(vals[start:], literals[start:], "--help") || hasArg(vals[start:], literals[start:], "-h") {
-				return true
-			}
-			value, explicit := shellCodexOptions(vals, literals, start)
-			if message := codexEffortMessage(value, explicit); message != "" {
-				codex[line] = message
-			}
-		}
-		commandIndex := 0
-		if name == "CommandContext" {
-			commandIndex = 1
-		}
-		cliCommand := commandIndex < len(vals) && literals[commandIndex] && (strings.EqualFold(vals[commandIndex], "claude") || strings.EqualFold(vals[commandIndex], "opencode") || strings.Contains(strings.ToLower(vals[commandIndex]), "anthropic") || strings.Contains(strings.ToLower(vals[commandIndex]), "openai"))
-		for i := range vals {
-			if !cliCommand || !literals[i] {
-				continue
-			}
-			var next string
-			nextLiteral := i+1 < len(vals) && literals[i+1]
-			if nextLiteral {
-				next = vals[i+1]
-			}
-			if v := effortArgumentValue(vals[i], next, nextLiteral); v != "" {
-				cli[line] = v
-			}
+		if ok {
+			goLaunchCallFindings(ctx, c, codex, cli)
 		}
 		return true
 	})
 	return codex, cli
+}
+
+func goLaunchCallFindings(ctx *core.FileContext, call *ast.CallExpr, codex, cli map[int]string) {
+	name := goCallName(call.Fun)
+	if !strings.Contains(name, "Command") {
+		return
+	}
+	values, literals := goCallArguments(call.Args)
+	line := ctx.GoFileSet.Position(call.Pos()).Line
+	if goCodexLaunchFinding(values, literals, line, codex) {
+		return
+	}
+	goCLIlaunchFinding(values, literals, name, line, cli)
+}
+
+func goCallName(fun ast.Expr) string {
+	switch f := fun.(type) {
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	case *ast.Ident:
+		return f.Name
+	default:
+		return ""
+	}
+}
+
+func goCallArguments(args []ast.Expr) ([]string, []bool) {
+	values, literals := make([]string, len(args)), make([]bool, len(args))
+	for i, arg := range args {
+		literal := arg
+		if binary, ok := arg.(*ast.BinaryExpr); ok && binary.Op == token.ADD {
+			literal = binary.X
+		}
+		basic, ok := literal.(*ast.BasicLit)
+		if !ok || basic.Kind != token.STRING {
+			continue
+		}
+		if value, err := strconv.Unquote(basic.Value); err == nil {
+			values[i], literals[i] = value, true
+		}
+	}
+	return values, literals
+}
+
+func goCodexLaunchFinding(values []string, literals []bool, line int, codex map[int]string) bool {
+	start := -1
+	for i, value := range values {
+		if !literals[i] || (value != "codex" && value != "codex.exe") {
+			continue
+		}
+		idx, sub := codexSubcommand(values, literals, i+1)
+		if idx >= 0 && (sub == "exec" || sub == "e") {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		return false
+	}
+	if hasArg(values[start:], literals[start:], "--help") || hasArg(values[start:], literals[start:], "-h") {
+		return true
+	}
+	value, explicit := shellCodexOptions(values, literals, start)
+	if message := codexEffortMessage(value, explicit); message != "" {
+		codex[line] = message
+	}
+	return false
+}
+
+func goCLIlaunchFinding(values []string, literals []bool, name string, line int, cli map[int]string) {
+	commandIndex := 0
+	if name == "CommandContext" {
+		commandIndex = 1
+	}
+	if commandIndex >= len(values) || !literals[commandIndex] || !goCLICommand(values[commandIndex]) {
+		return
+	}
+	for i, arg := range values {
+		if !literals[i] {
+			continue
+		}
+		var next string
+		nextLiteral := i+1 < len(values) && literals[i+1]
+		if nextLiteral {
+			next = values[i+1]
+		}
+		if value := effortArgumentValue(arg, next, nextLiteral); value != "" {
+			cli[line] = value
+		}
+	}
+}
+
+func goCLICommand(command string) bool {
+	lower := strings.ToLower(command)
+	return strings.EqualFold(command, "claude") || strings.EqualFold(command, "opencode") || strings.Contains(lower, "anthropic") || strings.Contains(lower, "openai")
 }
 
 var (
@@ -455,18 +485,6 @@ func goSettingFindings(ctx *core.FileContext) map[int]string {
 	if file == nil || ctx.GoFileSet == nil {
 		return out
 	}
-	value := func(e ast.Expr) string {
-		if b, ok := e.(*ast.BasicLit); ok && b.Kind == token.STRING {
-			s, err := strconv.Unquote(b.Value)
-			if err != nil { //nolint:error-masking,silent-error-handling // Parsed string literals are valid; malformed AST data is ignored.
-				return ""
-			}
-			if effortValuePattern.MatchString(s) {
-				return strings.ToLower(s)
-			}
-		}
-		return ""
-	}
 	ast.Inspect(file, func(n ast.Node) bool {
 		if n == nil {
 			return false
@@ -474,52 +492,79 @@ func goSettingFindings(ctx *core.FileContext) map[int]string {
 		line := ctx.GoFileSet.Position(n.Pos()).Line
 		switch x := n.(type) {
 		case *ast.KeyValueExpr:
-			key := ""
-			switch k := x.Key.(type) {
-			case *ast.Ident:
-				key = k.Name
-			case *ast.BasicLit:
-				if k.Kind == token.STRING {
-					if decoded, err := strconv.Unquote(k.Value); err == nil {
-						key = decoded
-					}
-				}
-			}
-			if strings.Contains(strings.ToLower(key), "effort") {
-				if v := value(x.Value); v != "" {
-					out[line] = v
-				}
-			}
+			goSettingKeyValue(x, line, out)
 		case *ast.AssignStmt:
-			for i, l := range x.Lhs {
-				if id, ok := l.(*ast.Ident); ok && strings.Contains(strings.ToLower(id.Name), "effort") && i < len(x.Rhs) {
-					if v := value(x.Rhs[i]); v != "" {
-						out[line] = v
-					}
-				}
-			}
-			for i, l := range x.Lhs {
-				if sel, ok := l.(*ast.SelectorExpr); ok && strings.Contains(strings.ToLower(sel.Sel.Name), "effort") && i < len(x.Rhs) {
-					if v := value(x.Rhs[i]); v != "" {
-						out[line] = v
-					}
-				}
-			}
+			goSettingAssignment(x, line, out)
 		case *ast.ValueSpec:
-			if typ, ok := x.Type.(*ast.Ident); ok && strings.Contains(strings.ToLower(typ.Name), "effort") {
-				return true
-			}
-			for i, id := range x.Names {
-				if strings.Contains(strings.ToLower(id.Name), "effort") && i < len(x.Values) {
-					if v := value(x.Values[i]); v != "" {
-						out[line] = v
-					}
-				}
-			}
+			goSettingValueSpec(x, line, out)
 		}
 		return true
 	})
 	return out
+}
+
+func goSettingLiteral(expr ast.Expr) string {
+	literal, ok := expr.(*ast.BasicLit)
+	if !ok || literal.Kind != token.STRING {
+		return ""
+	}
+	value, err := strconv.Unquote(literal.Value)
+	if err != nil { //nolint:error-masking,silent-error-handling // Parsed string literals are valid; malformed AST data is ignored.
+		return ""
+	}
+	if effortValuePattern.MatchString(value) {
+		return strings.ToLower(value)
+	}
+	return ""
+}
+
+func goSettingKeyValue(expr *ast.KeyValueExpr, line int, out map[int]string) {
+	key := ""
+	switch value := expr.Key.(type) {
+	case *ast.Ident:
+		key = value.Name
+	case *ast.BasicLit:
+		if value.Kind == token.STRING {
+			if unquoted, err := strconv.Unquote(value.Value); err == nil {
+				key = unquoted
+			}
+		}
+	}
+	if strings.Contains(strings.ToLower(key), "effort") {
+		if value := goSettingLiteral(expr.Value); value != "" {
+			out[line] = value
+		}
+	}
+}
+
+func goSettingAssignment(assign *ast.AssignStmt, line int, out map[int]string) {
+	for i, lhs := range assign.Lhs {
+		name := ""
+		switch value := lhs.(type) {
+		case *ast.Ident:
+			name = value.Name
+		case *ast.SelectorExpr:
+			name = value.Sel.Name
+		}
+		if strings.Contains(strings.ToLower(name), "effort") && i < len(assign.Rhs) {
+			if value := goSettingLiteral(assign.Rhs[i]); value != "" {
+				out[line] = value
+			}
+		}
+	}
+}
+
+func goSettingValueSpec(spec *ast.ValueSpec, line int, out map[int]string) {
+	if typ, ok := spec.Type.(*ast.Ident); ok && strings.Contains(strings.ToLower(typ.Name), "effort") {
+		return
+	}
+	for i, name := range spec.Names {
+		if strings.Contains(strings.ToLower(name.Name), "effort") && i < len(spec.Values) {
+			if value := goSettingLiteral(spec.Values[i]); value != "" {
+				out[line] = value
+			}
+		}
+	}
 }
 
 // shellFindings parses each logical shell unit once for assignments and model commands.
@@ -530,139 +575,177 @@ func shellFindings(ctx *core.FileContext) (map[int]string, map[int]string) {
 		return settings, codex
 	}
 	if src.Make {
-		for i, line := range ctx.Lines {
-			if strings.Contains(line, "\t") {
-				continue
-			}
-			trim := strings.TrimSpace(line)
-			key, rhs, found := strings.Cut(trim, "?=")
-			if !found {
-				key, rhs, found = strings.Cut(trim, ":=")
-			}
-			if !found {
-				key, rhs, _ = strings.Cut(trim, "=")
-			}
-			if strings.Contains(strings.ToLower(key), "effort") {
-				if v := literalEffort(strings.TrimSpace(rhs)); v != "" {
-					settings[i+1] = v
-				}
-			}
-		}
+		settings = makeEffortFindings(ctx.Lines)
 	}
 	for _, unit := range src.Units() {
 		file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(unit.Text), ctx.Path)
 		if err != nil { //nolint:silent-error-handling // Parse each logical unit independently; a malformed one must not hide later lines.
 			continue
 		}
-		heredocParams := map[int]bool{}
-		outputParams := map[int]bool{}
-		syntax.Walk(file, func(n syntax.Node) bool {
-			if call, ok := n.(*syntax.CallExpr); ok && len(call.Args) > 0 {
-				name, literal := wordValue(call.Args[0])
-				if literal && (name == "echo" || name == "printf") {
-					for _, arg := range call.Args[1:] {
-						syntax.Walk(arg, func(part syntax.Node) bool {
-							if p, ok := part.(*syntax.ParamExp); ok {
-								outputParams[int(p.Pos().Offset())] = true
-							}
-							return true
-						})
-					}
-				}
+		analyzeShellUnit(file, unit, settings, codex)
+	}
+	return settings, codex
+}
+
+func makeEffortFindings(lines []string) map[int]string {
+	settings := map[int]string{}
+	for i, line := range lines {
+		if strings.Contains(line, "\t") {
+			continue
+		}
+		trim := strings.TrimSpace(line)
+		key, rhs, found := strings.Cut(trim, "?=")
+		if !found {
+			key, rhs, found = strings.Cut(trim, ":=")
+		}
+		if !found {
+			key, rhs, _ = strings.Cut(trim, "=")
+		}
+		if strings.Contains(strings.ToLower(key), "effort") {
+			if value := literalEffort(strings.TrimSpace(rhs)); value != "" {
+				settings[i+1] = value
 			}
-			r, ok := n.(*syntax.Redirect)
-			if !ok || r.Hdoc == nil {
-				return true
-			}
-			syntax.Walk(r.Hdoc, func(part syntax.Node) bool {
-				if p, ok := part.(*syntax.ParamExp); ok {
-					heredocParams[int(p.Pos().Offset())] = true
-				}
-				return true
-			})
-			return true
-		})
-		syntax.Walk(file, func(n syntax.Node) bool {
-			if n == nil {
-				return false
-			}
-			switch x := n.(type) {
-			case *syntax.ParamExp:
-				if heredocParams[int(x.Pos().Offset())] || outputParams[int(x.Pos().Offset())] {
-					return true
-				}
-				if x.Param != nil && strings.Contains(strings.ToLower(x.Param.Value), "effort") && isDefaultExpansion(x) && x.Exp.Word != nil {
-					if v, lit := wordValue(x.Exp.Word); lit {
-						if low := literalEffort(v); low != "" {
-							settings[unit.LineAt(int(x.Pos().Offset()))] = low
-						}
-					}
-				}
-			case *syntax.Assign:
-				if x.Name != nil && strings.Contains(strings.ToLower(x.Name.Value), "effort") && x.Value != nil {
-					if v, lit := wordValue(x.Value); lit {
-						if low := literalEffort(v); low != "" {
-							settings[unit.LineAt(int(x.Pos().Offset()))] = low
-						}
-					}
-				}
-				if x.Value != nil {
-					syntax.Walk(x.Value, func(child syntax.Node) bool {
-						p, ok := child.(*syntax.ParamExp)
-						if ok && isDefaultExpansion(p) && p.Exp.Word != nil && x.Name != nil && strings.Contains(strings.ToLower(x.Name.Value), "effort") {
-							if v, lit := wordValue(p.Exp.Word); lit {
-								if low := literalEffort(v); low != "" {
-									settings[unit.LineAt(int(p.Pos().Offset()))] = low
-								}
-							}
+		}
+	}
+	return settings
+}
+
+func analyzeShellUnit(file *syntax.File, unit patternkit.ShellLine, settings, codex map[int]string) {
+	heredocParams, outputParams := shellExcludedParams(file)
+	syntax.Walk(file, func(n syntax.Node) bool {
+		if n == nil {
+			return false
+		}
+		switch node := n.(type) {
+		case *syntax.ParamExp:
+			analyzeShellParam(node, unit, heredocParams, outputParams, settings)
+		case *syntax.Assign:
+			analyzeShellAssign(node, unit, settings)
+		case *syntax.CallExpr:
+			analyzeShellCall(node, unit, settings, codex)
+		}
+		return true
+	})
+}
+
+func shellExcludedParams(file *syntax.File) (map[int]bool, map[int]bool) {
+	heredocParams, outputParams := map[int]bool{}, map[int]bool{}
+	syntax.Walk(file, func(n syntax.Node) bool {
+		if call, ok := n.(*syntax.CallExpr); ok && len(call.Args) > 0 {
+			name, literal := wordValue(call.Args[0])
+			if literal && (name == "echo" || name == "printf") {
+				for _, arg := range call.Args[1:] {
+					syntax.Walk(arg, func(part syntax.Node) bool {
+						if param, ok := part.(*syntax.ParamExp); ok {
+							outputParams[int(param.Pos().Offset())] = true
 						}
 						return true
 					})
 				}
-			case *syntax.CallExpr:
-				words := make([]string, len(x.Args))
-				lits := make([]bool, len(x.Args))
-				for i, w := range x.Args {
-					words[i], lits[i] = wordValue(w)
-				}
-				cmd := effortShellCommandIndex(x)
-				line := unit.LineAt(int(x.Pos().Offset()))
-				if cmd >= 0 && cmd < len(words) {
-					name := words[cmd]
-					if name == "claude" || name == "opencode" {
-						for i := cmd + 1; i < len(words); i++ {
-							if !lits[i] {
-								continue
-							}
-							var next string
-							nextLiteral := i+1 < len(words) && lits[i+1]
-							if nextLiteral {
-								next = words[i+1]
-							}
-							if low := effortArgumentValue(words[i], next, nextLiteral); low != "" {
-								settings[line] = low
-							} else if words[i] == "--effort" && i+1 < len(words) {
-								if low := shellWordFallback(x.Args[i+1]); low != "" {
-									settings[line] = low
-								}
-							}
-						}
-					}
-				}
-				if cmd >= 0 && cmd < len(words) && words[cmd] == "codex" {
-					idx, sub := codexSubcommand(words, lits, cmd+1)
-					if idx >= 0 && (sub == "exec" || sub == "e") && !hasArg(words[cmd+1:], lits[cmd+1:], "--help") && !hasArg(words[cmd+1:], lits[cmd+1:], "-h") {
-						v, explicit := shellCodexOptions(words, lits, cmd+1)
-						if message := codexEffortMessage(v, explicit); message != "" {
-							codex[line] = message
-						}
-					}
-				}
+			}
+		}
+		redirect, ok := n.(*syntax.Redirect)
+		if !ok || redirect.Hdoc == nil {
+			return true
+		}
+		syntax.Walk(redirect.Hdoc, func(part syntax.Node) bool {
+			if param, ok := part.(*syntax.ParamExp); ok {
+				heredocParams[int(param.Pos().Offset())] = true
 			}
 			return true
 		})
+		return true
+	})
+	return heredocParams, outputParams
+}
+
+func analyzeShellParam(param *syntax.ParamExp, unit patternkit.ShellLine, heredocParams, outputParams map[int]bool, settings map[int]string) {
+	if heredocParams[int(param.Pos().Offset())] || outputParams[int(param.Pos().Offset())] || param.Param == nil || !strings.Contains(strings.ToLower(param.Param.Value), "effort") || !isDefaultExpansion(param) || param.Exp.Word == nil {
+		return
 	}
-	return settings, codex
+	if value, literal := wordValue(param.Exp.Word); literal {
+		if low := literalEffort(value); low != "" {
+			settings[unit.LineAt(int(param.Pos().Offset()))] = low
+		}
+	}
+}
+
+func analyzeShellAssign(assign *syntax.Assign, unit patternkit.ShellLine, settings map[int]string) {
+	if assign.Name != nil && strings.Contains(strings.ToLower(assign.Name.Value), "effort") && assign.Value != nil {
+		if value, literal := wordValue(assign.Value); literal {
+			if low := literalEffort(value); low != "" {
+				settings[unit.LineAt(int(assign.Pos().Offset()))] = low
+			}
+		}
+	}
+	if assign.Value == nil || assign.Name == nil || !strings.Contains(strings.ToLower(assign.Name.Value), "effort") {
+		return
+	}
+	syntax.Walk(assign.Value, func(child syntax.Node) bool {
+		param, ok := child.(*syntax.ParamExp)
+		if ok && isDefaultExpansion(param) && param.Exp.Word != nil {
+			if value, literal := wordValue(param.Exp.Word); literal {
+				if low := literalEffort(value); low != "" {
+					settings[unit.LineAt(int(param.Pos().Offset()))] = low
+				}
+			}
+		}
+		return true
+	})
+}
+
+func analyzeShellCall(call *syntax.CallExpr, unit patternkit.ShellLine, settings, codex map[int]string) {
+	words, literals := shellCallWords(call)
+	command := effortShellCommandIndex(call)
+	if command < 0 || command >= len(words) {
+		return
+	}
+	line := unit.LineAt(int(call.Pos().Offset()))
+	if words[command] == "claude" || words[command] == "opencode" {
+		shellCLIArguments(call, command, words, literals, line, settings)
+	}
+	if words[command] == "codex" {
+		shellCodexArguments(words, literals, command, line, codex)
+	}
+}
+
+func shellCallWords(call *syntax.CallExpr) ([]string, []bool) {
+	words, literals := make([]string, len(call.Args)), make([]bool, len(call.Args))
+	for i, arg := range call.Args {
+		words[i], literals[i] = wordValue(arg)
+	}
+	return words, literals
+}
+
+func shellCLIArguments(call *syntax.CallExpr, command int, words []string, literals []bool, line int, settings map[int]string) {
+	for i := command + 1; i < len(words); i++ {
+		if !literals[i] {
+			continue
+		}
+		nextLiteral := i+1 < len(words) && literals[i+1]
+		next := ""
+		if nextLiteral {
+			next = words[i+1]
+		}
+		if low := effortArgumentValue(words[i], next, nextLiteral); low != "" {
+			settings[line] = low
+		} else if words[i] == "--effort" && i+1 < len(words) {
+			if low := shellWordFallback(call.Args[i+1]); low != "" {
+				settings[line] = low
+			}
+		}
+	}
+}
+
+func shellCodexArguments(words []string, literals []bool, command, line int, codex map[int]string) {
+	idx, sub := codexSubcommand(words, literals, command+1)
+	if idx < 0 || (sub != "exec" && sub != "e") || hasArg(words[command+1:], literals[command+1:], "--help") || hasArg(words[command+1:], literals[command+1:], "-h") {
+		return
+	}
+	value, explicit := shellCodexOptions(words, literals, command+1)
+	if message := codexEffortMessage(value, explicit); message != "" {
+		codex[line] = message
+	}
 }
 
 // shellWordFallback returns a low default nested in a shell parameter expansion.
@@ -710,34 +793,44 @@ func effortShellCommandIndex(c *syntax.CallExpr) int {
 			return -1
 		}
 		i++
-		for i < len(c.Args) {
-			a, l := wordValue(c.Args[i])
-			if !l || !strings.HasPrefix(a, "-") {
-				break
-			}
-			i++
-			if wrapperOptionTakesValue(w, a) && i < len(c.Args) {
-				i++
-			}
-		}
+		i = skipWrapperOptions(c.Args, i, w)
 		if w == "timeout" && i < len(c.Args) {
 			i++
 		}
 		if w == "env" {
-			for i < len(c.Args) {
-				a, l := wordValue(c.Args[i])
-				if !l || !isAssignmentWord(a) {
-					break
-				}
-				i++
-			}
+			i = skipEnvAssignments(c.Args, i)
 		}
 	}
 	return -1
 }
 
+func skipWrapperOptions(args []*syntax.Word, i int, wrapper string) int {
+	for i < len(args) {
+		arg, literal := wordValue(args[i])
+		if !literal || !strings.HasPrefix(arg, "-") {
+			break
+		}
+		i++
+		if wrapperOptionTakesValue(wrapper, arg) && i < len(args) {
+			i++
+		}
+	}
+	return i
+}
+
+func skipEnvAssignments(args []*syntax.Word, i int) int {
+	for i < len(args) {
+		arg, literal := wordValue(args[i])
+		if !literal || !isAssignmentWord(arg) {
+			break
+		}
+		i++
+	}
+	return i
+}
+
 // jsLaunchFindings inspects process launches and their literal command arguments.
-func jsLaunchFindings(ctx *core.FileContext, lines []string) (map[int]string, map[int]string) {
+func jsLaunchFindings(lines []string) (map[int]string, map[int]string) {
 	codex, cli := map[int]string{}, map[int]string{}
 	for i, line := range lines {
 		if !lineRelevant(line) {

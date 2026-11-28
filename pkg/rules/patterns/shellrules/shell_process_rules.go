@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -682,10 +683,9 @@ func checkTrapRemovesResults(r *shellRule, src *patternkit.ShellSource) []*core.
 		return nil
 	}
 	errexit := errexitSetting.MatchString(strings.Join(src.Ctx.Lines, "\n"))
-	// The copies of each line and its exit on failure are found once, on
-	// the first trap, not again for every trap above the line.
-	var copies [][]lineCopy
-	var exits []bool
+	var copyLines map[string][]int
+	var exitPrefix []int
+	indexed := false
 	var out []*core.Violation
 	for i, l := range src.Lines {
 		m := trapRemove.FindStringSubmatch(l.Text)
@@ -696,28 +696,108 @@ func checkTrapRemovesResults(r *shellRule, src *patternkit.ShellSource) []*core.
 		if dir == nil {
 			continue
 		}
-		fromDir := regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?/`)
-		inDir := regexp.MustCompile(`^"?\$\{?` + dir[1] + `\}?(?:/|"|$)`)
-		if copies == nil {
-			copies, exits = make([][]lineCopy, len(src.Lines)), make([]bool, len(src.Lines))
-			for j, later := range src.Lines {
-				copies[j], exits[j] = lineCopies(later.Text), failExit.MatchString(later.Text)
-			}
+		if !indexed {
+			copyLines, exitPrefix = indexTrapLines(src.Lines)
+			indexed = true
 		}
-		failed := errexit
-		for j := i + 1; j < len(src.Lines); j++ {
-			if copiesOut(copies[j], fromDir, inDir) {
-				if failed {
-					out = appendReport(out, src.Report(r, l.LineAt(0),
-						"The trap removes $"+dir[1]+" on exit, and a failed run exits before the results are copied out of it — the log of the failure is removed with the directory",
-						"Copy the results out in the trap before removing the directory, or copy them before any exit on failure"))
-				}
-				break
-			}
-			failed = failed || exits[j]
+		firstCopy, ok := nextCopyLine(copyLines[dir[1]], i+1)
+		if !ok {
+			continue
+		}
+		failedBeforeCopy := exitPrefix[firstCopy] > exitPrefix[i+1]
+		if errexit || failedBeforeCopy {
+			out = appendReport(out, src.Report(r, l.LineAt(0),
+				"The trap removes $"+dir[1]+" on exit, and a failed run exits before the results are copied out of it — the log of the failure is removed with the directory",
+				"Copy the results out in the trap before removing the directory, or copy them before any exit on failure"))
 		}
 	}
 	return out
+}
+
+func indexTrapLines(lines []patternkit.ShellLine) (map[string][]int, []int) {
+	copyLines := map[string][]int{}
+	exitPrefix := make([]int, len(lines)+1)
+	for i, line := range lines {
+		exitPrefix[i+1] = exitPrefix[i]
+		if failExit.MatchString(line.Text) {
+			exitPrefix[i+1]++
+		}
+		indexTrapCopies(lineCopies(line.Text), i, copyLines)
+	}
+	return copyLines, exitPrefix
+}
+
+func indexTrapCopies(copies []lineCopy, line int, index map[string][]int) {
+	for _, copy := range copies {
+		if copy.dest == "" {
+			continue
+		}
+		for _, source := range copy.sources {
+			if variable, ok := shellPathVariable(source); ok && !shellDestinationWithin(copy.dest, variable) {
+				index[variable] = append(index[variable], line)
+			}
+		}
+	}
+}
+
+func shellPathVariable(path string) (string, bool) {
+	path = strings.TrimPrefix(path, `"`)
+	if !strings.HasPrefix(path, "$") {
+		return "", false
+	}
+	path = path[1:]
+	braced := strings.HasPrefix(path, "{")
+	if braced {
+		path = path[1:]
+	}
+	i := 0
+	for i < len(path) && (path[i] == '_' || path[i] >= 'a' && path[i] <= 'z' || path[i] >= 'A' && path[i] <= 'Z' || i > 0 && path[i] >= '0' && path[i] <= '9') {
+		i++
+	}
+	if i == 0 {
+		return "", false
+	}
+	name := path[:i]
+	path = path[i:]
+	if braced {
+		if !strings.HasPrefix(path, "}/") {
+			return "", false
+		}
+	} else if !strings.HasPrefix(path, "/") {
+		return "", false
+	}
+	return name, true
+}
+
+func nextCopyLine(lines []int, after int) (int, bool) {
+	i := sort.SearchInts(lines, after)
+	if i >= len(lines) {
+		return 0, false
+	}
+	return lines[i], true
+}
+
+func shellDestinationWithin(path, variable string) bool {
+	path = strings.TrimPrefix(path, `"`)
+	if !strings.HasPrefix(path, "$") {
+		return false
+	}
+	path = path[1:]
+	braced := strings.HasPrefix(path, "{")
+	if braced {
+		path = path[1:]
+	}
+	if !strings.HasPrefix(path, variable) {
+		return false
+	}
+	path = path[len(variable):]
+	if braced {
+		if !strings.HasPrefix(path, "}") {
+			return false
+		}
+		path = path[1:]
+	}
+	return path == "" || strings.HasPrefix(path, "/") || strings.HasPrefix(path, `"`)
 }
 
 // lineCopy is a cp or mv of a line: its sources and its destination.
@@ -737,15 +817,6 @@ func lineCopies(line string) []lineCopy {
 		}
 	}
 	return found
-}
-
-// copiesOut reports a copy of the line that takes a source from the
-// directory and puts it outside; a copy into it (cp "$bin" "$work/") or
-// within it does not count.
-func copiesOut(copies []lineCopy, fromDir, inDir *regexp.Regexp) bool {
-	return slices.ContainsFunc(copies, func(c lineCopy) bool {
-		return c.dest != "" && !inDir.MatchString(c.dest) && slices.ContainsFunc(c.sources, fromDir.MatchString)
-	})
 }
 
 var redirectOp = regexp.MustCompile(`^(?:\d*[<>]+&?|&>>?)`)
