@@ -140,6 +140,7 @@ type libraryCacheEntry struct {
 	Keys   map[string][]libraryFunction `json:"keys"`
 	Near   []libraryNearFunction        `json:"near,omitempty"`
 	Inline []inlineFunction             `json:"inline,omitempty"`
+	Runs   []inlineRunFunction          `json:"runs,omitempty"`
 }
 type libraryMatch struct {
 	name, module, packageName, importPath string
@@ -151,11 +152,13 @@ type libraryMatch struct {
 // bodies of their Go functions and the near forms of their Go and TypeScript
 // functions.
 type moduleLibrary struct {
-	keys         map[string]libraryMatch
-	goCandidates []*nearCandidate
-	goNear       *nearIndex
-	tsNear       []*nearCandidate
-	inline       []inlineCandidate
+	keys                map[string]libraryMatch
+	goCandidates        []*nearCandidate
+	goNear              *nearIndex
+	tsNear              []*nearCandidate
+	inline              []inlineCandidate
+	inlineRunCandidates []inlineRunCandidate
+	inlineRuns          *inlineRunIndex
 }
 type goModule struct{ path, dir, goMod string }
 
@@ -255,6 +258,7 @@ func (r *DuplicateFuncOfLibraryRule) mergePeerModules(lib *moduleLibrary, projec
 		}
 	}
 	lib.goNear = newNearIndex(lib.goCandidates, minGoNearCopyTokens)
+	lib.inlineRuns = newInlineRunIndex(lib.inlineRunCandidates)
 }
 
 func peerModules(project goModule, roots []string) ([]goModule, error) {
@@ -468,6 +472,7 @@ func (r *DuplicateFuncOfLibraryRule) loadModuleLibraryKeys(m goModule, allowed [
 		r.mergeDependencyKeys(lib, m, dep, cache)
 	}
 	lib.goNear = newNearIndex(lib.goCandidates, minGoNearCopyTokens)
+	lib.inlineRuns = newInlineRunIndex(lib.inlineRunCandidates)
 	return lib
 }
 
@@ -521,6 +526,12 @@ func (r *DuplicateFuncOfLibraryRule) mergeDependencyKeys(lib *moduleLibrary, pro
 			lib.inline = append(lib.inline, inlineCandidate{inlineFunction: fn, module: dep.path})
 		}
 	}
+	for i := range entry.Runs {
+		fn := &entry.Runs[i]
+		if packageImportableFrom(project.path, fn.ImportPath) {
+			lib.inlineRunCandidates = append(lib.inlineRunCandidates, inlineRunCandidate{inlineRunFunction: *fn, module: dep.path})
+		}
+	}
 }
 
 // mergeNearFunctions adds the near forms of the entry: the Go functions the
@@ -564,7 +575,7 @@ func mergeImportableFunctions(keys map[string]libraryMatch, project goModule, de
 }
 
 func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectContext, file *core.FileContext, info *types.Info, lib *moduleLibrary, projectPath string) []*core.Violation {
-	if lib == nil || len(lib.keys) == 0 && lib.goNear.empty() && len(lib.inline) == 0 {
+	if lib == nil || len(lib.keys) == 0 && lib.goNear.empty() && len(lib.inline) == 0 && (lib.inlineRuns == nil || len(lib.inlineRuns.first) == 0) {
 		return nil
 	}
 	var out []*core.Violation
@@ -574,6 +585,7 @@ func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectCo
 			continue
 		}
 		if !nearCopyCandidate(fd, info) {
+			out = append(out, r.inlineRunDuplicates(ctx, file, info, fd, lib)...)
 			out = append(out, r.inlineDuplicates(ctx, file, info, fd, lib)...)
 			continue
 		}
@@ -592,6 +604,7 @@ func (r *DuplicateFuncOfLibraryRule) findLibraryDuplicates(ctx *core.GoProjectCo
 			return !candidate.fn.peer || sameStrings(functionTypeSet, stringSet(candidate.fn.types))
 		})
 		if candidate == nil {
+			out = append(out, r.inlineRunDuplicates(ctx, file, info, fd, lib)...)
 			out = append(out, r.inlineDuplicates(ctx, file, info, fd, lib)...)
 			continue
 		}
@@ -1156,6 +1169,9 @@ func loadFunctionKeys(dir string, includeUnexported bool) (libraryCacheEntry, er
 					modulePath := pkg.PkgPath
 					if pkg.Module != nil {
 						modulePath = pkg.Module.Path
+					}
+					if run, found := inlineRunLibraryFunction(fd, pkg.TypesInfo, pkg.PkgPath, pkg.Name); found {
+						entry.Runs = append(entry.Runs, run)
 					}
 					if fn, found := inlineLibraryFunction(fd, pkg.TypesInfo, pkg.PkgPath, pkg.Name, modulePath); found {
 						entry.Inline = append(entry.Inline, fn)
