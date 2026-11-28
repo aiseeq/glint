@@ -412,6 +412,117 @@ type inlineCandidate struct {
 	module string
 }
 
+// inlineRunFunction stores the normalized statements before an exported
+// library function's final return. Tokens use the same local-name normalization
+// as near-body comparison, so callers may rename every local.
+type inlineRunFunction struct {
+	libraryFunction
+	Statements int      `json:"statements"`
+	First      []string `json:"first"`
+	Body       nearBody `json:"body"`
+}
+
+type inlineRunCandidate struct {
+	inlineRunFunction
+	module string
+}
+
+type inlineRunIndex struct {
+	first map[string][]inlineRunCandidate
+}
+
+func newInlineRunIndex(candidates []inlineRunCandidate) *inlineRunIndex {
+	idx := &inlineRunIndex{first: make(map[string][]inlineRunCandidate)}
+	for i := range candidates {
+		candidate := &candidates[i]
+		key := strings.Join(candidate.First, "\x00")
+		idx.first[key] = append(idx.first[key], *candidate)
+	}
+	return idx
+}
+
+// inlineRunLibraryFunction keeps a run only when a complete library body ends
+// in return and its preceding statements meet the existing near-copy token
+// floor. Four or more copied statements also prevent short utility fragments
+// from entering the index.
+func inlineRunLibraryFunction(fd *ast.FuncDecl, info *types.Info, pkgPath, pkgName string) (inlineRunFunction, bool) {
+	if fd.Body == nil || fd.Recv != nil || !fd.Name.IsExported() || len(fd.Body.List) < 5 {
+		return inlineRunFunction{}, false
+	}
+	if _, ok := fd.Body.List[len(fd.Body.List)-1].(*ast.ReturnStmt); !ok {
+		return inlineRunFunction{}, false
+	}
+	statements := len(fd.Body.List) - 1
+	prefix := inlineRunBody(info, fd, statements, true)
+	if len(prefix.Tokens) < minGoNearCopyTokens {
+		return inlineRunFunction{}, false
+	}
+	first := inlineRunBody(info, fd, 1, false)
+	return inlineRunFunction{
+		libraryFunction: libraryFunction{Name: fd.Name.Name, Package: pkgName, ImportPath: pkgPath},
+		Statements:      statements,
+		First:           first.Tokens,
+		Body:            prefix,
+	}, true
+}
+
+func inlineRunBody(info *types.Info, fd *ast.FuncDecl, statements int, detailed bool) nearBody {
+	copy := *fd
+	body := *fd.Body
+	body.List = fd.Body.List[:statements]
+	copy.Body = &body
+	return goNearBody(info, &copy, detailed)
+}
+
+func (r *DuplicateFuncOfLibraryRule) inlineRunDuplicates(ctx *core.GoProjectContext, file *core.FileContext, info *types.Info, fd *ast.FuncDecl, lib *moduleLibrary) []*core.Violation {
+	if lib.inlineRuns == nil || len(lib.inlineRuns.first) == 0 || len(fd.Body.List) == 0 {
+		return nil
+	}
+	first := inlineRunBody(info, fd, 1, false).Tokens
+	candidates := lib.inlineRuns.first[strings.Join(first, "\x00")]
+	for i := range candidates {
+		candidate := &candidates[i]
+		if candidate.Statements >= len(fd.Body.List) || candidate.Statements < 4 {
+			continue
+		}
+		prefix := inlineRunBody(info, fd, candidate.Statements, true)
+		if len(prefix.Tokens) < minGoNearCopyTokens || !slices.Equal(prefix.Tokens, candidate.Body.Tokens) {
+			continue
+		}
+		if !inlineRunHasNovelContinuation(info, fd, candidate.Statements, candidate.Body) {
+			continue
+		}
+		match := libraryMatch{name: candidate.Name, module: candidate.module, packageName: candidate.Package, importPath: candidate.ImportPath}
+		if !sameRoles(newNearCandidate(match, candidate.Body), prefix) {
+			continue
+		}
+		line := ctx.FileSet.Position(fd.Body.List[0].Pos()).Line
+		if file.IsSuppressed(line, r.Name()) {
+			return nil
+		}
+		return []*core.Violation{r.libraryViolation(file, fd, line, match, 1, false)}
+	}
+	return nil
+}
+
+func inlineRunHasNovelContinuation(info *types.Info, fd *ast.FuncDecl, statements int, prefix nearBody) bool {
+	copy := *fd
+	body := *fd.Body
+	body.List = fd.Body.List[statements : statements+1]
+	copy.Body = &body
+	continuation := goNearBody(info, &copy, true)
+	if len(continuation.Roles) == 0 {
+		return false
+	}
+	shape := continuation.Roles[0].Shape
+	for i := range prefix.Roles {
+		if prefix.Roles[i].Shape == shape {
+			return false
+		}
+	}
+	return true
+}
+
 // inlineWrites reports whether stmt, its branches included, declares or
 // assigns the place.
 func inlineWrites(info *types.Info, stmt ast.Stmt, target inlinePlace) bool {
